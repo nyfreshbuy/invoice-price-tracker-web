@@ -1,6 +1,7 @@
 const API_BASE = (import.meta.env.VITE_API_BASE_URL || 'http://localhost:3000').replace(/\/$/, '');
 const AUTH_KEY = 'invoicePriceTrackerAuth';
-export const DEMO_NO_AUTH = import.meta.env.VITE_DEMO_NO_AUTH !== 'false';
+export const AUTO_LOGIN = import.meta.env.VITE_AUTO_LOGIN === 'true';
+export const DEMO_NO_AUTH = AUTO_LOGIN || import.meta.env.VITE_DEMO_NO_AUTH !== 'false';
 export const DEMO_SESSION = {
   token: '',
   user: {
@@ -40,6 +41,12 @@ export function getAuthToken() {
 
 export function getCompanyId() {
   return getAuthSession()?.company?.id || getAuthSession()?.user?.companyId || '';
+}
+
+export function fileUrl(path) {
+  if (!path) return '';
+  if (/^https?:\/\//.test(path)) return path;
+  return `${API_BASE}${path.startsWith('/') ? path : `/${path}`}`;
 }
 
 async function request(path, options = {}) {
@@ -99,6 +106,11 @@ export const api = {
   getRecognitionTask: (id) => request(`/api/invoice-recognition/tasks/${id}`),
   retryRecognitionTask: (id) => request(`/api/invoice-recognition/tasks/${id}/retry`, { method: 'POST' }),
   forceSaveRecognitionTask: (id) => request(`/api/invoice-recognition/tasks/${id}/force-save`, { method: 'POST' }),
+  decideRecognitionTask: (id, action) => request(`/api/invoice-recognition/tasks/${id}/decision`, { method: 'POST', body: JSON.stringify({ action }) }),
+  pauseRecognitionBatch: (batchId) => request(`/api/invoice-recognition/batches/${encodeURIComponent(batchId)}/pause`, { method: 'POST' }),
+  resumeRecognitionBatch: (batchId) => request(`/api/invoice-recognition/batches/${encodeURIComponent(batchId)}/resume`, { method: 'POST' }),
+  cancelRecognitionBatch: (batchId) => request(`/api/invoice-recognition/batches/${encodeURIComponent(batchId)}/cancel`, { method: 'POST' }),
+  fileUrl,
   syncPush: (payload) => request('/api/sync/push', { method: 'POST', body: JSON.stringify(payload) }),
   syncPull: (since) => request(`/api/sync/pull${since ? `?since=${encodeURIComponent(since)}` : ''}`)
 };

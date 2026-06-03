@@ -2,6 +2,7 @@ import fs from 'node:fs';
 import Tesseract from 'tesseract.js';
 import {
   findTemplateByOcrText,
+  findTemplateBySupplierHint,
   hashImageFile,
   markTemplateFailure,
   markTemplateSuccess,
@@ -16,54 +17,76 @@ export async function recognizeInvoice(file, options = {}) {
   const imageBuffer = fs.readFileSync(file.path);
   const sampleImageHash = hashImageFile(imageBuffer);
   const imagePath = `/uploads/${file.filename}`;
+  const supplierHint = [options.supplierHint, file.originalname].filter(Boolean).join(' ');
 
-  const ocr = await runPlainOcr(file.path);
-  const ocrLanguage = ocr.ocrLanguage;
-  const template = await findTemplateByOcrText(ocr.ocrText, companyId);
-  if (template && template.failCount < 3) {
-    const templated = parseWithTemplate(ocr.ocrText, template);
+  let ocrText = '';
+  let ocrLanguage = '';
+  const hintedTemplate = await findTemplateBySupplierHint(supplierHint, companyId);
+  if (hintedTemplate && hintedTemplate.failCount < 3) {
+    const ocr = await runPlainOcr(file.path);
+    ocrText = ocr.ocrText;
+    ocrLanguage = ocr.ocrLanguage;
+    const templated = parseWithTemplate(ocrText, hintedTemplate);
     if (templated.success) {
-      await markTemplateSuccess(template.id, companyId);
+      await markTemplateSuccess(hintedTemplate.id, companyId);
       return responsePayload({
         source: 'template',
         imagePath,
-        ocrText: ocr.ocrText,
+        ocrText,
         result: templated.result,
-        template,
+        template: hintedTemplate,
         sampleImageHash,
         ocrLanguage
       });
     }
-    await markTemplateFailure(template.id, companyId);
+    await markTemplateFailure(hintedTemplate.id, companyId);
   }
 
-  let aiResult;
-  let learnedTemplate;
   try {
-    aiResult = await recognizeInvoiceWithAI(file.path, { mimeType: file.mimetype });
-    learnedTemplate = await saveOrUpdateTemplateFromResult(aiResult, sampleImageHash, companyId);
+    const aiResult = await recognizeInvoiceWithAI(file.path, { mimeType: file.mimetype });
+    const learnedTemplate = await saveOrUpdateTemplateFromResult(aiResult, sampleImageHash, companyId);
+    return responsePayload({
+      source: 'ai',
+      imagePath,
+      ocrText,
+      result: aiResult,
+      template: learnedTemplate,
+      sampleImageHash,
+      ocrLanguage
+    });
   } catch (error) {
-    const fallbackResult = parsePlainOcrFallback(ocr.ocrText, error);
+    const ocr = ocrText ? { ocrText, ocrLanguage } : await runPlainOcr(file.path);
+    ocrText = ocr.ocrText;
+    ocrLanguage = ocr.ocrLanguage;
+
+    const template = await findTemplateByOcrText(ocrText, companyId);
+    if (template && template.failCount < 3) {
+      const templated = parseWithTemplate(ocrText, template);
+      if (templated.success) {
+        await markTemplateSuccess(template.id, companyId);
+        return responsePayload({
+          source: 'template',
+          imagePath,
+          ocrText,
+          result: templated.result,
+          template,
+          sampleImageHash,
+          ocrLanguage
+        });
+      }
+      await markTemplateFailure(template.id, companyId);
+    }
+
     return responsePayload({
       source: 'plain_ocr',
       imagePath,
-      ocrText: ocr.ocrText,
-      result: fallbackResult,
+      ocrText,
+      result: parsePlainOcrFallback(ocrText, error),
       template: null,
       sampleImageHash,
       ocrLanguage
     });
   }
-
-  return responsePayload({
-    source: 'ai',
-    imagePath,
-    ocrText: ocr.ocrText,
-    result: aiResult,
-    template: learnedTemplate,
-    sampleImageHash,
-    ocrLanguage
-  });
 }
 
 export async function runPlainOcr(imagePath) {
@@ -82,22 +105,35 @@ function responsePayload({ source, imagePath, ocrText, result, template, sampleI
   const recognitionSource = source === 'template' ? '模板' : source === 'ai' ? 'AI Vision' : 'OCR';
   const usedTemplate = source === 'template';
   const usedAI = source === 'ai';
+  const calculatedTotal = result.items.reduce((sum, item) => sum + Number(item.totalPrice || item.amount || 0), 0);
+  const invoiceTotal = Number(result.totalAmount || 0);
+  const totalDifference = invoiceTotal > 0 ? Math.abs(calculatedTotal - invoiceTotal) : 0;
+  const warnings = [...(result.warnings || [])];
+  if (invoiceTotal > 0 && totalDifference > 0.05) {
+    warnings.push('商品明细与发票总额不一致，请检查。');
+  }
+
   const parsed = {
     supplierName: result.supplierName,
     invoiceNo: result.invoiceNo,
     invoiceDate: normalizeInvoiceDate(result.invoiceDate),
     totalAmount: result.totalAmount,
+    invoiceTotal,
+    calculatedTotal,
+    totalDifference,
     items: result.items.map((item) => {
       const displayName = item.name || [item.nameCn, item.nameEn].filter(Boolean).join(' ');
-      const normalizedName = item.normalizedName || displayName.trim().toLowerCase();
+      const standardName = item.standardName || displayName;
+      const normalizedName = item.normalizedName || standardName.trim().toLowerCase();
       return {
         nameCn: item.nameCn || '',
         nameEn: item.nameEn || '',
-        name: displayName,
+        name: standardName,
+        standardName,
         normalizedName,
         barcode: item.barcode || '',
         spec: item.spec || '',
-        productNameOriginal: displayName,
+        productNameOriginal: standardName,
         productNameNormalized: normalizedName,
         category: '',
         quantity: item.qty || 0,
@@ -110,7 +146,7 @@ function responsePayload({ source, imagePath, ocrText, result, template, sampleI
     }),
     templateCandidate: result.templateCandidate,
     confidence: result.confidence,
-    warnings: result.warnings
+    warnings
   };
 
   return {
@@ -126,7 +162,7 @@ function responsePayload({ source, imagePath, ocrText, result, template, sampleI
     aiResult: result,
     templateId: template?.id || null,
     sampleImageHash,
-    message: source === 'template' ? 'Template OCR parsed invoice' : 'AI Vision parsed invoice'
+    message: source === 'template' ? 'Template parsed invoice' : source === 'ai' ? 'AI Vision parsed invoice' : 'OCR fallback parsed invoice'
   };
 }
 
@@ -136,7 +172,7 @@ function parsePlainOcrFallback(ocrText, aiError) {
   const items = [];
 
   for (const line of lines) {
-    if (/total|subtotal|tax|invoice|date|合计|总计|小计|税|发票|日期/.test(line.toLowerCase())) continue;
+    if (/total|subtotal|tax|invoice|date|合计|总计|小计|发票|日期/.test(line.toLowerCase())) continue;
     const numbers = line.match(/\d+(?:\.\d+)?/g) || [];
     if (numbers.length < 2) continue;
     const firstNumberIndex = line.search(/\d+(?:\.\d+)?/);
@@ -149,6 +185,7 @@ function parsePlainOcrFallback(ocrText, aiError) {
       nameCn: /[\u3400-\u9fff]/.test(name) ? name : '',
       nameEn: /[\u3400-\u9fff]/.test(name) ? '' : name,
       name,
+      standardName: name,
       normalizedName: name.trim().toLowerCase(),
       barcode: '',
       spec: '',

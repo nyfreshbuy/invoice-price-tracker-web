@@ -5,9 +5,7 @@ const OPENAI_RESPONSES_URL = 'https://api.openai.com/v1/responses';
 
 export async function recognizeInvoiceWithAI(imagePath, options = {}) {
   const apiKey = process.env.OPENAI_API_KEY;
-  if (!apiKey) {
-    throw new Error('OPENAI_API_KEY is not configured');
-  }
+  if (!apiKey) throw new Error('OPENAI_API_KEY is not configured');
 
   const model = process.env.OPENAI_MODEL || 'gpt-4.1-mini';
   const imageBuffer = fs.readFileSync(imagePath);
@@ -29,20 +27,36 @@ export async function recognizeInvoiceWithAI(imagePath, options = {}) {
           {
             type: 'input_text',
             text: [
-              'Extract this supplier invoice into strict JSON.',
-              'Do not save anything. Return only JSON matching the requested schema.',
-              'Do not extract English only. Preserve the original Chinese text from the invoice exactly as printed.',
-              'Do not translate Chinese into English. Do not translate English into Chinese.',
-              'Preserve both Chinese and English product names when both appear for the same item.',
-              'Do not drop Chinese flavor, size, or specification text inside Chinese parentheses.',
-              'If an item has Chinese and English on adjacent lines, return both in the same item.',
-              'If an item only has English, set nameCn to an empty string.',
-              'If an item only has Chinese, set nameEn to an empty string.',
-              'Set name to the display name: nameCn + space + nameEn when both exist.',
-              'Set normalizedName to the same display name, trimmed and lowercased for English letters, without removing Chinese.',
-              'Example item: Chinese line "卡奇锅巴（香辣味）" and English line "K.Q. Rice Chips" must return nameCn "卡奇锅巴（香辣味）", nameEn "K.Q. Rice Chips", name "卡奇锅巴（香辣味） K.Q. Rice Chips", normalizedName "卡奇锅巴（香辣味） k.q. rice chips".',
+              'Extract this supplier invoice into strict JSON. Return only JSON.',
+              'Do not save anything.',
+              'Product names are critical:',
+              '- Do not extract English only.',
+              '- Preserve the original Chinese text exactly as printed.',
+              '- Do not translate Chinese into English.',
+              '- Do not translate English into Chinese.',
+              '- If one product has Chinese and English on adjacent lines, return both in the same item.',
+              '- Preserve Chinese flavor, size, pack, and specification text inside Chinese parentheses.',
+              '- If only English exists, set nameCn to an empty string.',
+              '- If only Chinese exists, set nameEn to an empty string.',
+              '- Set standardName to "nameCn nameEn" when both exist, otherwise the available original name.',
+              '- Set name to the same value as standardName.',
+              '- Set normalizedName to standardName trimmed and lowercased for English letters, without removing Chinese.',
+              'Example:',
+              'Invoice item lines:',
+              '卡奇锅巴（香辣味）',
+              'K.Q. Rice Chips',
+              'Must return:',
+              JSON.stringify({
+                nameCn: '卡奇锅巴（香辣味）',
+                nameEn: 'K.Q. Rice Chips',
+                standardName: '卡奇锅巴（香辣味） K.Q. Rice Chips',
+                name: '卡奇锅巴（香辣味） K.Q. Rice Chips',
+                normalizedName: '卡奇锅巴（香辣味） k.q. rice chips'
+              }),
               'Return invoiceDate as yyyy-MM-dd when possible.',
-              'Use the invoice Total as totalAmount. Do not overwrite it with item sum.',
+              'Use the invoice bottom Total as totalAmount. Do not overwrite it with the item sum.',
+              'Item totals are only for validation.',
+              'If the invoice has a page total, put it in totalAmount for that page.',
               'If unsure, add warnings and lower confidence.',
               'Schema:',
               JSON.stringify(invoiceJsonShape())
@@ -82,6 +96,7 @@ function invoiceJsonShape() {
       {
         nameCn: '',
         nameEn: '',
+        standardName: '',
         name: '',
         normalizedName: '',
         barcode: '',
@@ -99,7 +114,7 @@ function invoiceJsonShape() {
         { name: 'barcode', keywords: ['Code', 'Barcode', 'Item'] },
         { name: 'nameCn', keywords: ['Chinese Name', '中文品名'] },
         { name: 'nameEn', keywords: ['Description', 'Name', 'Product'] },
-        { name: 'name', keywords: ['Description', 'Name'] },
+        { name: 'standardName', keywords: ['Description', 'Name'] },
         { name: 'spec', keywords: ['Size', 'Pack', 'Spec'] },
         { name: 'qty', keywords: ['Qty', 'Quantity'] },
         { name: 'unitPrice', keywords: ['Unit Price', 'Price'] },

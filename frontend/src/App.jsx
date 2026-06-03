@@ -16,7 +16,7 @@ import {
   Upload
 } from 'lucide-react';
 import { api, getAuthSession, setAuthSession } from './api.js';
-import { localDb, today } from './localDb.js';
+import { generateId, localDb, today } from './localDb.js';
 import { getSyncSnapshot, startAutoSync, syncNow } from './syncService.js';
 
 const emptyItem = () => ({
@@ -229,6 +229,7 @@ function BatchImportPage() {
   const [existingInvoices, setExistingInvoices] = useState([]);
   const [message, setMessage] = useState('');
   const [saving, setSaving] = useState(false);
+  const [batchId, setBatchId] = useState('');
 
   useLocalReload(() => localDb.getInvoices().then(setExistingInvoices));
 
@@ -277,6 +278,8 @@ function BatchImportPage() {
   async function handleFilesSelected(files) {
     const fileList = Array.from(files || []);
     if (fileList.length === 0) return;
+    const nextBatchId = generateId();
+    setBatchId(nextBatchId);
     const nextEntries = fileList.map((file) => ({
       id: `${Date.now()}-${Math.random().toString(36).slice(2)}`,
       file,
@@ -299,6 +302,7 @@ function BatchImportPage() {
       updateEntry(entry.id, { status: 'recognizing' });
       const data = new FormData();
       data.append('image', entry.file);
+      data.append('batchId', nextBatchId);
       try {
         const created = await api.createRecognitionTask(data);
         console.log('Batch recognition task:', entry.fileName, created);
@@ -321,6 +325,18 @@ function BatchImportPage() {
     navigate('/recognition-tasks');
   }
 
+  async function controlBatch(action) {
+    if (!batchId) return;
+    try {
+      if (action === 'pause') await api.pauseRecognitionBatch(batchId);
+      if (action === 'resume') await api.resumeRecognitionBatch(batchId);
+      if (action === 'cancel') await api.cancelRecognitionBatch(batchId);
+      setMessage(action === 'pause' ? '已暂停本批次等待中的任务。' : action === 'resume' ? '已继续识别本批次。' : '已取消本批次剩余等待任务。');
+    } catch (error) {
+      setMessage(error.message || '批次控制失败');
+    }
+  }
+
   return (
     <Page title="批量导入发票" subtitle="一次选择多张图片，后台 OCR/AI 识别并自动保存">
       <Section title="选择图片">
@@ -341,6 +357,13 @@ function BatchImportPage() {
             }}
           />
         </div>
+        {batchId && (
+          <div className="row-actions">
+            <button type="button" onClick={() => controlBatch('resume')}>继续识别</button>
+            <button type="button" onClick={() => controlBatch('pause')}>暂停识别</button>
+            <button type="button" className="danger-button" onClick={() => controlBatch('cancel')}>取消剩余识别</button>
+          </div>
+        )}
       </Section>
 
       <Section title="识别结果汇总">
@@ -437,6 +460,31 @@ function RecognitionTaskListPage() {
     }
   }
 
+  async function reuploadTaskImage(task, file) {
+    if (!file) return;
+    try {
+      const data = new FormData();
+      data.append('image', file);
+      if (task.batchId) data.append('batchId', task.batchId);
+      const created = await api.createRecognitionTask(data);
+      setMessage(`已重新上传并创建任务：${created.taskId}`);
+      load();
+    } catch (error) {
+      setMessage(error.message || '重新上传失败');
+    }
+  }
+
+  async function decideTask(taskId, action) {
+    try {
+      await api.decideRecognitionTask(taskId, action);
+      setMessage(action === 'merge' ? '已确认合并。' : action === 'duplicate' ? '已标记为重复。' : '已保留为独立发票。');
+      syncNow();
+      load();
+    } catch (error) {
+      setMessage(error.message || '人工确认失败');
+    }
+  }
+
   return (
     <Page title="识别记录/任务列表" action={<Link className="icon-button" to="/invoices/new"><Plus size={18} />新增</Link>}>
       {message && <p className="error">{message}</p>}
@@ -447,8 +495,11 @@ function RecognitionTaskListPage() {
             <div>
               <h3>{task.originalName || task.id}</h3>
               <p>状态：{recognitionTaskStatusText(task.status)} · 创建时间 {task.createdAt || '-'}</p>
+              {task.batchId && <p>批次：{task.batchId}</p>}
               <p>来源：{task.recognitionSource || sourceLabel(task.source)} · 重试 {task.retryCount || 0} 次</p>
+              {task.imagePath && <img className="invoice-preview" src={api.fileUrl(task.imagePath)} alt={task.originalName || task.id} />}
               {task.result?.parsed && <p>{task.result.parsed.supplierName || '未识别供应商'} · {task.result.parsed.invoiceNo || '无发票号'} · {money(task.result.parsed.totalAmount)}</p>}
+              {task.result?.parsed?.totalDifference > 0.05 && <p className="warning-text">商品明细与发票总额不一致，请检查。差额：{money(task.result.parsed.totalDifference)}</p>}
               {task.result?.duplicateCheck?.isDuplicate && <p className="error">重复发票：{task.result.duplicateCheck.duplicateReason}</p>}
               {task.result?.duplicateCheck?.sameInvoiceGroup && !task.result?.duplicateCheck?.isDuplicate && <p className="warning-text">{task.result.duplicateCheck.sameInvoiceGroupReason}</p>}
               {task.error && <p className="error">{task.error}</p>}
@@ -456,7 +507,29 @@ function RecognitionTaskListPage() {
             <div className="row-actions">
               {task.invoiceId && <Link className="icon-button" to={`/invoices/${task.invoiceId}`}>发票</Link>}
               {task.status === 'failed' && <button onClick={() => retry(task.id)}>重新识别</button>}
+              {task.status === 'failed' && (
+                <label className="icon-button">
+                  重新上传图片
+                  <input
+                    className="hidden-file-input"
+                    type="file"
+                    accept="image/*"
+                    onChange={(event) => {
+                      reuploadTaskImage(task, event.target.files?.[0]);
+                      event.target.value = '';
+                    }}
+                  />
+                </label>
+              )}
+              {task.status === 'failed' && <Link className="icon-button" to="/invoices/new">手动编辑</Link>}
               {task.status === 'completed' && task.result?.duplicateCheck?.isDuplicate && !task.invoiceId && <button onClick={() => forceSave(task.id)}>强制保存</button>}
+              {task.status === 'completed' && task.result?.duplicateCheck?.sameInvoiceGroup && (
+                <>
+                  <button onClick={() => decideTask(task.id, 'merge')}>合并</button>
+                  <button onClick={() => decideTask(task.id, 'duplicate')}>标记重复</button>
+                  <button onClick={() => decideTask(task.id, 'independent')}>保留为独立发票</button>
+                </>
+              )}
             </div>
           </div>
         ))}
@@ -569,6 +642,7 @@ function InvoiceFormPage() {
     setMessage('');
     const data = new FormData();
     data.append('image', file);
+    if (form.supplierName) data.append('supplierHint', form.supplierName);
     try {
       const created = await api.createRecognitionTask(data);
       console.log('Recognition task:', created);
@@ -686,7 +760,7 @@ function InvoiceFormPage() {
 
       {message && <p className="error">{message}</p>}
       <div className="sticky-actions">
-        <button className="primary-button" disabled={saving || ['pending', 'processing'].includes(recognitionTask?.status)} onClick={save}><Save size={18} />{recognitionTask?.invoiceId ? '查看已保存发票' : saving ? '保存中...' : '保存到本机'}</button>
+        <button className="primary-button" disabled={saving || ['waiting', 'pending', 'processing'].includes(recognitionTask?.status)} onClick={save}><Save size={18} />{recognitionTask?.invoiceId ? '查看已保存发票' : saving ? '保存中...' : '保存到本机'}</button>
       </div>
     </Page>
   );
@@ -1021,12 +1095,12 @@ function sourceLabel(source) {
 }
 
 function batchStatusText(entry) {
-  if (entry.status === 'recognizing') return '识别中';
-  if (entry.status === 'failed') return '识别失败';
+  if (entry.status === 'recognizing') return '🔄 识别中';
+  if (entry.status === 'failed') return '❌ 失败';
   if (entry.status === 'success' && entry.isDuplicate) return '重复发票';
   if (entry.status === 'success' && entry.sameInvoiceGroup) return '同发票号不同金额，可能是多页/同批次';
-  if (entry.status === 'success') return '识别成功';
-  return '待识别';
+  if (entry.status === 'success') return '✅ 已完成';
+  return '⏳ 等待中';
 }
 
 function taskStatusToEntryStatus(status) {
@@ -1037,10 +1111,10 @@ function taskStatusToEntryStatus(status) {
 }
 
 function recognitionTaskStatusText(status) {
-  if (status === 'pending') return 'pending';
-  if (status === 'processing') return 'processing';
-  if (status === 'completed') return 'completed';
-  if (status === 'failed') return 'failed';
+  if (status === 'waiting' || status === 'pending') return '⏳ 等待中';
+  if (status === 'processing') return '🔄 识别中';
+  if (status === 'completed') return '✅ 已完成';
+  if (status === 'failed') return '❌ 失败';
   return status || '-';
 }
 

@@ -55,7 +55,8 @@ fs.mkdirSync(uploadDir, { recursive: true });
 const OCR_LANGUAGE = process.env.OCR_LANG || 'eng+chi_sim';
 const OCR_TIMEOUT_MS = Number(process.env.OCR_TIMEOUT_MS || 120000);
 const AUTH_SECRET = process.env.AUTH_SECRET || 'dev-only-change-me';
-const DEMO_NO_AUTH = process.env.DEMO_NO_AUTH !== 'false';
+const AUTO_LOGIN = process.env.AUTO_LOGIN === 'true';
+const DEMO_NO_AUTH = AUTO_LOGIN || process.env.DEMO_NO_AUTH !== 'false';
 const DEMO_COMPANY = { id: 'demo-company', name: '测试公司' };
 const DEMO_USER = {
   id: 'demo-user',
@@ -395,14 +396,18 @@ function taskFileFromRow(task) {
   };
 }
 
-const runningRecognitionTasks = new Set();
+let recognitionQueueRunning = false;
+let currentRecognitionTaskId = '';
+const pausedRecognitionBatches = new Set();
 
-async function createRecognitionTask(file, user, deviceId = 'web') {
+async function createRecognitionTask(file, user, deviceId = 'web', options = {}) {
   const timestamp = nowIso();
   const task = {
     id: id(),
     companyId: user.companyId,
-    status: 'pending',
+    batchId: options.batchId || '',
+    supplierHint: options.supplierHint || '',
+    status: 'waiting',
     imagePath: `/uploads/${file.filename}`,
     filePath: file.path,
     originalName: file.originalname || '',
@@ -424,23 +429,47 @@ async function createRecognitionTask(file, user, deviceId = 'web') {
     deviceId
   };
   await upsertRecord('invoice_recognition_tasks', task);
-  enqueueRecognitionTask(task.id);
+  enqueueRecognitionTask();
   return parseTaskRow(task);
 }
 
-function enqueueRecognitionTask(taskId) {
-  if (!taskId || runningRecognitionTasks.has(taskId)) return;
-  runningRecognitionTasks.add(taskId);
+function enqueueRecognitionTask() {
+  if (recognitionQueueRunning) return;
+  recognitionQueueRunning = true;
   setImmediate(() => {
-    processRecognitionTask(taskId)
-      .catch((error) => console.error('[recognition-task] unhandled failure:', taskId, error))
-      .finally(() => runningRecognitionTasks.delete(taskId));
+    processRecognitionQueue()
+      .catch((error) => console.error('[recognition-queue] unhandled failure:', error))
+      .finally(() => {
+        recognitionQueueRunning = false;
+        currentRecognitionTaskId = '';
+      });
   });
+}
+
+async function nextWaitingRecognitionTask() {
+  const rows = await queryAll(`
+    SELECT * FROM ${quoteTable('invoice_recognition_tasks')}
+    WHERE ${quoteIdentifier('status')} IN ('waiting', 'pending')
+    ORDER BY ${quoteIdentifier('createdAt')} ASC
+    LIMIT 50
+  `);
+  return rows.find((task) => !task.batchId || !pausedRecognitionBatches.has(task.batchId)) || null;
+}
+
+async function processRecognitionQueue() {
+  while (true) {
+    const task = await nextWaitingRecognitionTask();
+    if (!task) return;
+    currentRecognitionTaskId = task.id;
+    await processRecognitionTask(task.id);
+    currentRecognitionTaskId = '';
+  }
 }
 
 async function processRecognitionTask(taskId) {
   const task = await queryGet(`SELECT * FROM ${quoteTable('invoice_recognition_tasks')} WHERE ${quoteIdentifier('id')} = ? LIMIT 1`, [taskId]);
-  if (!task || !['pending', 'processing'].includes(task.status)) return;
+  if (!task || !['waiting', 'pending', 'processing'].includes(task.status)) return;
+  if (task.batchId && pausedRecognitionBatches.has(task.batchId) && task.status !== 'processing') return;
   if (!task.filePath || !fs.existsSync(task.filePath)) {
     await markRecognitionTaskFailed(taskId, `Invoice image file not found: ${task.filePath || ''}`);
     return;
@@ -458,7 +487,11 @@ async function processRecognitionTask(taskId) {
 
   try {
     console.log('[recognition-task] start:', taskId);
-    const result = await withTimeout(recognizeInvoice(taskFileFromRow(task), { companyId: task.companyId }), OCR_TIMEOUT_MS, 'Invoice recognition');
+    const result = await withTimeout(recognizeInvoice(taskFileFromRow(task), {
+      companyId: task.companyId,
+      supplierHint: task.supplierHint || '',
+      batchId: task.batchId || ''
+    }), OCR_TIMEOUT_MS, 'Invoice recognition');
     const saveResult = await saveRecognizedInvoiceFromTask(task, result);
     const completedResult = {
       ...result,
@@ -639,7 +672,7 @@ async function sha256File(filePath) {
   });
 }
 
-async function findRecognitionDuplicate(companyId, parsed, totalAmount, currentItems, excludeInvoiceId = '') {
+async function findRecognitionDuplicate(companyId, parsed, totalAmount, currentItems, excludeInvoiceId = '', batchId = '') {
   const current = invoiceComparisonFingerprint({
     supplierName: parsed.supplierName || '',
     invoiceNo: parsed.invoiceNo || '',
@@ -678,6 +711,17 @@ async function findRecognitionDuplicate(companyId, parsed, totalAmount, currentI
     });
     const duplicateInfo = compareInvoiceForDuplicate(current, candidateFingerprint, '云端已有发票');
     if (duplicateInfo.isDuplicate) return duplicateInfo;
+    if (duplicateInfo.sameInvoiceGroup && batchId && candidate.batchId === batchId) {
+      return {
+        ...duplicateInfo,
+        sameInvoiceGroup: true,
+        possibleSameInvoicePages: true,
+        multiPageInvoice: true,
+        mergeInvoiceId: candidate.serverId || candidate.id,
+        pageTotal: totalAmount,
+        sameInvoiceGroupReason: '同批次同供应商同发票号，金额和商品不同，已自动判定为同一发票多页并合并。'
+      };
+    }
     if (duplicateInfo.sameInvoiceGroup && !groupInfo.sameInvoiceGroup) groupInfo = duplicateInfo;
   }
   return groupInfo;
@@ -692,7 +736,10 @@ async function saveRecognizedInvoiceFromTask(task, result, options = {}) {
   const itemTotal = items.reduce((sum, item) => sum + Number(item.totalPrice || 0), 0);
   const totalAmount = Number(parsed.totalAmount || 0) > 0 ? Number(parsed.totalAmount) : itemTotal;
   const imageHash = await sha256File(task.filePath);
-  const duplicateCheck = await findRecognitionDuplicate(companyId, parsed, totalAmount, items, task.invoiceId);
+  const duplicateCheck = await findRecognitionDuplicate(companyId, parsed, totalAmount, items, task.invoiceId, task.batchId || '');
+  duplicateCheck.pageTotal = totalAmount;
+  duplicateCheck.calculatedTotal = itemTotal;
+  duplicateCheck.totalDifference = Math.abs(itemTotal - totalAmount);
   if (duplicateCheck.isDuplicate && !options.force) {
     return { invoiceId: '', duplicateCheck, imageHash };
   }
@@ -701,7 +748,21 @@ async function saveRecognizedInvoiceFromTask(task, result, options = {}) {
     duplicateCheck.skippedSave = false;
   }
   const supplier = await findOrCreateSupplier(parsed.supplierName, deviceId, companyId);
-  const invoiceId = task.invoiceId || id();
+  const mergeInvoiceId = !options.independent && duplicateCheck.multiPageInvoice ? duplicateCheck.mergeInvoiceId : '';
+  const existingInvoice = mergeInvoiceId ? await queryGet(`
+    SELECT * FROM ${quoteTable('invoices')}
+    WHERE ${quoteIdentifier('companyId')} = ?
+      AND (${quoteIdentifier('id')} = ? OR ${quoteIdentifier('serverId')} = ?)
+    LIMIT 1
+  `, [companyId, mergeInvoiceId, mergeInvoiceId]) : null;
+  const invoiceId = mergeInvoiceId || task.invoiceId || id();
+  const invoiceTotal = existingInvoice
+    ? Number(existingInvoice.totalAmount || 0) + totalAmount
+    : totalAmount;
+  if (existingInvoice) {
+    duplicateCheck.mergedIntoInvoiceId = existingInvoice.serverId || existingInvoice.id;
+    duplicateCheck.invoiceTotal = invoiceTotal;
+  }
   const invoice = await prepareRecordWithReferences('invoices', {
     id: invoiceId,
     localId: invoiceId,
@@ -709,31 +770,38 @@ async function saveRecognizedInvoiceFromTask(task, result, options = {}) {
     supplierId: supplier?.serverId || supplier?.id || '',
     invoiceNo: parsed.invoiceNo || '',
     invoiceDate: parsed.invoiceDate || today(),
-    imagePath: result.imagePath || task.imagePath || '',
-    ocrText: result.ocrText || '',
-    totalAmount,
-    status: 'recognized',
-    createdAt: task.createdAt || now,
+    batchId: task.batchId || existingInvoice?.batchId || '',
+    imagePath: existingInvoice?.imagePath || result.imagePath || task.imagePath || '',
+    ocrText: [existingInvoice?.ocrText, result.ocrText].filter(Boolean).join('\n\n--- page ---\n\n'),
+    totalAmount: invoiceTotal,
+    status: existingInvoice ? 'recognized-multipage' : 'recognized',
+    createdAt: existingInvoice?.createdAt || task.createdAt || now,
     updatedAt: now
   }, deviceId, companyId);
 
   await withTransaction(async (client) => {
     await upsertRecord('invoices', invoice, client);
-    await run(`
-      UPDATE ${quoteTable('invoice_items')}
-      SET ${quoteIdentifier('deletedAt')} = ?, ${quoteIdentifier('updatedAt')} = ?
-      WHERE ${quoteIdentifier('companyId')} = ? AND ${quoteIdentifier('invoiceId')} = ?
-    `, [now, now, companyId, invoice.serverId], client);
+    if (!existingInvoice) {
+      await run(`
+        UPDATE ${quoteTable('invoice_items')}
+        SET ${quoteIdentifier('deletedAt')} = ?, ${quoteIdentifier('updatedAt')} = ?
+        WHERE ${quoteIdentifier('companyId')} = ? AND ${quoteIdentifier('invoiceId')} = ?
+      `, [now, now, companyId, invoice.serverId], client);
+    }
     for (const item of items.filter((entry) => (entry.productNameOriginal || entry.name || '').trim())) {
+      const itemId = id();
       const itemRecord = await prepareRecordWithReferences('invoice_items', {
+        id: itemId,
+        localId: itemId,
+        serverId: itemId,
         productNameOriginal: item.productNameOriginal || item.name || '',
-        productNameNormalized: item.productNameNormalized || item.normalizedName || item.name || '',
+        productNameNormalized: item.productNameNormalized || item.normalizedName || item.standardName || item.name || '',
         category: item.category || '',
         quantity: Number(item.quantity ?? item.qty ?? 0),
         unit: item.unit || item.spec || '',
         unitPrice: Number(item.unitPrice || 0),
         totalPrice: Number(item.totalPrice || 0),
-        notes: item.notes || '',
+        notes: [item.notes, duplicateCheck.multiPageInvoice ? `pageTotal=${totalAmount.toFixed(2)}` : ''].filter(Boolean).join(' | '),
         invoiceId: invoice.serverId,
         supplierId: invoice.supplierId,
         invoiceDate: invoice.invoiceDate,
@@ -747,12 +815,18 @@ async function saveRecognizedInvoiceFromTask(task, result, options = {}) {
 }
 
 async function resumeRecognitionTasks() {
+  await run(`
+    UPDATE ${quoteTable('invoice_recognition_tasks')}
+    SET ${quoteIdentifier('status')} = 'waiting',
+        ${quoteIdentifier('updatedAt')} = ?
+    WHERE ${quoteIdentifier('status')} = 'processing'
+  `, [nowIso()]);
   const tasks = await queryAll(`
     SELECT ${quoteIdentifier('id')} FROM ${quoteTable('invoice_recognition_tasks')}
-    WHERE ${quoteIdentifier('status')} IN ('pending', 'processing')
+    WHERE ${quoteIdentifier('status')} IN ('waiting', 'pending')
     ORDER BY ${quoteIdentifier('createdAt')} ASC
   `);
-  for (const task of tasks) enqueueRecognitionTask(task.id);
+  if (tasks.length) enqueueRecognitionTask();
 }
 
 app.get('/api/health', (req, res) => {
@@ -1022,8 +1096,38 @@ app.post('/api/invoice-recognition/tasks', requireAuth, upload.single('image'), 
     res.status(400).json({ success: false, error: 'No invoice image uploaded' });
     return;
   }
-  const task = await createRecognitionTask(req.file, req.user, req.body.deviceId || 'web');
+  const task = await createRecognitionTask(req.file, req.user, req.body.deviceId || 'web', {
+    batchId: req.body.batchId || '',
+    supplierHint: req.body.supplierHint || ''
+  });
   res.status(202).json({ success: true, taskId: task.id, task });
+}));
+
+app.post('/api/invoice-recognition/batches/:batchId/pause', requireAuth, asyncHandler(async (req, res) => {
+  pausedRecognitionBatches.add(req.params.batchId);
+  res.json({ success: true, batchId: req.params.batchId, paused: true, currentTaskId: currentRecognitionTaskId });
+}));
+
+app.post('/api/invoice-recognition/batches/:batchId/resume', requireAuth, asyncHandler(async (req, res) => {
+  pausedRecognitionBatches.delete(req.params.batchId);
+  enqueueRecognitionTask();
+  res.json({ success: true, batchId: req.params.batchId, paused: false });
+}));
+
+app.post('/api/invoice-recognition/batches/:batchId/cancel', requireAuth, asyncHandler(async (req, res) => {
+  const timestamp = nowIso();
+  const result = await run(`
+    UPDATE ${quoteTable('invoice_recognition_tasks')}
+    SET ${quoteIdentifier('status')} = 'failed',
+        ${quoteIdentifier('error')} = ?,
+        ${quoteIdentifier('completedAt')} = ?,
+        ${quoteIdentifier('updatedAt')} = ?
+    WHERE ${quoteIdentifier('companyId')} = ?
+      AND ${quoteIdentifier('batchId')} = ?
+      AND ${quoteIdentifier('status')} IN ('waiting', 'pending')
+  `, ['已取消剩余识别', timestamp, timestamp, req.user.companyId, req.params.batchId]);
+  pausedRecognitionBatches.delete(req.params.batchId);
+  res.json({ success: true, batchId: req.params.batchId, cancelled: result?.changes ?? 0 });
 }));
 
 app.get('/api/invoice-recognition/tasks', requireAuth, asyncHandler(async (req, res) => {
@@ -1056,7 +1160,7 @@ app.post('/api/invoice-recognition/tasks/:id/retry', requireAuth, asyncHandler(a
   const timestamp = nowIso();
   await run(`
     UPDATE ${quoteTable('invoice_recognition_tasks')}
-    SET ${quoteIdentifier('status')} = 'pending',
+    SET ${quoteIdentifier('status')} = 'waiting',
         ${quoteIdentifier('error')} = '',
         ${quoteIdentifier('startedAt')} = '',
         ${quoteIdentifier('completedAt')} = '',
@@ -1064,7 +1168,7 @@ app.post('/api/invoice-recognition/tasks/:id/retry', requireAuth, asyncHandler(a
         ${quoteIdentifier('updatedAt')} = ?
     WHERE ${quoteIdentifier('id')} = ? AND ${quoteIdentifier('companyId')} = ?
   `, [timestamp, req.params.id, req.user.companyId]);
-  enqueueRecognitionTask(req.params.id);
+  enqueueRecognitionTask();
   const updated = await queryGet(`
     SELECT * FROM ${quoteTable('invoice_recognition_tasks')}
     WHERE ${quoteIdentifier('id')} = ? AND ${quoteIdentifier('companyId')} = ?
@@ -1100,6 +1204,65 @@ app.post('/api/invoice-recognition/tasks/:id/force-save', requireAuth, asyncHand
         ${quoteIdentifier('updatedAt')} = ?
     WHERE ${quoteIdentifier('id')} = ? AND ${quoteIdentifier('companyId')} = ?
   `, [saveResult.invoiceId || '', JSON.stringify(resultJson), timestamp, req.params.id, req.user.companyId]);
+  const updated = await queryGet(`
+    SELECT * FROM ${quoteTable('invoice_recognition_tasks')}
+    WHERE ${quoteIdentifier('id')} = ? AND ${quoteIdentifier('companyId')} = ?
+    LIMIT 1
+  `, [req.params.id, req.user.companyId]);
+  res.json({ success: true, task: parseTaskRow(updated) });
+}));
+
+app.post('/api/invoice-recognition/tasks/:id/decision', requireAuth, asyncHandler(async (req, res) => {
+  const action = String(req.body.action || '').trim();
+  if (!['merge', 'duplicate', 'independent'].includes(action)) {
+    return res.status(400).json({ error: 'Invalid decision action' });
+  }
+  const task = await queryGet(`
+    SELECT * FROM ${quoteTable('invoice_recognition_tasks')}
+    WHERE ${quoteIdentifier('id')} = ? AND ${quoteIdentifier('companyId')} = ?
+    LIMIT 1
+  `, [req.params.id, req.user.companyId]);
+  if (!task) return res.status(404).json({ error: 'Recognition task not found' });
+  const parsedTask = parseTaskRow(task);
+  if (!parsedTask.result?.parsed) return res.status(409).json({ error: 'Recognition result is empty' });
+
+  let invoiceId = parsedTask.invoiceId || '';
+  const resultJson = { ...parsedTask.result };
+  resultJson.duplicateCheck = {
+    ...(resultJson.duplicateCheck || {}),
+    manualDecision: action,
+    decidedAt: nowIso()
+  };
+
+  if (action === 'duplicate') {
+    resultJson.duplicateCheck.isDuplicate = true;
+    resultJson.duplicateCheck.duplicate = true;
+    resultJson.duplicateCheck.skippedSave = true;
+    resultJson.duplicateCheck.duplicateReason = resultJson.duplicateCheck.duplicateReason || '用户标记为重复发票';
+    invoiceId = '';
+  } else if (!invoiceId) {
+    const saveResult = await saveRecognizedInvoiceFromTask(task, resultJson, {
+      force: true,
+      independent: action === 'independent'
+    });
+    invoiceId = saveResult.invoiceId || '';
+    resultJson.duplicateCheck = {
+      ...resultJson.duplicateCheck,
+      ...saveResult.duplicateCheck,
+      manualDecision: action,
+      decidedAt: nowIso()
+    };
+    resultJson.imageHash = saveResult.imageHash || resultJson.imageHash || '';
+  }
+
+  const timestamp = nowIso();
+  await run(`
+    UPDATE ${quoteTable('invoice_recognition_tasks')}
+    SET ${quoteIdentifier('invoiceId')} = ?,
+        ${quoteIdentifier('resultJson')} = ?,
+        ${quoteIdentifier('updatedAt')} = ?
+    WHERE ${quoteIdentifier('id')} = ? AND ${quoteIdentifier('companyId')} = ?
+  `, [invoiceId, JSON.stringify(resultJson), timestamp, req.params.id, req.user.companyId]);
   const updated = await queryGet(`
     SELECT * FROM ${quoteTable('invoice_recognition_tasks')}
     WHERE ${quoteIdentifier('id')} = ? AND ${quoteIdentifier('companyId')} = ?

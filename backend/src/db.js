@@ -56,7 +56,7 @@ export const tableColumns = {
   products: ['id', 'companyId', 'localId', 'serverId', 'syncStatus', 'name', 'normalizedName', 'category', 'notes', 'createdAt', 'updatedAt', 'deletedAt', 'deviceId'],
   price_history: ['id', 'companyId', 'localId', 'serverId', 'syncStatus', 'productId', 'invoiceItemId', 'supplierId', 'price', 'quantity', 'unit', 'invoiceDate', 'createdAt', 'updatedAt', 'deletedAt', 'deviceId'],
   supplier_templates: ['id', 'companyId', 'localId', 'serverId', 'syncStatus', 'supplierId', 'supplierNameKeywords', 'invoiceNoKeywords', 'dateKeywords', 'itemTableStartKeywords', 'itemTableEndKeywords', 'itemNameColumnIndex', 'quantityColumnIndex', 'unitColumnIndex', 'unitPriceColumnIndex', 'totalPriceColumnIndex', 'notes', 'createdAt', 'updatedAt', 'deletedAt', 'deviceId'],
-  invoice_recognition_tasks: ['id', 'companyId', 'status', 'imagePath', 'filePath', 'originalName', 'mimeType', 'fileSize', 'source', 'recognitionSource', 'ocrLanguage', 'usedTemplate', 'usedAI', 'invoiceId', 'resultJson', 'error', 'retryCount', 'createdAt', 'updatedAt', 'startedAt', 'completedAt', 'deviceId'],
+  invoice_recognition_tasks: ['id', 'companyId', 'batchId', 'supplierHint', 'status', 'imagePath', 'filePath', 'originalName', 'mimeType', 'fileSize', 'source', 'recognitionSource', 'ocrLanguage', 'usedTemplate', 'usedAI', 'invoiceId', 'resultJson', 'error', 'retryCount', 'createdAt', 'updatedAt', 'startedAt', 'completedAt', 'deviceId'],
   invoice_templates: ['id', 'companyId', 'supplierName', 'supplierKeywords', 'tableHeaderKeywords', 'columns', 'totalKeywords', 'invoiceNoKeywords', 'dateKeywords', 'sampleImageHash', 'successCount', 'failCount', 'lastUsedAt', 'isActive', 'createdAt', 'updatedAt'],
   companies: ['id', 'name', 'createdAt', 'updatedAt'],
   users: ['id', 'companyId', 'email', 'passwordHash', 'name', 'createdAt', 'updatedAt']
@@ -197,6 +197,7 @@ export async function migrate() {
   await execute(`CREATE INDEX IF NOT EXISTS ${quoteIdentifier('idx_invoice_templates_company_supplier')} ON ${quoteTable('invoice_templates')} (${quoteIdentifier('companyId')}, ${quoteIdentifier('supplierName')});`);
   await execute(`CREATE INDEX IF NOT EXISTS ${quoteIdentifier('idx_invoice_templates_active')} ON ${quoteTable('invoice_templates')} (${quoteIdentifier('isActive')});`);
   await execute(`CREATE INDEX IF NOT EXISTS ${quoteIdentifier('idx_recognition_tasks_company_status')} ON ${quoteTable('invoice_recognition_tasks')} (${quoteIdentifier('companyId')}, ${quoteIdentifier('status')});`);
+  await execute(`CREATE INDEX IF NOT EXISTS ${quoteIdentifier('idx_recognition_tasks_batch')} ON ${quoteTable('invoice_recognition_tasks')} (${quoteIdentifier('companyId')}, ${quoteIdentifier('batchId')});`);
   await execute(`CREATE UNIQUE INDEX IF NOT EXISTS ${quoteIdentifier('idx_users_email_unique')} ON ${quoteTable('users')} (LOWER(${quoteIdentifier('email')}));`);
 }
 

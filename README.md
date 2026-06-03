@@ -9,6 +9,21 @@ This is the PWA version of InvoicePriceTracker.
 - Local development database: SQLite
 - Render production database: PostgreSQL through `DATABASE_URL`
 
+## Current High-Priority Behavior
+
+- Recognition tasks use a single-worker queue. Only one invoice image is processed at a time.
+- New uploaded tasks start as `waiting`, then move to `processing`, `completed`, or `failed`.
+- Batch controls are available: pause, continue, and cancel remaining waiting tasks.
+- Failed tasks support retry, image re-upload, and manual entry.
+- Original uploaded images remain under `UPLOAD_DIR` and can be viewed from the task list.
+- Testing can skip login with `AUTO_LOGIN=true` on the backend and `VITE_AUTO_LOGIN=true` on the frontend.
+- Template strategy: match `invoice_templates` from `supplierHint` or filename first; if matched, use template parsing and do not call AI Vision.
+- If no template is matched, AI Vision is used and the successful result updates/creates a supplier template.
+- AI product names preserve Chinese and English through `nameCn`, `nameEn`, and `standardName`.
+- True duplicate requires same supplier, same invoice number, same total amount, and highly similar item details.
+- Same-batch multi-page invoices are merged automatically when supplier and invoice number match but page totals/items differ.
+- Invoice bottom/page total is the source of truth. Item sum is stored as `calculatedTotal` for validation only.
+
 ## Current Testing Mode
 
 The project currently supports `DEMO_NO_AUTH` mode for testing.
@@ -59,6 +74,11 @@ POST /api/invoice-recognition/tasks
 GET /api/invoice-recognition/tasks
 GET /api/invoice-recognition/tasks/:id
 POST /api/invoice-recognition/tasks/:id/retry
+POST /api/invoice-recognition/tasks/:id/force-save
+POST /api/invoice-recognition/tasks/:id/decision
+POST /api/invoice-recognition/batches/:batchId/pause
+POST /api/invoice-recognition/batches/:batchId/resume
+POST /api/invoice-recognition/batches/:batchId/cancel
 ```
 
 The frontend includes a task history page:

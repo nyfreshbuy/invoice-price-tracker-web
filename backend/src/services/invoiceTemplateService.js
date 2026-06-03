@@ -37,13 +37,15 @@ export function normalizeInvoiceItem(item = {}) {
   const nameCn = String(item.nameCn || '').trim();
   const nameEn = String(item.nameEn || '').trim();
   const legacyName = String(item.name || item.productNameOriginal || '').trim();
-  const name = String(item.name || [nameCn, nameEn].filter(Boolean).join(' ') || legacyName).trim();
-  const normalizedName = String(item.normalizedName || item.productNameNormalized || name).trim().toLowerCase();
+  const standardName = String(item.standardName || item.name || [nameCn, nameEn].filter(Boolean).join(' ') || legacyName).trim();
+  const name = standardName;
+  const normalizedName = String(item.normalizedName || item.productNameNormalized || standardName).trim().toLowerCase();
 
   return {
     nameCn,
     nameEn,
     name,
+    standardName,
     normalizedName,
     barcode: item.barcode || item.code || '',
     spec: item.spec || item.size || '',
@@ -98,6 +100,24 @@ export async function findTemplateByOcrText(ocrText, companyId = 'default') {
     if (template.supplierName && lowerText.includes(template.supplierName.toLowerCase())) {
       return template;
     }
+  }
+  return null;
+}
+
+export async function findTemplateBySupplierHint(hint, companyId = 'default') {
+  const text = String(hint || '').toLowerCase();
+  if (!text) return null;
+  const templates = await queryAll(`
+    SELECT * FROM ${quoteTable('invoice_templates')}
+    WHERE ${quoteIdentifier('companyId')} = ? AND ${quoteIdentifier('isActive')} = 1
+    ORDER BY ${quoteIdentifier('successCount')} DESC, ${quoteIdentifier('updatedAt')} DESC
+  `, [companyId]);
+  for (const row of templates) {
+    const template = parseInvoiceTemplate(row);
+    const candidates = [template.supplierName, ...(template.supplierKeywords || [])]
+      .map((value) => String(value || '').trim().toLowerCase())
+      .filter(Boolean);
+    if (candidates.some((candidate) => text.includes(candidate) || candidate.includes(text))) return template;
   }
   return null;
 }
