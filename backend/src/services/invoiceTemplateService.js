@@ -189,6 +189,7 @@ export async function saveOrUpdateTemplateFromResult(result, sampleImageHash, co
     sampleImageHash,
     successCount: Number(existing?.successCount || 0),
     failCount: Number(existing?.failCount || 0),
+    accuracyScore: Math.min(1, Number(existing?.accuracyScore ?? 0.75) + 0.03),
     lastUsedAt: now,
     isActive: true,
     updatedAt: now
@@ -204,6 +205,7 @@ export async function markTemplateSuccess(templateId, companyId = 'default') {
   await run(`
     UPDATE ${quoteTable('invoice_templates')}
     SET ${quoteIdentifier('successCount')} = ${quoteIdentifier('successCount')} + 1,
+        ${quoteIdentifier('accuracyScore')} = CASE WHEN ${quoteIdentifier('accuracyScore')} + 0.02 > 1 THEN 1 ELSE ${quoteIdentifier('accuracyScore')} + 0.02 END,
         ${quoteIdentifier('lastUsedAt')} = ?,
         ${quoteIdentifier('updatedAt')} = ?
     WHERE ${quoteIdentifier('id')} = ? AND ${quoteIdentifier('companyId')} = ?
@@ -215,6 +217,7 @@ export async function markTemplateFailure(templateId, companyId = 'default') {
   await run(`
     UPDATE ${quoteTable('invoice_templates')}
     SET ${quoteIdentifier('failCount')} = ${quoteIdentifier('failCount')} + 1,
+        ${quoteIdentifier('accuracyScore')} = CASE WHEN ${quoteIdentifier('accuracyScore')} - 0.08 < 0 THEN 0 ELSE ${quoteIdentifier('accuracyScore')} - 0.08 END,
         ${quoteIdentifier('isActive')} = CASE WHEN ${quoteIdentifier('failCount')} + 1 >= 3 AND ${quoteIdentifier('successCount')} = 0 THEN 0 ELSE ${quoteIdentifier('isActive')} END,
         ${quoteIdentifier('updatedAt')} = ?
     WHERE ${quoteIdentifier('id')} = ? AND ${quoteIdentifier('companyId')} = ?

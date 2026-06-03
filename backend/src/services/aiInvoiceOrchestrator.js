@@ -121,6 +121,11 @@ function responsePayload({ source, imagePath, ocrText, result, template, sampleI
     invoiceTotal,
     calculatedTotal,
     totalDifference,
+    supplierConfidence: Number(result.supplierConfidence ?? result.confidence ?? (result.supplierName ? 0.8 : 0.35)),
+    invoiceNoConfidence: Number(result.invoiceNoConfidence ?? result.confidence ?? (result.invoiceNo ? 0.8 : 0.35)),
+    dateConfidence: Number(result.dateConfidence ?? result.confidence ?? (result.invoiceDate ? 0.8 : 0.35)),
+    itemConfidence: Number(result.itemConfidence ?? result.confidence ?? (result.items.length ? 0.75 : 0.25)),
+    priceConfidence: Number(result.priceConfidence ?? (totalDifference > 0.05 ? 0.45 : 0.85)),
     items: result.items.map((item) => {
       const displayName = item.name || [item.nameCn, item.nameEn].filter(Boolean).join(' ');
       const standardName = item.standardName || displayName;

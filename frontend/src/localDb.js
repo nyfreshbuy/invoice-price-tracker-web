@@ -1,9 +1,9 @@
 import { getCompanyId as getAuthCompanyId } from './api.js';
 
 const DB_NAME = 'InvoicePriceTrackerLocal';
-const DB_VERSION = 3;
+const DB_VERSION = 4;
 
-export const syncTables = ['purchase_batches', 'suppliers', 'invoices', 'invoice_items', 'products', 'price_history', 'supplier_templates'];
+export const syncTables = ['purchase_batches', 'suppliers', 'invoices', 'invoice_items', 'products', 'price_history', 'supplier_templates', 'product_aliases', 'product_learning_rules', 'recognition_corrections', 'price_anomalies'];
 
 let dbPromise;
 
@@ -298,7 +298,8 @@ export const localDb = {
         price: item.unitPrice,
         quantity: item.quantity,
         unit: item.unit,
-        invoiceDate
+        invoiceDate,
+        invoiceNo: invoice.invoiceNo || ''
       }));
     }
     return invoice;

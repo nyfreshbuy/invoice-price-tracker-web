@@ -16,6 +16,7 @@ export function createInvoiceTemplate(input = {}) {
     successCount: Number(input.successCount || 0),
     failCount: Number(input.failCount || 0),
     lastUsedAt: input.lastUsedAt || null,
+    accuracyScore: Number(input.accuracyScore ?? 0.75),
     isActive: input.isActive === false ? 0 : 1,
     createdAt: input.createdAt || timestamp,
     updatedAt: input.updatedAt || timestamp
@@ -32,6 +33,7 @@ export function parseInvoiceTemplate(row) {
     totalKeywords: parseJson(row.totalKeywords, []),
     invoiceNoKeywords: parseJson(row.invoiceNoKeywords, []),
     dateKeywords: parseJson(row.dateKeywords, []),
+    accuracyScore: Number(row.accuracyScore ?? 0.75),
     isActive: Boolean(row.isActive)
   };
 }

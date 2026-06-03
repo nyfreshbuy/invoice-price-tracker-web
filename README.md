@@ -20,6 +20,10 @@ This is the PWA version of InvoicePriceTracker.
 - Template strategy: match `invoice_templates` from `supplierHint` or filename first; if matched, use template parsing and do not call AI Vision.
 - If no template is matched, AI Vision is used and the successful result updates/creates a supplier template.
 - AI product names preserve Chinese and English through `nameCn`, `nameEn`, and `standardName`.
+- Confirmed invoices can be saved through “确认并学习”. This saves the invoice and updates supplier templates, product aliases, product learning rules, price history, corrections, and price anomaly records.
+- Product learning maps raw recognized names to standard names and reuses them on later recognition.
+- Price learning stores supplier/product price history and flags prices more than 30% away from historical average.
+- Recognition corrections store before/after field changes so repeated mistakes can be fixed automatically over time.
 - True duplicate requires same supplier, same invoice number, same total amount, and highly similar item details.
 - Same-batch multi-page invoices are merged automatically when supplier and invoice number match but page totals/items differ.
 - Invoice bottom/page total is the source of truth. Item sum is stored as `calculatedTotal` for validation only.

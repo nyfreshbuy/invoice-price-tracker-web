@@ -27,6 +27,7 @@ import {
 } from './db.js';
 import aiInvoiceRoutes from './routes/aiInvoice.js';
 import { recognizeInvoice } from './services/aiInvoiceOrchestrator.js';
+import { saveOrUpdateTemplateFromResult } from './services/invoiceTemplateService.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
@@ -232,7 +233,74 @@ function prepareRecord(table, record, deviceId, companyId) {
     return { ...base, name: record.name || '', normalizedName: normalizeProductName(record.normalizedName || record.name || ''), category: record.category || '', notes: record.notes || '' };
   }
   if (table === 'price_history') {
-    return { ...base, productId: record.productId || '', invoiceItemId: record.invoiceItemId || '', supplierId: record.supplierId || '', price: Number(record.price || 0), quantity: Number(record.quantity || 0), unit: record.unit || '', invoiceDate: record.invoiceDate || today() };
+    return { ...base, productId: record.productId || '', invoiceItemId: record.invoiceItemId || '', supplierId: record.supplierId || '', price: Number(record.price || 0), quantity: Number(record.quantity || 0), unit: record.unit || '', invoiceDate: record.invoiceDate || today(), invoiceNo: record.invoiceNo || '' };
+  }
+  if (table === 'product_aliases') {
+    return {
+      ...base,
+      keyword: normalizeProductName(record.keyword || record.rawName || ''),
+      standardName: record.standardName || '',
+      category: record.category || '',
+      productId: record.productId || '',
+      supplierId: record.supplierId || '',
+      rawName: record.rawName || '',
+      nameCn: record.nameCn || '',
+      nameEn: record.nameEn || '',
+      barcode: record.barcode || '',
+      spec: record.spec || '',
+      unit: record.unit || '',
+      minPrice: Number(record.minPrice || 0),
+      maxPrice: Number(record.maxPrice || 0),
+      avgPrice: Number(record.avgPrice || 0),
+      occurrenceCount: Number(record.occurrenceCount || 0)
+    };
+  }
+  if (table === 'product_learning_rules') {
+    return {
+      ...base,
+      rawName: record.rawName || '',
+      nameCn: record.nameCn || '',
+      nameEn: record.nameEn || '',
+      standardName: record.standardName || '',
+      barcode: record.barcode || '',
+      spec: record.spec || '',
+      unit: record.unit || '',
+      supplierId: record.supplierId || '',
+      productId: record.productId || '',
+      minPrice: Number(record.minPrice || 0),
+      maxPrice: Number(record.maxPrice || 0),
+      avgPrice: Number(record.avgPrice || 0),
+      occurrenceCount: Number(record.occurrenceCount || 0),
+      confidence: Number(record.confidence || 0.85)
+    };
+  }
+  if (table === 'recognition_corrections') {
+    return {
+      ...base,
+      fieldName: record.fieldName || '',
+      beforeValue: record.beforeValue || '',
+      afterValue: record.afterValue || '',
+      supplierId: record.supplierId || '',
+      invoiceTemplateId: record.invoiceTemplateId || '',
+      invoiceId: record.invoiceId || '',
+      invoiceItemId: record.invoiceItemId || ''
+    };
+  }
+  if (table === 'price_anomalies') {
+    return {
+      ...base,
+      supplierId: record.supplierId || '',
+      productId: record.productId || '',
+      invoiceId: record.invoiceId || '',
+      invoiceItemId: record.invoiceItemId || '',
+      unitPrice: Number(record.unitPrice || 0),
+      averagePrice: Number(record.averagePrice || 0),
+      deviationPercent: Number(record.deviationPercent || 0),
+      invoiceDate: record.invoiceDate || today(),
+      invoiceNo: record.invoiceNo || '',
+      status: record.status || 'pending',
+      message: record.message || ''
+    };
   }
   return {
     ...base,
@@ -277,6 +345,21 @@ async function prepareRecordWithReferences(table, record, deviceId, companyId, c
     prepared.invoiceItemId = await resolveReference('invoice_items', prepared.invoiceItemId, deviceId, companyId, client);
     prepared.supplierId = await resolveReference('suppliers', prepared.supplierId, deviceId, companyId, client);
   }
+  if (table === 'product_aliases' || table === 'product_learning_rules') {
+    prepared.productId = await resolveReference('products', prepared.productId, deviceId, companyId, client);
+    prepared.supplierId = await resolveReference('suppliers', prepared.supplierId, deviceId, companyId, client);
+  }
+  if (table === 'recognition_corrections') {
+    prepared.supplierId = await resolveReference('suppliers', prepared.supplierId, deviceId, companyId, client);
+    prepared.invoiceId = await resolveReference('invoices', prepared.invoiceId, deviceId, companyId, client);
+    prepared.invoiceItemId = await resolveReference('invoice_items', prepared.invoiceItemId, deviceId, companyId, client);
+  }
+  if (table === 'price_anomalies') {
+    prepared.productId = await resolveReference('products', prepared.productId, deviceId, companyId, client);
+    prepared.supplierId = await resolveReference('suppliers', prepared.supplierId, deviceId, companyId, client);
+    prepared.invoiceId = await resolveReference('invoices', prepared.invoiceId, deviceId, companyId, client);
+    prepared.invoiceItemId = await resolveReference('invoice_items', prepared.invoiceItemId, deviceId, companyId, client);
+  }
   if (table === 'supplier_templates') {
     prepared.supplierId = await resolveReference('suppliers', prepared.supplierId, deviceId, companyId, client);
   }
@@ -304,6 +387,375 @@ async function findOrCreateSupplier(name, deviceId, companyId, client = null) {
   }, deviceId, companyId);
   await upsertRecord('suppliers', supplier, client);
   return supplier;
+}
+
+function itemStandardName(item = {}) {
+  return String(item.standardName || item.productNameNormalized || item.normalizedName || item.name || item.productNameOriginal || [item.nameCn, item.nameEn].filter(Boolean).join(' ')).trim();
+}
+
+function itemRawName(item = {}) {
+  return String(item.rawName || item.productNameOriginal || item.name || [item.nameCn, item.nameEn].filter(Boolean).join(' ')).trim();
+}
+
+function itemNameParts(item = {}) {
+  const raw = itemRawName(item);
+  return {
+    rawName: raw,
+    nameCn: String(item.nameCn || (/[\u3400-\u9fff]/.test(raw) ? raw : '')).trim(),
+    nameEn: String(item.nameEn || (/[\u3400-\u9fff]/.test(raw) ? '' : raw)).trim(),
+    standardName: itemStandardName(item) || raw
+  };
+}
+
+async function findOrCreateProductForLearning(item, deviceId, companyId, client = null) {
+  const parts = itemNameParts(item);
+  const normalizedName = normalizeProductName(parts.standardName || parts.rawName);
+  if (!normalizedName) return null;
+  const existing = await queryGet(`
+    SELECT * FROM ${quoteTable('products')}
+    WHERE ${quoteIdentifier('companyId')} = ?
+      AND ${quoteIdentifier('deletedAt')} IS NULL
+      AND ${quoteIdentifier('normalizedName')} = ?
+    LIMIT 1
+  `, [companyId, normalizedName], client);
+  if (existing) return existing;
+
+  const productId = id();
+  const product = prepareRecord('products', {
+    id: productId,
+    localId: productId,
+    serverId: productId,
+    name: parts.standardName || parts.rawName,
+    normalizedName,
+    category: item.category || '',
+    notes: ''
+  }, deviceId, companyId);
+  await upsertRecord('products', product, client);
+  return product;
+}
+
+async function learnProductAlias({ item, itemRecord, invoice, supplier, product, deviceId, companyId, client }) {
+  const parts = itemNameParts(item);
+  const keyword = normalizeProductName(parts.rawName || parts.standardName);
+  if (!keyword || !product) return;
+  const existing = await queryGet(`
+    SELECT * FROM ${quoteTable('product_aliases')}
+    WHERE ${quoteIdentifier('companyId')} = ?
+      AND ${quoteIdentifier('deletedAt')} IS NULL
+      AND ${quoteIdentifier('keyword')} = ?
+      AND ${quoteIdentifier('supplierId')} = ?
+    LIMIT 1
+  `, [companyId, keyword, supplier?.serverId || supplier?.id || ''], client);
+  const unitPrice = Number(itemRecord.unitPrice || item.unitPrice || 0);
+  const count = Number(existing?.occurrenceCount || 0);
+  const avgPrice = count > 0 ? ((Number(existing.avgPrice || 0) * count) + unitPrice) / (count + 1) : unitPrice;
+  const record = await prepareRecordWithReferences('product_aliases', {
+    ...(existing || {}),
+    keyword,
+    standardName: parts.standardName,
+    category: item.category || existing?.category || '',
+    productId: product.serverId || product.id,
+    supplierId: supplier?.serverId || supplier?.id || '',
+    rawName: parts.rawName,
+    nameCn: parts.nameCn,
+    nameEn: parts.nameEn,
+    barcode: item.barcode || existing?.barcode || '',
+    spec: item.spec || existing?.spec || '',
+    unit: item.unit || existing?.unit || '',
+    minPrice: count > 0 ? Math.min(Number(existing.minPrice || unitPrice), unitPrice) : unitPrice,
+    maxPrice: count > 0 ? Math.max(Number(existing.maxPrice || unitPrice), unitPrice) : unitPrice,
+    avgPrice,
+    occurrenceCount: count + 1,
+    updatedAt: nowIso()
+  }, deviceId, companyId, client);
+  await upsertRecord('product_aliases', record, client);
+}
+
+async function learnProductRule({ item, supplier, product, deviceId, companyId, client }) {
+  const parts = itemNameParts(item);
+  const rawKey = normalizeProductName(parts.rawName || parts.standardName);
+  if (!rawKey || !product) return;
+  const existing = await queryGet(`
+    SELECT * FROM ${quoteTable('product_learning_rules')}
+    WHERE ${quoteIdentifier('companyId')} = ?
+      AND ${quoteIdentifier('deletedAt')} IS NULL
+      AND ${quoteIdentifier('rawName')} = ?
+      AND ${quoteIdentifier('supplierId')} = ?
+    LIMIT 1
+  `, [companyId, rawKey, supplier?.serverId || supplier?.id || ''], client);
+  const unitPrice = Number(item.unitPrice || 0);
+  const count = Number(existing?.occurrenceCount || 0);
+  const avgPrice = count > 0 ? ((Number(existing.avgPrice || 0) * count) + unitPrice) / (count + 1) : unitPrice;
+  const record = await prepareRecordWithReferences('product_learning_rules', {
+    ...(existing || {}),
+    rawName: rawKey,
+    nameCn: parts.nameCn,
+    nameEn: parts.nameEn,
+    standardName: parts.standardName,
+    barcode: item.barcode || existing?.barcode || '',
+    spec: item.spec || existing?.spec || '',
+    unit: item.unit || existing?.unit || '',
+    supplierId: supplier?.serverId || supplier?.id || '',
+    productId: product.serverId || product.id,
+    minPrice: count > 0 ? Math.min(Number(existing.minPrice || unitPrice), unitPrice) : unitPrice,
+    maxPrice: count > 0 ? Math.max(Number(existing.maxPrice || unitPrice), unitPrice) : unitPrice,
+    avgPrice,
+    occurrenceCount: count + 1,
+    confidence: Math.min(1, Number(existing?.confidence || 0.75) + 0.03),
+    updatedAt: nowIso()
+  }, deviceId, companyId, client);
+  await upsertRecord('product_learning_rules', record, client);
+}
+
+async function learnPrice({ itemRecord, invoice, supplier, product, deviceId, companyId, client }) {
+  if (!product || !Number(itemRecord.unitPrice || 0)) return null;
+  const productId = product.serverId || product.id;
+  const history = await queryGet(`
+    SELECT AVG(${quoteIdentifier('price')}) AS "averagePrice", COUNT(*) AS "count"
+    FROM ${quoteTable('price_history')}
+    WHERE ${quoteIdentifier('companyId')} = ?
+      AND ${quoteIdentifier('deletedAt')} IS NULL
+      AND ${quoteIdentifier('productId')} = ?
+      AND ${quoteIdentifier('supplierId')} = ?
+  `, [companyId, productId, supplier?.serverId || supplier?.id || ''], client);
+  const averagePrice = Number(history?.averagePrice || 0);
+  const unitPrice = Number(itemRecord.unitPrice || 0);
+  let anomaly = null;
+  if (averagePrice > 0) {
+    const deviationPercent = Math.abs(unitPrice - averagePrice) / averagePrice;
+    if (deviationPercent > 0.3) {
+      anomaly = await prepareRecordWithReferences('price_anomalies', {
+        supplierId: supplier?.serverId || supplier?.id || '',
+        productId,
+        invoiceId: invoice.serverId || invoice.id,
+        invoiceItemId: itemRecord.serverId || itemRecord.id,
+        unitPrice,
+        averagePrice,
+        deviationPercent,
+        invoiceDate: invoice.invoiceDate,
+        invoiceNo: invoice.invoiceNo,
+        status: 'pending',
+        message: `价格高于/低于历史均价 ${Math.round(deviationPercent * 100)}%，请确认。`
+      }, deviceId, companyId, client);
+      await upsertRecord('price_anomalies', anomaly, client);
+    }
+  }
+  const priceRecord = await prepareRecordWithReferences('price_history', {
+    productId,
+    invoiceItemId: itemRecord.serverId || itemRecord.id,
+    supplierId: supplier?.serverId || supplier?.id || '',
+    price: unitPrice,
+    quantity: Number(itemRecord.quantity || 0),
+    unit: itemRecord.unit || '',
+    invoiceDate: invoice.invoiceDate,
+    invoiceNo: invoice.invoiceNo || ''
+  }, deviceId, companyId, client);
+  await upsertRecord('price_history', priceRecord, client);
+  return anomaly;
+}
+
+function correctionEntries(before = {}, after = {}, prefix = '') {
+  const entries = [];
+  for (const fieldName of Object.keys(after || {})) {
+    if (typeof after[fieldName] === 'object') continue;
+    const beforeValue = before?.[fieldName] ?? '';
+    const afterValue = after?.[fieldName] ?? '';
+    if (String(beforeValue) !== String(afterValue)) {
+      entries.push({ fieldName: prefix ? `${prefix}.${fieldName}` : fieldName, beforeValue: String(beforeValue), afterValue: String(afterValue) });
+    }
+  }
+  return entries;
+}
+
+async function learnCorrections({ beforeResult, finalPayload, invoice, itemRecords, supplier, templateId, deviceId, companyId, client }) {
+  const corrections = [
+    ...correctionEntries(beforeResult || {}, finalPayload || ''),
+    ...((finalPayload.items || []).flatMap((item, index) => correctionEntries((beforeResult?.items || [])[index] || {}, item, `items.${index}`)))
+  ];
+  for (const correction of corrections) {
+    const record = await prepareRecordWithReferences('recognition_corrections', {
+      ...correction,
+      supplierId: supplier?.serverId || supplier?.id || '',
+      invoiceTemplateId: templateId || '',
+      invoiceId: invoice.serverId || invoice.id,
+      invoiceItemId: itemRecords[Number(correction.fieldName.match(/^items\.(\d+)/)?.[1] || -1)]?.serverId || ''
+    }, deviceId, companyId, client);
+    await upsertRecord('recognition_corrections', record, client);
+  }
+}
+
+function simpleSimilarity(a, b) {
+  const left = normalizeProductName(a);
+  const right = normalizeProductName(b);
+  if (!left || !right) return 0;
+  if (left === right) return 1;
+  if (left.includes(right) || right.includes(left)) return 0.92;
+  const leftTokens = new Set(left.split(/\s+/));
+  const rightTokens = new Set(right.split(/\s+/));
+  const intersection = [...leftTokens].filter((token) => rightTokens.has(token)).length;
+  return intersection / Math.max(leftTokens.size, rightTokens.size, 1);
+}
+
+async function enhanceRecognizedResultWithLearning(result, companyId) {
+  const parsed = result?.parsed || {};
+  const items = Array.isArray(parsed.items) ? parsed.items : [];
+  if (!items.length) return result;
+  const aliases = await queryAll(`
+    SELECT * FROM ${quoteTable('product_aliases')}
+    WHERE ${quoteIdentifier('companyId')} = ? AND ${quoteIdentifier('deletedAt')} IS NULL
+    ORDER BY ${quoteIdentifier('occurrenceCount')} DESC, ${quoteIdentifier('updatedAt')} DESC
+    LIMIT 500
+  `, [companyId]);
+  const rules = await queryAll(`
+    SELECT * FROM ${quoteTable('product_learning_rules')}
+    WHERE ${quoteIdentifier('companyId')} = ? AND ${quoteIdentifier('deletedAt')} IS NULL
+    ORDER BY ${quoteIdentifier('confidence')} DESC, ${quoteIdentifier('occurrenceCount')} DESC
+    LIMIT 500
+  `, [companyId]);
+  const candidates = [...aliases, ...rules];
+  const enhancedItems = items.map((item) => {
+    const rawName = itemRawName(item);
+    let best = null;
+    let bestScore = 0;
+    for (const candidate of candidates) {
+      const score = Math.max(
+        simpleSimilarity(rawName, candidate.rawName || candidate.keyword),
+        simpleSimilarity(itemStandardName(item), candidate.standardName)
+      );
+      if (score > bestScore) {
+        best = candidate;
+        bestScore = score;
+      }
+    }
+    if (!best || bestScore < 0.78) {
+      return { ...item, itemConfidence: item.itemConfidence ?? 0.65 };
+    }
+    return {
+      ...item,
+      rawName,
+      nameCn: item.nameCn || best.nameCn || '',
+      nameEn: item.nameEn || best.nameEn || '',
+      standardName: best.standardName || itemStandardName(item),
+      name: best.standardName || itemStandardName(item),
+      normalizedName: normalizeProductName(best.standardName || itemStandardName(item)),
+      productNameOriginal: best.standardName || itemStandardName(item),
+      productNameNormalized: normalizeProductName(best.standardName || itemStandardName(item)),
+      barcode: item.barcode || best.barcode || '',
+      spec: item.spec || best.spec || '',
+      unit: item.unit || best.unit || '',
+      itemConfidence: Math.max(Number(item.itemConfidence || 0), Math.min(0.98, bestScore))
+    };
+  });
+  return {
+    ...result,
+    parsed: {
+      ...parsed,
+      items: enhancedItems,
+      itemConfidence: Math.min(...enhancedItems.map((item) => Number(item.itemConfidence || 0.65)))
+    }
+  };
+}
+
+function resultFromFinalPayload(payload = {}) {
+  return {
+    supplierName: payload.supplierName || '',
+    invoiceNo: payload.invoiceNo || '',
+    invoiceDate: payload.invoiceDate || '',
+    totalAmount: Number(payload.totalAmount || 0),
+    items: (payload.items || []).map((item) => ({
+      rawName: item.rawName || item.productNameOriginal || item.name || '',
+      nameCn: item.nameCn || '',
+      nameEn: item.nameEn || '',
+      standardName: item.standardName || item.productNameNormalized || item.productNameOriginal || item.name || '',
+      name: item.standardName || item.productNameOriginal || item.name || '',
+      normalizedName: item.productNameNormalized || item.normalizedName || item.standardName || item.productNameOriginal || '',
+      barcode: item.barcode || '',
+      spec: item.spec || '',
+      qty: Number(item.quantity ?? item.qty ?? 0),
+      unit: item.unit || '',
+      unitPrice: Number(item.unitPrice || 0),
+      totalPrice: Number(item.totalPrice || 0)
+    })),
+    templateCandidate: payload.templateCandidate,
+    confidence: Number(payload.confidence || 0.95),
+    warnings: []
+  };
+}
+
+async function saveInvoicePayloadWithLearning(payload, user, options = {}) {
+  const deviceId = payload.deviceId || 'legacy-api';
+  const companyId = user.companyId;
+  const supplier = payload.supplierId
+    ? await getByAnyId('suppliers', payload.supplierId, companyId)
+    : await findOrCreateSupplier(payload.supplierName, deviceId, companyId);
+  const now = nowIso();
+  const items = Array.isArray(payload.items) ? payload.items : [];
+  const itemTotal = items.reduce((sum, item) => sum + Number(item.totalPrice || 0), 0);
+  const totalAmount = Number(payload.totalAmount || 0) > 0 ? Number(payload.totalAmount) : itemTotal;
+  const invoice = await prepareRecordWithReferences('invoices', {
+    ...payload,
+    supplierId: supplier?.serverId || supplier?.id || '',
+    totalAmount,
+    updatedAt: now
+  }, deviceId, companyId);
+  const itemRecords = [];
+  const priceAnomalies = [];
+
+  await withTransaction(async (client) => {
+    await upsertRecord('invoices', invoice, client);
+    await run(`
+      UPDATE ${quoteTable('invoice_items')}
+      SET ${quoteIdentifier('deletedAt')} = ?, ${quoteIdentifier('updatedAt')} = ?
+      WHERE ${quoteIdentifier('companyId')} = ? AND ${quoteIdentifier('invoiceId')} = ?
+    `, [now, now, companyId, invoice.serverId], client);
+
+    for (const item of items.filter((entry) => (entry.productNameOriginal || entry.name || entry.standardName || '').trim())) {
+      const standardName = item.standardName || item.productNameNormalized || item.productNameOriginal || item.name || '';
+      const record = await prepareRecordWithReferences('invoice_items', {
+        ...item,
+        productNameOriginal: standardName || item.productNameOriginal || item.name || '',
+        productNameNormalized: normalizeProductName(standardName || item.productNameNormalized || item.productNameOriginal || ''),
+        invoiceId: invoice.serverId,
+        supplierId: invoice.supplierId,
+        invoiceDate: invoice.invoiceDate,
+        updatedAt: now
+      }, deviceId, companyId, client);
+      await upsertRecord('invoice_items', record, client);
+      itemRecords.push(record);
+
+      const product = await findOrCreateProductForLearning({ ...item, productNameOriginal: record.productNameOriginal, productNameNormalized: record.productNameNormalized }, deviceId, companyId, client);
+      await learnProductAlias({ item, itemRecord: record, invoice, supplier, product, deviceId, companyId, client });
+      await learnProductRule({ item: { ...item, unitPrice: record.unitPrice }, supplier, product, deviceId, companyId, client });
+      const anomaly = await learnPrice({ itemRecord: record, invoice, supplier, product, deviceId, companyId, client });
+      if (anomaly) priceAnomalies.push(anomaly);
+    }
+
+    if (options.beforeResult) {
+      await learnCorrections({
+        beforeResult: options.beforeResult,
+        finalPayload: payload,
+        invoice,
+        itemRecords,
+        supplier,
+        templateId: options.invoiceTemplateId || payload.templateId || '',
+        deviceId,
+        companyId,
+        client
+      });
+    }
+  });
+
+  let template = null;
+  if (options.learnTemplate !== false) {
+    template = await saveOrUpdateTemplateFromResult(resultFromFinalPayload(payload), payload.sampleImageHash || '', companyId);
+  }
+
+  return {
+    invoice: { ...invoice, supplierName: supplier?.name || payload.supplierName || '' },
+    items: itemRecords,
+    priceAnomalies,
+    template
+  };
 }
 
 async function getCloudRecord(table, incoming, companyId, client = null) {
@@ -487,11 +939,12 @@ async function processRecognitionTask(taskId) {
 
   try {
     console.log('[recognition-task] start:', taskId);
-    const result = await withTimeout(recognizeInvoice(taskFileFromRow(task), {
+    const rawResult = await withTimeout(recognizeInvoice(taskFileFromRow(task), {
       companyId: task.companyId,
       supplierHint: task.supplierHint || '',
       batchId: task.batchId || ''
     }), OCR_TIMEOUT_MS, 'Invoice recognition');
+    const result = await enhanceRecognizedResultWithLearning(rawResult, task.companyId);
     const saveResult = await saveRecognizedInvoiceFromTask(task, result);
     const completedResult = {
       ...result,
@@ -740,6 +1193,7 @@ async function saveRecognizedInvoiceFromTask(task, result, options = {}) {
   duplicateCheck.pageTotal = totalAmount;
   duplicateCheck.calculatedTotal = itemTotal;
   duplicateCheck.totalDifference = Math.abs(itemTotal - totalAmount);
+  duplicateCheck.priceAnomalies = [];
   if (duplicateCheck.isDuplicate && !options.force) {
     return { invoiceId: '', duplicateCheck, imageHash };
   }
@@ -808,6 +1262,11 @@ async function saveRecognizedInvoiceFromTask(task, result, options = {}) {
         updatedAt: now
       }, deviceId, companyId, client);
       await upsertRecord('invoice_items', itemRecord, client);
+      const product = await findOrCreateProductForLearning(item, deviceId, companyId, client);
+      await learnProductAlias({ item, itemRecord, invoice, supplier, product, deviceId, companyId, client });
+      await learnProductRule({ item, supplier, product, deviceId, companyId, client });
+      const anomaly = await learnPrice({ itemRecord, invoice, supplier, product, deviceId, companyId, client });
+      if (anomaly) duplicateCheck.priceAnomalies.push(anomaly);
     }
   });
 
@@ -975,6 +1434,15 @@ app.post('/api/purchase-batches', requireAuth, asyncHandler(async (req, res) => 
   const batch = prepareRecord('purchase_batches', { ...req.body, updatedAt: nowIso() }, req.body.deviceId || 'legacy-api', req.user.companyId);
   await upsertRecord('purchase_batches', batch);
   res.json(batch);
+}));
+
+app.post('/api/learning/confirm-invoice', requireAuth, asyncHandler(async (req, res) => {
+  const result = await saveInvoicePayloadWithLearning(req.body.finalInvoice || req.body, req.user, {
+    beforeResult: req.body.beforeResult || null,
+    invoiceTemplateId: req.body.invoiceTemplateId || req.body.templateId || '',
+    learnTemplate: true
+  });
+  res.json({ success: true, ...result });
 }));
 
 app.post('/api/invoices', requireAuth, asyncHandler(async (req, res) => {

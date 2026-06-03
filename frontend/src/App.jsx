@@ -665,8 +665,21 @@ function InvoiceFormPage() {
     setSaving(true);
     setMessage('');
     try {
-      await localDb.createInvoice(form);
-      syncNow();
+      if (navigator.onLine) {
+        const result = await api.confirmAndLearnInvoice({
+          finalInvoice: form,
+          beforeResult: recognitionTask?.result?.parsed || null,
+          invoiceTemplateId: recognitionTask?.result?.templateId || '',
+          sampleImageHash: recognitionTask?.result?.sampleImageHash || ''
+        });
+        if (result.priceAnomalies?.length) {
+          setMessage(`已保存并学习，但发现 ${result.priceAnomalies.length} 个价格异常，请检查。`);
+        }
+        await syncNow();
+      } else {
+        await localDb.createInvoice(form);
+        syncNow();
+      }
       navigate('/invoices');
     } catch (error) {
       setMessage(error.message);
@@ -730,6 +743,7 @@ function InvoiceFormPage() {
             <div className="split"><strong>后台识别任务</strong><strong>{recognitionTaskStatusText(recognitionTask.status)}</strong></div>
             <p>任务 ID：{recognitionTask.id}</p>
             {recognitionTask.invoiceId && <p>已保存发票：{recognitionTask.invoiceId}</p>}
+            {recognitionTask.result?.parsed && <ConfidenceSummary parsed={recognitionTask.result.parsed} />}
             {recognitionTask.error && <p className="error">{recognitionTask.error}</p>}
           </div>
         )}
@@ -760,7 +774,7 @@ function InvoiceFormPage() {
 
       {message && <p className="error">{message}</p>}
       <div className="sticky-actions">
-        <button className="primary-button" disabled={saving || ['waiting', 'pending', 'processing'].includes(recognitionTask?.status)} onClick={save}><Save size={18} />{recognitionTask?.invoiceId ? '查看已保存发票' : saving ? '保存中...' : '保存到本机'}</button>
+        <button className="primary-button" disabled={saving || ['waiting', 'pending', 'processing'].includes(recognitionTask?.status)} onClick={save}><Save size={18} />{recognitionTask?.invoiceId ? '查看已保存发票' : saving ? '保存中...' : '确认并学习'}</button>
       </div>
     </Page>
   );
@@ -1025,6 +1039,23 @@ function ActionLink({ to, icon, title, subtitle }) {
 
 function Info({ label, value }) {
   return <div className="info-row"><span>{label}</span><strong>{value}</strong></div>;
+}
+
+function ConfidenceSummary({ parsed = {} }) {
+  const fields = [
+    ['供应商', parsed.supplierConfidence],
+    ['发票号', parsed.invoiceNoConfidence],
+    ['日期', parsed.dateConfidence],
+    ['商品', parsed.itemConfidence],
+    ['价格', parsed.priceConfidence]
+  ];
+  const lowFields = fields.filter(([, value]) => Number(value ?? 1) < 0.7);
+  return (
+    <div>
+      {lowFields.length > 0 && <p className="warning-text">低置信度字段：{lowFields.map(([label, value]) => `${label} ${Number(value || 0).toFixed(2)}`).join('，')}，请重点检查。</p>}
+      {Number(parsed.totalDifference || 0) > 0.05 && <p className="warning-text">商品明细与发票总额不一致，请检查。差额：{money(parsed.totalDifference)}</p>}
+    </div>
+  );
 }
 
 function EmptyState({ text }) {

@@ -82,6 +82,7 @@ export const api = {
   getInvoices: () => request('/api/invoices'),
   getInvoice: (id) => request(`/api/invoices/${id}`),
   createInvoice: (payload) => request('/api/invoices', { method: 'POST', body: JSON.stringify(payload) }),
+  confirmAndLearnInvoice: (payload) => request('/api/learning/confirm-invoice', { method: 'POST', body: JSON.stringify(payload) }),
   deleteInvoice: (id) => request(`/api/invoices/${id}`, { method: 'DELETE' }),
 
   getSuppliers: () => request('/api/suppliers'),
