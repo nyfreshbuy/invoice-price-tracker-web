@@ -146,6 +146,8 @@ function responsePayload({ source, imagePath, ocrText, result, template, sampleI
         unit: item.unit || item.spec || '',
         unitPrice: item.unitPrice || 0,
         totalPrice: item.totalPrice || 0,
+        isFreeItem: Boolean(item.isFreeItem) || Number(item.unitPrice || 0) === 0 || Number(item.totalPrice || 0) === 0,
+        freeReason: item.freeReason || ((Number(item.unitPrice || 0) === 0 || Number(item.totalPrice || 0) === 0) ? '免费/赠品行' : ''),
         notes: ''
       };
     }),

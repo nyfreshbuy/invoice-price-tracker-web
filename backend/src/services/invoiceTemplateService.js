@@ -52,7 +52,9 @@ export function normalizeInvoiceItem(item = {}) {
     qty: Number(item.qty ?? item.quantity ?? 0),
     unit: item.unit || '',
     unitPrice: Number(item.unitPrice ?? item.price ?? 0),
-    totalPrice: Number(item.totalPrice ?? item.amount ?? 0)
+    totalPrice: Number(item.totalPrice ?? item.amount ?? 0),
+    isFreeItem: Boolean(item.isFreeItem) || Number(item.unitPrice ?? item.price ?? 0) === 0 || Number(item.totalPrice ?? item.amount ?? 0) === 0,
+    freeReason: item.freeReason || ''
   };
 }
 

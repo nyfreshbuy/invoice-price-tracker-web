@@ -225,6 +225,13 @@ function prepareRecord(table, record, deviceId, companyId) {
       unit: record.unit || '',
       unitPrice: Number(record.unitPrice || 0),
       totalPrice: Number(record.totalPrice || 0),
+      chargedQty: Number(record.chargedQty || 0),
+      freeQty: Number(record.freeQty || 0),
+      totalQty: Number(record.totalQty || record.quantity || 0),
+      originalUnitCost: Number(record.originalUnitCost || record.unitPrice || 0),
+      effectiveUnitCost: Number(record.effectiveUnitCost || record.unitPrice || 0),
+      isFreeItem: record.isFreeItem ? 1 : 0,
+      freeReason: record.freeReason || '',
       invoiceDate: record.invoiceDate || today(),
       notes: record.notes || ''
     };
@@ -407,6 +414,81 @@ function itemNameParts(item = {}) {
   };
 }
 
+function giftAccountingKey(item = {}) {
+  return normalizeProductName(item.standardName || item.productNameNormalized || item.normalizedName || item.productNameOriginal || item.name || item.rawName || '');
+}
+
+function applyGiftAccounting(items = []) {
+  const normalized = items.map((item) => {
+    const quantity = Number(item.quantity ?? item.qty ?? 0);
+    const unitPrice = Number(item.unitPrice ?? item.priceEach ?? item.price ?? 0);
+    const totalPrice = Number(item.totalPrice ?? item.amount ?? 0);
+    const isFreeItem = Boolean(item.isFreeItem) || unitPrice === 0 || totalPrice === 0;
+    return {
+      ...item,
+      quantity,
+      qty: quantity,
+      unitPrice,
+      totalPrice,
+      isFreeItem,
+      freeReason: item.freeReason || (isFreeItem ? (unitPrice === 0 ? 'priceEach = 0' : 'amount = 0') : '')
+    };
+  });
+  const groups = new Map();
+  for (const item of normalized) {
+    const key = giftAccountingKey(item) || itemRawName(item);
+    const group = groups.get(key) || { chargedQty: 0, freeQty: 0, invoiceAmount: 0 };
+    if (item.isFreeItem) {
+      group.freeQty += Number(item.quantity || 0);
+    } else {
+      group.chargedQty += Number(item.quantity || 0);
+      group.invoiceAmount += Number(item.totalPrice || 0);
+    }
+    groups.set(key, group);
+  }
+  return normalized.map((item) => {
+    const key = giftAccountingKey(item) || itemRawName(item);
+    const group = groups.get(key) || { chargedQty: item.isFreeItem ? 0 : item.quantity, freeQty: item.isFreeItem ? item.quantity : 0, invoiceAmount: item.isFreeItem ? 0 : item.totalPrice };
+    const chargedQty = Number(group.chargedQty || 0);
+    const freeQty = Number(group.freeQty || 0);
+    const totalQty = chargedQty + freeQty;
+    const invoiceAmount = Number(group.invoiceAmount || 0);
+    return {
+      ...item,
+      chargedQty,
+      freeQty,
+      totalQty,
+      originalUnitCost: chargedQty > 0 ? invoiceAmount / chargedQty : 0,
+      effectiveUnitCost: totalQty > 0 ? invoiceAmount / totalQty : 0
+    };
+  });
+}
+
+function summarizeGiftAccounting(items = []) {
+  const groups = new Map();
+  for (const item of items) {
+    const key = giftAccountingKey(item) || itemRawName(item) || item.id;
+    if (groups.has(key)) continue;
+    groups.set(key, {
+      chargedQty: Number(item.chargedQty || 0),
+      freeQty: Number(item.freeQty || 0),
+      totalQty: Number(item.totalQty || 0),
+      invoiceAmount: Number(item.originalUnitCost || 0) * Number(item.chargedQty || 0)
+    });
+  }
+  const summary = [...groups.values()].reduce((acc, group) => ({
+    chargedQty: acc.chargedQty + group.chargedQty,
+    freeQty: acc.freeQty + group.freeQty,
+    totalQty: acc.totalQty + group.totalQty,
+    invoiceAmount: acc.invoiceAmount + group.invoiceAmount
+  }), { chargedQty: 0, freeQty: 0, totalQty: 0, invoiceAmount: 0 });
+  return {
+    ...summary,
+    originalUnitCost: summary.chargedQty > 0 ? summary.invoiceAmount / summary.chargedQty : 0,
+    effectiveUnitCost: summary.totalQty > 0 ? summary.invoiceAmount / summary.totalQty : 0
+  };
+}
+
 async function findOrCreateProductForLearning(item, deviceId, companyId, client = null) {
   const parts = itemNameParts(item);
   const normalizedName = normalizeProductName(parts.standardName || parts.rawName);
@@ -508,7 +590,8 @@ async function learnProductRule({ item, supplier, product, deviceId, companyId, 
 }
 
 async function learnPrice({ itemRecord, invoice, supplier, product, deviceId, companyId, client }) {
-  if (!product || !Number(itemRecord.unitPrice || 0)) return null;
+  const learnedPrice = Number(itemRecord.effectiveUnitCost || itemRecord.unitPrice || 0);
+  if (!product || !learnedPrice) return null;
   const productId = product.serverId || product.id;
   const history = await queryGet(`
     SELECT AVG(${quoteIdentifier('price')}) AS "averagePrice", COUNT(*) AS "count"
@@ -519,7 +602,7 @@ async function learnPrice({ itemRecord, invoice, supplier, product, deviceId, co
       AND ${quoteIdentifier('supplierId')} = ?
   `, [companyId, productId, supplier?.serverId || supplier?.id || ''], client);
   const averagePrice = Number(history?.averagePrice || 0);
-  const unitPrice = Number(itemRecord.unitPrice || 0);
+  const unitPrice = learnedPrice;
   let anomaly = null;
   if (averagePrice > 0) {
     const deviationPercent = Math.abs(unitPrice - averagePrice) / averagePrice;
@@ -545,7 +628,7 @@ async function learnPrice({ itemRecord, invoice, supplier, product, deviceId, co
     invoiceItemId: itemRecord.serverId || itemRecord.id,
     supplierId: supplier?.serverId || supplier?.id || '',
     price: unitPrice,
-    quantity: Number(itemRecord.quantity || 0),
+    quantity: Number(itemRecord.totalQty || itemRecord.quantity || 0),
     unit: itemRecord.unit || '',
     invoiceDate: invoice.invoiceDate,
     invoiceNo: invoice.invoiceNo || ''
@@ -689,7 +772,7 @@ async function saveInvoicePayloadWithLearning(payload, user, options = {}) {
     ? await getByAnyId('suppliers', payload.supplierId, companyId)
     : await findOrCreateSupplier(payload.supplierName, deviceId, companyId);
   const now = nowIso();
-  const items = Array.isArray(payload.items) ? payload.items : [];
+  const items = applyGiftAccounting(Array.isArray(payload.items) ? payload.items : []);
   const itemTotal = items.reduce((sum, item) => sum + Number(item.totalPrice || 0), 0);
   const totalAmount = Number(payload.totalAmount || 0) > 0 ? Number(payload.totalAmount) : itemTotal;
   const invoice = await prepareRecordWithReferences('invoices', {
@@ -715,6 +798,13 @@ async function saveInvoicePayloadWithLearning(payload, user, options = {}) {
         ...item,
         productNameOriginal: standardName || item.productNameOriginal || item.name || '',
         productNameNormalized: normalizeProductName(standardName || item.productNameNormalized || item.productNameOriginal || ''),
+        chargedQty: item.chargedQty,
+        freeQty: item.freeQty,
+        totalQty: item.totalQty,
+        originalUnitCost: item.originalUnitCost,
+        effectiveUnitCost: item.effectiveUnitCost,
+        isFreeItem: item.isFreeItem ? 1 : 0,
+        freeReason: item.freeReason || '',
         invoiceId: invoice.serverId,
         supplierId: invoice.supplierId,
         invoiceDate: invoice.invoiceDate,
@@ -1182,7 +1272,7 @@ async function findRecognitionDuplicate(companyId, parsed, totalAmount, currentI
 
 async function saveRecognizedInvoiceFromTask(task, result, options = {}) {
   const parsed = result.parsed || {};
-  const items = Array.isArray(parsed.items) ? parsed.items : [];
+  const items = applyGiftAccounting(Array.isArray(parsed.items) ? parsed.items : []);
   const deviceId = task.deviceId || 'recognition-task';
   const companyId = task.companyId;
   const now = nowIso();
@@ -1255,6 +1345,13 @@ async function saveRecognizedInvoiceFromTask(task, result, options = {}) {
         unit: item.unit || item.spec || '',
         unitPrice: Number(item.unitPrice || 0),
         totalPrice: Number(item.totalPrice || 0),
+        chargedQty: item.chargedQty,
+        freeQty: item.freeQty,
+        totalQty: item.totalQty,
+        originalUnitCost: item.originalUnitCost,
+        effectiveUnitCost: item.effectiveUnitCost,
+        isFreeItem: item.isFreeItem ? 1 : 0,
+        freeReason: item.freeReason || '',
         notes: [item.notes, duplicateCheck.multiPageInvoice ? `pageTotal=${totalAmount.toFixed(2)}` : ''].filter(Boolean).join(' | '),
         invoiceId: invoice.serverId,
         supplierId: invoice.supplierId,
@@ -1516,9 +1613,9 @@ app.get('/api/products/search', requireAuth, asyncHandler(async (req, res) => {
   const summaries = await queryAll(`
     SELECT
       CASE WHEN ${quoteIdentifier('productNameNormalized')} IS NULL OR ${quoteIdentifier('productNameNormalized')} = '' THEN ${quoteIdentifier('productNameOriginal')} ELSE ${quoteIdentifier('productNameNormalized')} END AS "standardName",
-      MIN(${quoteIdentifier('unitPrice')}) AS "minPrice",
-      MAX(${quoteIdentifier('unitPrice')}) AS "maxPrice",
-      AVG(${quoteIdentifier('unitPrice')}) AS "averagePrice",
+      MIN(CASE WHEN ${quoteIdentifier('effectiveUnitCost')} > 0 THEN ${quoteIdentifier('effectiveUnitCost')} ELSE ${quoteIdentifier('unitPrice')} END) AS "minPrice",
+      MAX(CASE WHEN ${quoteIdentifier('effectiveUnitCost')} > 0 THEN ${quoteIdentifier('effectiveUnitCost')} ELSE ${quoteIdentifier('unitPrice')} END) AS "maxPrice",
+      AVG(CASE WHEN ${quoteIdentifier('effectiveUnitCost')} > 0 THEN ${quoteIdentifier('effectiveUnitCost')} ELSE ${quoteIdentifier('unitPrice')} END) AS "averagePrice",
       MAX(${quoteIdentifier('invoiceDate')}) AS "recentPurchaseDate",
       COUNT(*) AS "recordCount"
     FROM ${quoteTable('invoice_items')}
@@ -1530,7 +1627,7 @@ app.get('/api/products/search', requireAuth, asyncHandler(async (req, res) => {
 
   for (const row of summaries) {
     const recent = await queryGet(`
-      SELECT ${quoteIdentifier('unitPrice')} FROM ${quoteTable('invoice_items')}
+      SELECT CASE WHEN ${quoteIdentifier('effectiveUnitCost')} > 0 THEN ${quoteIdentifier('effectiveUnitCost')} ELSE ${quoteIdentifier('unitPrice')} END AS ${quoteIdentifier('unitPrice')} FROM ${quoteTable('invoice_items')}
       WHERE ${quoteIdentifier('companyId')} = ? AND ${quoteIdentifier('deletedAt')} IS NULL
         AND (${quoteIdentifier('productNameNormalized')} = ? OR ${quoteIdentifier('productNameOriginal')} = ?)
       ORDER BY ${quoteIdentifier('invoiceDate')} DESC, ${quoteIdentifier('createdAt')} DESC LIMIT 1

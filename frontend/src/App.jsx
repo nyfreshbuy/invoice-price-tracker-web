@@ -27,6 +27,13 @@ const emptyItem = () => ({
   unit: '',
   unitPrice: 0,
   totalPrice: 0,
+  chargedQty: 0,
+  freeQty: 0,
+  totalQty: 0,
+  originalUnitCost: 0,
+  effectiveUnitCost: 0,
+  isFreeItem: false,
+  freeReason: '',
   notes: ''
 });
 
@@ -105,7 +112,7 @@ export default function App() {
           <Route path="/invoices/new" element={<InvoiceFormPage />} />
           <Route path="/invoices/batch" element={<BatchImportPage />} />
           <Route path="/recognition-tasks" element={<RecognitionTaskListPage />} />
-          <Route path="/invoices/:id" element={<InvoiceDetailPage />} />
+          <Route path="/invoices/:id" element={<InvoiceDetailPageWithGifts />} />
           <Route path="/products" element={<ProductSearchPage />} />
           <Route path="/products/:name" element={<ProductDetailPage />} />
           <Route path="/suppliers" element={<SupplierPage />} />
@@ -604,6 +611,10 @@ function InvoiceFormPage() {
       if (field === 'quantity' || field === 'unitPrice') {
         next.totalPrice = Number(next.quantity || 0) * Number(next.unitPrice || 0);
       }
+      if (field === 'quantity' || field === 'unitPrice' || field === 'totalPrice') {
+        next.isFreeItem = Number(next.unitPrice || 0) === 0 || Number(next.totalPrice || 0) === 0;
+        next.freeReason = next.isFreeItem ? (next.freeReason || '免费/赠品行') : '';
+      }
       items[index] = next;
       return { ...current, items };
     });
@@ -765,6 +776,8 @@ function InvoiceFormPage() {
               <label className="field"><span>数量</span><input type="number" value={item.quantity} onChange={(event) => updateItem(index, 'quantity', event.target.value)} /></label>
               <label className="field"><span>单价</span><input type="number" value={item.unitPrice} onChange={(event) => updateItem(index, 'unitPrice', event.target.value)} /></label>
               <label className="field"><span>总价</span><input type="number" value={item.totalPrice} onChange={(event) => updateItem(index, 'totalPrice', event.target.value)} /></label>
+              <label className="field"><span>是否赠品</span><input type="checkbox" checked={Boolean(item.isFreeItem)} onChange={(event) => updateItem(index, 'isFreeItem', event.target.checked)} /></label>
+              <label className="field"><span>赠品原因</span><input value={item.freeReason || ''} onChange={(event) => updateItem(index, 'freeReason', event.target.value)} /></label>
               <label className="field"><span>备注</span><input value={item.notes} onChange={(event) => updateItem(index, 'notes', event.target.value)} /></label>
             </div>
           </div>
@@ -813,6 +826,60 @@ function InvoiceDetailPage() {
             <strong>{item.productNameOriginal}</strong>
             <p>标准名：{item.productNameNormalized || '-'}</p>
             <p>数量 {item.quantity} {item.unit} · 单价 {money(item.unitPrice)} · 总价 {money(item.totalPrice)}</p>
+          </div>
+        ))}
+      </Section>
+      <Section title="OCR 原文"><pre className="ocr-text">{invoice.ocrText || '无 OCR 内容'}</pre></Section>
+    </Page>
+  );
+}
+
+function InvoiceDetailPageWithGifts() {
+  const { id } = useParams();
+  const navigate = useNavigate();
+  const [detail, setDetail] = useState(null);
+
+  useLocalReload(() => localDb.getInvoice(id).then(setDetail), [id]);
+
+  async function remove() {
+    if (!confirm('确认删除这张发票？')) return;
+    await localDb.deleteInvoice(id);
+    syncNow();
+    navigate('/invoices');
+  }
+
+  if (!detail) return <Page title="发票详情"><EmptyState text="未找到发票" /></Page>;
+
+  const { invoice, items } = detail;
+  const giftSummary = summarizeGiftAccounting(items);
+  return (
+    <Page title="发票详情" action={<button className="danger-button" onClick={remove}><Trash2 size={16} />删除</button>}>
+      <Section title="发票信息">
+        <Info label="供应商" value={invoice.supplierName || '未命名供应商'} />
+        <Info label="发票号" value={invoice.invoiceNo || '-'} />
+        <Info label="日期" value={invoice.invoiceDate || '-'} />
+        <Info label="总金额" value={money(invoice.totalAmount)} />
+        <Info label="同步状态" value={statusText(invoice.syncStatus)} />
+      </Section>
+      {giftSummary.freeQty > 0 && (
+        <Section title="赠品核算">
+          <Info label="收费数量" value={numberText(giftSummary.chargedQty)} />
+          <Info label="免费数量" value={numberText(giftSummary.freeQty)} />
+          <Info label="实际数量" value={numberText(giftSummary.totalQty)} />
+          <Info label="发票金额" value={money(giftSummary.invoiceAmount)} />
+          <Info label="原始单价" value={money(giftSummary.originalUnitCost)} />
+          <Info label="实际成本" value={money(giftSummary.effectiveUnitCost)} />
+        </Section>
+      )}
+      {invoice.imagePath && <Section title="发票图片"><img className="invoice-image" src={invoice.imagePath} alt="发票" /></Section>}
+      <Section title="商品明细">
+        {items.map((item) => (
+          <div className="detail-item" key={item.id}>
+            <strong>{item.productNameOriginal}</strong>
+            <p>标准名：{item.productNameNormalized || '-'}</p>
+            <p>数量 {numberText(item.quantity)} {item.unit} · 原单价 {money(item.unitPrice)} · 总价 {money(item.totalPrice)}</p>
+            <p>是否赠品：{Number(item.isFreeItem || 0) ? `是（${item.freeReason || '免费行'}）` : '否'} · 收费数量 {numberText(item.chargedQty)} · 免费数量 {numberText(item.freeQty)} · 实际数量 {numberText(item.totalQty)}</p>
+            <p>原始单价 {money(item.originalUnitCost || item.unitPrice)} · 实际摊薄成本 {money(item.effectiveUnitCost || item.unitPrice)}</p>
           </div>
         ))}
       </Section>
@@ -871,7 +938,7 @@ function ProductDetailPage() {
             <div className="split"><strong>{record.invoiceDate}</strong><strong>{money(record.unitPrice)}</strong></div>
             <p>{record.supplierName || '未命名供应商'}</p>
             <p>原始名：{record.productNameOriginal}</p>
-            <p>数量 {record.quantity} {record.unit} · 总价 {money(record.totalPrice)} · 发票号 {record.invoiceNo || '-'}</p>
+            <p>数量 {record.quantity} {record.unit} · 总价 {money(record.totalPrice)} · 实际成本 {money(record.effectiveUnitCost || record.unitPrice)} · 发票号 {record.invoiceNo || '-'}</p>
           </div>
         ))}
       </Section>
@@ -1378,6 +1445,13 @@ function normalizeParsedItemForForm(item = {}) {
     unit: item.unit || item.spec || item.size || '',
     unitPrice: Number(item.unitPrice || 0),
     totalPrice: Number(item.totalPrice ?? item.amount ?? 0),
+    chargedQty: Number(item.chargedQty || 0),
+    freeQty: Number(item.freeQty || 0),
+    totalQty: Number(item.totalQty || item.quantity || item.qty || 0),
+    originalUnitCost: Number(item.originalUnitCost || item.unitPrice || 0),
+    effectiveUnitCost: Number(item.effectiveUnitCost || item.unitPrice || 0),
+    isFreeItem: Boolean(item.isFreeItem) || Number(item.unitPrice || 0) === 0 || Number(item.totalPrice ?? item.amount ?? 0) === 0,
+    freeReason: item.freeReason || '',
     notes: item.notes || ''
   };
 }
@@ -1468,4 +1542,38 @@ function detectContinuousInvoiceNumbers(entries) {
 
 function money(value) {
   return Number(value || 0).toFixed(2);
+}
+
+function numberText(value) {
+  const number = Number(value || 0);
+  return Number.isInteger(number) ? String(number) : number.toFixed(2);
+}
+
+function summarizeGiftAccounting(items = []) {
+  const groups = new Map();
+  for (const item of items) {
+    const key = normalizedKey(item.productNameNormalized || item.productNameOriginal || item.id);
+    if (groups.has(key)) continue;
+    const chargedQty = Number(item.chargedQty || (Number(item.isFreeItem || 0) ? 0 : item.quantity) || 0);
+    const freeQty = Number(item.freeQty || (Number(item.isFreeItem || 0) ? item.quantity : 0) || 0);
+    const totalQty = Number(item.totalQty || chargedQty + freeQty);
+    const originalUnitCost = Number(item.originalUnitCost || item.unitPrice || 0);
+    groups.set(key, {
+      chargedQty,
+      freeQty,
+      totalQty,
+      invoiceAmount: originalUnitCost * chargedQty
+    });
+  }
+  const summary = [...groups.values()].reduce((acc, group) => ({
+    chargedQty: acc.chargedQty + group.chargedQty,
+    freeQty: acc.freeQty + group.freeQty,
+    totalQty: acc.totalQty + group.totalQty,
+    invoiceAmount: acc.invoiceAmount + group.invoiceAmount
+  }), { chargedQty: 0, freeQty: 0, totalQty: 0, invoiceAmount: 0 });
+  return {
+    ...summary,
+    originalUnitCost: summary.chargedQty > 0 ? summary.invoiceAmount / summary.chargedQty : 0,
+    effectiveUnitCost: summary.totalQty > 0 ? summary.invoiceAmount / summary.totalQty : 0
+  };
 }

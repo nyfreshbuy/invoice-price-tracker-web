@@ -42,6 +42,55 @@ export function nowIso() {
   return new Date().toISOString();
 }
 
+function giftAccountingKey(item = {}) {
+  return normalizeProductName(item.standardName || item.productNameNormalized || item.normalizedName || item.productNameOriginal || item.name || '');
+}
+
+export function applyGiftAccounting(items = []) {
+  const normalized = items.map((item) => {
+    const quantity = Number(item.quantity ?? item.qty ?? 0);
+    const unitPrice = Number(item.unitPrice ?? item.priceEach ?? item.price ?? 0);
+    const totalPrice = Number(item.totalPrice ?? item.amount ?? 0);
+    const isFreeItem = Boolean(item.isFreeItem) || unitPrice === 0 || totalPrice === 0;
+    return {
+      ...item,
+      quantity,
+      unitPrice,
+      totalPrice,
+      isFreeItem,
+      freeReason: item.freeReason || (isFreeItem ? (unitPrice === 0 ? 'priceEach = 0' : 'amount = 0') : '')
+    };
+  });
+  const groups = new Map();
+  for (const item of normalized) {
+    const key = giftAccountingKey(item) || item.productNameOriginal || item.id;
+    const group = groups.get(key) || { chargedQty: 0, freeQty: 0, invoiceAmount: 0 };
+    if (item.isFreeItem) {
+      group.freeQty += Number(item.quantity || 0);
+    } else {
+      group.chargedQty += Number(item.quantity || 0);
+      group.invoiceAmount += Number(item.totalPrice || 0);
+    }
+    groups.set(key, group);
+  }
+  return normalized.map((item) => {
+    const key = giftAccountingKey(item) || item.productNameOriginal || item.id;
+    const group = groups.get(key) || { chargedQty: item.quantity, freeQty: 0, invoiceAmount: item.totalPrice };
+    const chargedQty = Number(group.chargedQty || 0);
+    const freeQty = Number(group.freeQty || 0);
+    const totalQty = chargedQty + freeQty;
+    const invoiceAmount = Number(group.invoiceAmount || 0);
+    return {
+      ...item,
+      chargedQty,
+      freeQty,
+      totalQty,
+      originalUnitCost: chargedQty > 0 ? invoiceAmount / chargedQty : 0,
+      effectiveUnitCost: totalQty > 0 ? invoiceAmount / totalQty : 0
+    };
+  });
+}
+
 function openDb() {
   if (dbPromise) return dbPromise;
   dbPromise = new Promise((resolve, reject) => {
@@ -261,7 +310,7 @@ export const localDb = {
     const supplier = payload.supplierId ? resolveByAnyId(await all('suppliers'), payload.supplierId) : await findOrCreateSupplier(payload.supplierName);
     const invoiceId = payload.id || generateId();
     const invoiceDate = payload.invoiceDate || today();
-    const items = (payload.items || []).filter((item) => (item.productNameOriginal || '').trim());
+    const items = applyGiftAccounting((payload.items || []).filter((item) => (item.productNameOriginal || '').trim()));
     const itemTotal = items.reduce((sum, item) => sum + Number(item.totalPrice || 0), 0);
     const totalAmount = Number(payload.totalAmount || 0) > 0 ? Number(payload.totalAmount) : itemTotal;
     const invoice = syncFields({
@@ -287,6 +336,13 @@ export const localDb = {
         quantity: Number(rawItem.quantity || 0),
         unitPrice: Number(rawItem.unitPrice || 0),
         totalPrice: Number(rawItem.totalPrice || 0),
+        chargedQty: Number(rawItem.chargedQty || 0),
+        freeQty: Number(rawItem.freeQty || 0),
+        totalQty: Number(rawItem.totalQty || rawItem.quantity || 0),
+        originalUnitCost: Number(rawItem.originalUnitCost || rawItem.unitPrice || 0),
+        effectiveUnitCost: Number(rawItem.effectiveUnitCost || rawItem.unitPrice || 0),
+        isFreeItem: rawItem.isFreeItem ? 1 : 0,
+        freeReason: rawItem.freeReason || '',
         invoiceDate
       });
       await put('invoice_items', item);
@@ -295,8 +351,8 @@ export const localDb = {
         productId: product?.id || '',
         invoiceItemId: item.id,
         supplierId: supplier?.id || '',
-        price: item.unitPrice,
-        quantity: item.quantity,
+        price: item.effectiveUnitCost || item.unitPrice,
+        quantity: item.totalQty || item.quantity,
         unit: item.unit,
         invoiceDate,
         invoiceNo: invoice.invoiceNo || ''
@@ -356,10 +412,10 @@ export const localDb = {
     }
     return [...groups.entries()].map(([standardName, records]) => {
       const sorted = [...records].sort((a, b) => `${b.invoiceDate}${b.createdAt}`.localeCompare(`${a.invoiceDate}${a.createdAt}`));
-      const prices = records.map((record) => Number(record.unitPrice || 0));
+      const prices = records.map((record) => Number(record.effectiveUnitCost || record.unitPrice || 0));
       return {
         standardName,
-        recentPrice: Number(sorted[0]?.unitPrice || 0),
+        recentPrice: Number(sorted[0]?.effectiveUnitCost || sorted[0]?.unitPrice || 0),
         minPrice: Math.min(...prices),
         maxPrice: Math.max(...prices),
         averagePrice: prices.reduce((sum, price) => sum + price, 0) / prices.length,

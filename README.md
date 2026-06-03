@@ -24,6 +24,7 @@ This is the PWA version of InvoicePriceTracker.
 - Product learning maps raw recognized names to standard names and reuses them on later recognition.
 - Price learning stores supplier/product price history and flags prices more than 30% away from historical average.
 - Recognition corrections store before/after field changes so repeated mistakes can be fixed automatically over time.
+- Free/gift invoice lines are tracked with charged quantity, free quantity, total quantity, original unit cost, and effective unit cost. Lines with `priceEach=0` or `amount=0` are treated as free items and used to dilute the actual purchase cost.
 - True duplicate requires same supplier, same invoice number, same total amount, and highly similar item details.
 - Same-batch multi-page invoices are merged automatically when supplier and invoice number match but page totals/items differ.
 - Invoice bottom/page total is the source of truth. Item sum is stored as `calculatedTotal` for validation only.
