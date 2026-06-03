@@ -5,6 +5,7 @@ import {
   hashImageFile,
   markTemplateFailure,
   markTemplateSuccess,
+  normalizeInvoiceDate,
   parseWithTemplate,
   saveOrUpdateTemplateFromResult
 } from './invoiceTemplateService.js';
@@ -84,20 +85,29 @@ function responsePayload({ source, imagePath, ocrText, result, template, sampleI
   const parsed = {
     supplierName: result.supplierName,
     invoiceNo: result.invoiceNo,
-    invoiceDate: result.invoiceDate,
+    invoiceDate: normalizeInvoiceDate(result.invoiceDate),
     totalAmount: result.totalAmount,
-    items: result.items.map((item) => ({
-      code: item.code || '',
-      productNameOriginal: item.name || '',
-      productNameNormalized: (item.name || '').trim().toLowerCase(),
-      size: item.size || '',
-      category: '',
-      quantity: item.quantity || 0,
-      unit: item.size || '',
-      unitPrice: item.unitPrice || 0,
-      totalPrice: item.amount || 0,
-      notes: ''
-    })),
+    items: result.items.map((item) => {
+      const displayName = item.name || [item.nameCn, item.nameEn].filter(Boolean).join(' ');
+      const normalizedName = item.normalizedName || displayName.trim().toLowerCase();
+      return {
+        nameCn: item.nameCn || '',
+        nameEn: item.nameEn || '',
+        name: displayName,
+        normalizedName,
+        barcode: item.barcode || '',
+        spec: item.spec || '',
+        productNameOriginal: displayName,
+        productNameNormalized: normalizedName,
+        category: '',
+        quantity: item.qty || 0,
+        qty: item.qty || 0,
+        unit: item.unit || item.spec || '',
+        unitPrice: item.unitPrice || 0,
+        totalPrice: item.totalPrice || 0,
+        notes: ''
+      };
+    }),
     templateCandidate: result.templateCandidate,
     confidence: result.confidence,
     warnings: result.warnings
@@ -135,7 +145,18 @@ function parsePlainOcrFallback(ocrText, aiError) {
     const amount = Number(numbers[numbers.length - 1]);
     const unitPrice = Number(numbers[numbers.length - 2]);
     const quantity = numbers.length >= 3 ? Number(numbers[numbers.length - 3]) : (unitPrice > 0 ? amount / unitPrice : 0);
-    items.push({ code: '', name, size: '', quantity, unitPrice, amount });
+    items.push({
+      nameCn: /[\u3400-\u9fff]/.test(name) ? name : '',
+      nameEn: /[\u3400-\u9fff]/.test(name) ? '' : name,
+      name,
+      normalizedName: name.trim().toLowerCase(),
+      barcode: '',
+      spec: '',
+      qty: quantity,
+      unit: '',
+      unitPrice,
+      totalPrice: amount
+    });
   }
 
   return {

@@ -306,13 +306,13 @@ function BatchImportPage() {
           imagePath: entry.result.imagePath || '',
           ocrText: entry.result.ocrText || '',
           items: (entry.parsed.items || []).map((item) => ({
-            productNameOriginal: item.productNameOriginal || item.name || '',
-            productNameNormalized: item.productNameNormalized || item.name || '',
+            productNameOriginal: displayInvoiceItemName(item),
+            productNameNormalized: displayInvoiceItemNormalizedName(item),
             category: item.category || '',
-            quantity: Number(item.quantity || 0),
-            unit: item.unit || item.size || '',
+            quantity: Number(item.quantity ?? item.qty ?? 0),
+            unit: item.unit || item.spec || item.size || '',
             unitPrice: Number(item.unitPrice || 0),
-            totalPrice: Number(item.totalPrice || item.amount || 0),
+            totalPrice: Number(item.totalPrice ?? item.amount ?? 0),
             notes: item.notes || ''
           }))
         });
@@ -455,13 +455,13 @@ function InvoiceFormPage() {
         setMessage(errorMessage);
         return;
       }
-      const parsedItems = Array.isArray(result.parsed?.items) ? result.parsed.items : [];
+      const parsedItems = Array.isArray(result.parsed?.items) ? result.parsed.items.map(normalizeParsedItemForForm) : [];
       const recognitionSource = result.recognitionSource || sourceLabel(result.source);
       setForm((current) => ({
         ...current,
         supplierName: result.parsed?.supplierName || current.supplierName,
         invoiceNo: result.parsed?.invoiceNo || current.invoiceNo,
-        invoiceDate: result.parsed?.invoiceDate || current.invoiceDate,
+        invoiceDate: normalizeDateInput(result.parsed?.invoiceDate) || current.invoiceDate,
         totalAmount: Number(result.parsed?.totalAmount || current.totalAmount || 0),
         imagePath: result.imagePath || current.imagePath,
         ocrText: result.ocrText || result.message || '',
@@ -975,14 +975,56 @@ function normalizeParsedInvoice(parsed = {}) {
     ...parsed,
     supplierName: (parsed.supplierName || '').trim() || '未识别供应商',
     invoiceNo: (parsed.invoiceNo || '').trim(),
-    invoiceDate: parsed.invoiceDate || today(),
+    invoiceDate: normalizeDateInput(parsed.invoiceDate) || today(),
     totalAmount: Number(parsed.totalAmount || 0),
     items
   };
 }
 
 function totalFromItems(items = []) {
-  return items.reduce((sum, item) => sum + Number(item.totalPrice || item.amount || 0), 0);
+  return items.reduce((sum, item) => sum + Number(item.totalPrice ?? item.amount ?? 0), 0);
+}
+
+function normalizeParsedItemForForm(item = {}) {
+  return {
+    productNameOriginal: displayInvoiceItemName(item),
+    productNameNormalized: displayInvoiceItemNormalizedName(item),
+    category: item.category || '',
+    quantity: Number(item.quantity ?? item.qty ?? 0),
+    unit: item.unit || item.spec || item.size || '',
+    unitPrice: Number(item.unitPrice || 0),
+    totalPrice: Number(item.totalPrice ?? item.amount ?? 0),
+    notes: item.notes || ''
+  };
+}
+
+function displayInvoiceItemName(item = {}) {
+  return String(item.name || item.productNameOriginal || [item.nameCn, item.nameEn].filter(Boolean).join(' ')).trim();
+}
+
+function displayInvoiceItemNormalizedName(item = {}) {
+  return String(item.normalizedName || item.productNameNormalized || displayInvoiceItemName(item)).trim().toLowerCase();
+}
+
+function normalizeDateInput(value) {
+  const text = String(value || '').trim();
+  if (!text) return '';
+  let match = text.match(/^(\d{4})[-/](\d{1,2})[-/](\d{1,2})$/);
+  if (match) return formatDateInput(match[1], match[2], match[3]);
+  match = text.match(/^(\d{1,2})\/(\d{1,2})\/(\d{4})$/);
+  if (match) return formatDateInput(match[3], match[1], match[2]);
+  return '';
+}
+
+function formatDateInput(year, month, day) {
+  const y = Number(year);
+  const m = Number(month);
+  const d = Number(day);
+  if (!Number.isInteger(y) || !Number.isInteger(m) || !Number.isInteger(d)) return '';
+  if (y < 1900 || y > 2200 || m < 1 || m > 12 || d < 1 || d > 31) return '';
+  const date = new Date(Date.UTC(y, m - 1, d));
+  if (date.getUTCFullYear() !== y || date.getUTCMonth() !== m - 1 || date.getUTCDate() !== d) return '';
+  return `${String(y).padStart(4, '0')}-${String(m).padStart(2, '0')}-${String(d).padStart(2, '0')}`;
 }
 
 function normalizedKey(value) {

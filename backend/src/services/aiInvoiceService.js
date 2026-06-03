@@ -31,6 +31,17 @@ export async function recognizeInvoiceWithAI(imagePath, options = {}) {
             text: [
               'Extract this supplier invoice into strict JSON.',
               'Do not save anything. Return only JSON matching the requested schema.',
+              'Do not extract English only. Preserve the original Chinese text from the invoice exactly as printed.',
+              'Do not translate Chinese into English. Do not translate English into Chinese.',
+              'Preserve both Chinese and English product names when both appear for the same item.',
+              'Do not drop Chinese flavor, size, or specification text inside Chinese parentheses.',
+              'If an item has Chinese and English on adjacent lines, return both in the same item.',
+              'If an item only has English, set nameCn to an empty string.',
+              'If an item only has Chinese, set nameEn to an empty string.',
+              'Set name to the display name: nameCn + space + nameEn when both exist.',
+              'Set normalizedName to the same display name, trimmed and lowercased for English letters, without removing Chinese.',
+              'Example item: Chinese line "卡奇锅巴（香辣味）" and English line "K.Q. Rice Chips" must return nameCn "卡奇锅巴（香辣味）", nameEn "K.Q. Rice Chips", name "卡奇锅巴（香辣味） K.Q. Rice Chips", normalizedName "卡奇锅巴（香辣味） k.q. rice chips".',
+              'Return invoiceDate as yyyy-MM-dd when possible.',
               'Use the invoice Total as totalAmount. Do not overwrite it with item sum.',
               'If unsure, add warnings and lower confidence.',
               'Schema:',
@@ -68,17 +79,31 @@ function invoiceJsonShape() {
     invoiceDate: '',
     totalAmount: 0,
     items: [
-      { code: '', name: '', size: '', quantity: 0, unitPrice: 0, amount: 0 }
+      {
+        nameCn: '',
+        nameEn: '',
+        name: '',
+        normalizedName: '',
+        barcode: '',
+        spec: '',
+        qty: 0,
+        unit: '',
+        unitPrice: 0,
+        totalPrice: 0
+      }
     ],
     templateCandidate: {
       supplierKeywords: [],
       tableHeaderKeywords: [],
       columns: [
-        { name: 'code', keywords: ['Code', 'Item'] },
+        { name: 'barcode', keywords: ['Code', 'Barcode', 'Item'] },
+        { name: 'nameCn', keywords: ['Chinese Name', '中文品名'] },
+        { name: 'nameEn', keywords: ['Description', 'Name', 'Product'] },
         { name: 'name', keywords: ['Description', 'Name'] },
-        { name: 'size', keywords: ['Size', 'Pack'] },
+        { name: 'spec', keywords: ['Size', 'Pack', 'Spec'] },
+        { name: 'qty', keywords: ['Qty', 'Quantity'] },
         { name: 'unitPrice', keywords: ['Unit Price', 'Price'] },
-        { name: 'amount', keywords: ['Amount', 'Total'] }
+        { name: 'totalPrice', keywords: ['Amount', 'Total'] }
       ]
     },
     confidence: 0,

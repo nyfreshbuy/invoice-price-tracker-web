@@ -11,20 +11,58 @@ export function normalizeInvoiceResult(result = {}) {
   return {
     supplierName: result.supplierName || '',
     invoiceNo: result.invoiceNo || '',
-    invoiceDate: result.invoiceDate || '',
+    invoiceDate: normalizeInvoiceDate(result.invoiceDate),
     totalAmount: Number(result.totalAmount || 0),
-    items: items.map((item) => ({
-      code: item.code || '',
-      name: item.name || item.productNameOriginal || '',
-      size: item.size || '',
-      quantity: Number(item.quantity || 0),
-      unitPrice: Number(item.unitPrice || item.price || 0),
-      amount: Number(item.amount || item.totalPrice || 0)
-    })),
+    items: items.map(normalizeInvoiceItem),
     templateCandidate: result.templateCandidate || defaultTemplateCandidate(result.supplierName || ''),
     confidence: Number(result.confidence || 0),
     warnings: Array.isArray(result.warnings) ? result.warnings : []
   };
+}
+
+export function normalizeInvoiceDate(value) {
+  const text = String(value || '').trim();
+  if (!text) return '';
+
+  let match = text.match(/^(\d{4})[-/](\d{1,2})[-/](\d{1,2})$/);
+  if (match) return formatDateParts(match[1], match[2], match[3]);
+
+  match = text.match(/^(\d{1,2})\/(\d{1,2})\/(\d{4})$/);
+  if (match) return formatDateParts(match[3], match[1], match[2]);
+
+  return '';
+}
+
+export function normalizeInvoiceItem(item = {}) {
+  const nameCn = String(item.nameCn || '').trim();
+  const nameEn = String(item.nameEn || '').trim();
+  const legacyName = String(item.name || item.productNameOriginal || '').trim();
+  const name = String(item.name || [nameCn, nameEn].filter(Boolean).join(' ') || legacyName).trim();
+  const normalizedName = String(item.normalizedName || item.productNameNormalized || name).trim().toLowerCase();
+
+  return {
+    nameCn,
+    nameEn,
+    name,
+    normalizedName,
+    barcode: item.barcode || item.code || '',
+    spec: item.spec || item.size || '',
+    qty: Number(item.qty ?? item.quantity ?? 0),
+    unit: item.unit || '',
+    unitPrice: Number(item.unitPrice ?? item.price ?? 0),
+    totalPrice: Number(item.totalPrice ?? item.amount ?? 0)
+  };
+}
+
+function formatDateParts(year, month, day) {
+  const y = Number(year);
+  const m = Number(month);
+  const d = Number(day);
+  if (!Number.isInteger(y) || !Number.isInteger(m) || !Number.isInteger(d)) return '';
+  if (y < 1900 || y > 2200 || m < 1 || m > 12 || d < 1 || d > 31) return '';
+  const date = new Date(Date.UTC(y, m - 1, d));
+  if (date.getUTCFullYear() !== y || date.getUTCMonth() !== m - 1 || date.getUTCDate() !== d) return '';
+  return `${String(y).padStart(4, '0')}-${String(m).padStart(2, '0')}-${String(d).padStart(2, '0')}`;
 }
 
 export function defaultTemplateCandidate(supplierName) {
@@ -32,12 +70,14 @@ export function defaultTemplateCandidate(supplierName) {
     supplierKeywords: supplierName ? [supplierName] : [],
     tableHeaderKeywords: ['Code', 'Item', 'Description', 'Name', 'Qty', 'Price', 'Amount', 'Total'],
     columns: [
-      { name: 'code', keywords: ['Code', 'Item'] },
+      { name: 'barcode', keywords: ['Code', 'Barcode', 'Item'] },
+      { name: 'nameCn', keywords: ['Chinese Name', '中文品名'] },
+      { name: 'nameEn', keywords: ['Description', 'Name', 'Product'] },
       { name: 'name', keywords: ['Description', 'Name', 'Product'] },
-      { name: 'size', keywords: ['Size', 'Pack'] },
-      { name: 'quantity', keywords: ['Qty', 'Quantity'] },
+      { name: 'spec', keywords: ['Size', 'Pack', 'Spec'] },
+      { name: 'qty', keywords: ['Qty', 'Quantity'] },
       { name: 'unitPrice', keywords: ['Unit Price', 'Price'] },
-      { name: 'amount', keywords: ['Amount', 'Total'] }
+      { name: 'totalPrice', keywords: ['Amount', 'Total'] }
     ]
   };
 }
@@ -185,9 +225,8 @@ function findValueByKeywords(lines, keywords = []) {
 
 function findDateByKeywords(lines, keywords = []) {
   const relevant = lines.find((line) => keywords.some((keyword) => line.toLowerCase().includes(String(keyword).toLowerCase()))) || lines.join(' ');
-  const match = relevant.match(/(\d{4})[-/.年](\d{1,2})[-/.月](\d{1,2})/);
-  if (!match) return '';
-  return `${match[1]}-${match[2].padStart(2, '0')}-${match[3].padStart(2, '0')}`;
+  const dateText = relevant.match(/\d{4}[-/]\d{1,2}[-/]\d{1,2}|\d{1,2}\/\d{1,2}\/\d{4}/)?.[0] || '';
+  return normalizeInvoiceDate(dateText);
 }
 
 function findAmountByKeywords(lines, keywords = []) {
@@ -214,14 +253,25 @@ function parseItemLines(lines, totalAmount) {
     const unitPrice = Number(numbers[numbers.length - 2]);
     const quantity = numbers.length >= 3 ? Number(numbers[numbers.length - 3]) : (unitPrice > 0 ? amount / unitPrice : 0);
     if (totalAmount > 0 && amount > totalAmount * 1.1) continue;
-    items.push({ code: '', name, size: '', quantity, unitPrice, amount });
+    items.push({
+      nameCn: /[\u3400-\u9fff]/.test(name) ? name : '',
+      nameEn: /[\u3400-\u9fff]/.test(name) ? '' : name,
+      name,
+      normalizedName: name.trim().toLowerCase(),
+      barcode: '',
+      spec: '',
+      qty: quantity,
+      unit: '',
+      unitPrice,
+      totalPrice: amount
+    });
   }
   return items;
 }
 
 function validateTotal(items, totalAmount) {
   if (!totalAmount || items.length === 0) return [];
-  const itemTotal = items.reduce((sum, item) => sum + Number(item.amount || 0), 0);
+  const itemTotal = items.reduce((sum, item) => sum + Number(item.totalPrice ?? item.amount ?? 0), 0);
   const diffRatio = Math.abs(itemTotal - totalAmount) / totalAmount;
   return diffRatio > 0.05 ? [`Item total ${itemTotal.toFixed(2)} differs from invoice total ${totalAmount.toFixed(2)} by more than 5%.`] : [];
 }
