@@ -306,8 +306,19 @@ export const localDb = {
 
   async getInvoices() {
     const suppliers = await all('suppliers');
+    const invoiceItems = (await all('invoice_items')).filter(active);
     return (await all('invoices')).filter(active).map((invoice) => {
       const supplier = resolveByAnyId(suppliers, invoice.supplierId);
+      const invoiceIds = [invoice.id, invoice.localId, invoice.serverId].filter(Boolean);
+      const items = invoiceItems.filter((item) => invoiceIds.includes(item.invoiceId));
+      return {
+        ...invoice,
+        supplierName: supplier?.name || '未命名供应商',
+        itemCount: items.length,
+        itemNames: items.map((item) => item.productNameNormalized || item.productNameOriginal || ''),
+        itemTotal: items.reduce((sum, item) => sum + Number(item.totalPrice || 0), 0),
+        itemTotalQuantity: items.reduce((sum, item) => sum + Number(item.quantity || 0), 0)
+      };
       return { ...invoice, supplierName: supplier?.name || '未命名供应商' };
     }).sort((a, b) => `${b.invoiceDate || ''}${b.createdAt || ''}`.localeCompare(`${a.invoiceDate || ''}${a.createdAt || ''}`));
   },

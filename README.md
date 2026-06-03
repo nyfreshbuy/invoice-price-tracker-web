@@ -9,44 +9,19 @@ This is the PWA version of InvoicePriceTracker.
 - Local development database: SQLite
 - Render production database: PostgreSQL through `DATABASE_URL`
 
-## Public Multi-User Version
+## Current Testing Mode
 
-The app now supports:
+The project currently supports `DEMO_NO_AUTH` mode for testing.
 
-- User registration and login
-- Company/store isolation through `companyId`
-- IndexedDB local-first writes
-- Offline pending changes
-- Automatic sync after reconnecting
-- Render Static Site frontend
-- Render Web Service backend
-- PostgreSQL cloud database on Render
-- AI Vision calls only from the backend
-
-OpenAI keys must only be configured in backend environment variables. Never put `OPENAI_API_KEY` in the frontend.
-
-## DEMO_NO_AUTH Mode
-
-Current testing mode skips login by default.
-
-- Frontend default demo company: `demo-company` / `测试公司`
-- Frontend default demo user: `demo-user` / `demo`
+- Frontend skips login when `VITE_DEMO_NO_AUTH=true`
+- Backend allows requests without `Authorization` when `DEMO_NO_AUTH=true`
+- Default company: `demo-company` / `测试公司`
+- Default user: `demo-user` / `demo`
 - IndexedDB records are written under `demo-company`
-- Backend requests without `Authorization` are allowed when `DEMO_NO_AUTH` is enabled
-- Sync, invoice, supplier, OCR, and AI invoice APIs use `demo-company` when no token is provided
+- Sync, invoice, supplier, OCR, AI invoice, and recognition task APIs use `demo-company` when no token is provided
 - Login and registration code is still present and can be restored later
 
-Environment variables:
-
-```text
-# backend
-DEMO_NO_AUTH=true
-
-# frontend
-VITE_DEMO_NO_AUTH=true
-```
-
-To restore normal login for production:
+To restore normal login:
 
 ```text
 # backend
@@ -54,6 +29,42 @@ DEMO_NO_AUTH=false
 
 # frontend
 VITE_DEMO_NO_AUTH=false
+```
+
+## Background Invoice Recognition
+
+Invoice image recognition now runs as a backend task, so the frontend page does not need to stay open.
+
+Flow:
+
+1. Frontend uploads an image to `POST /api/invoice-recognition/tasks`.
+2. Backend saves the original image under `UPLOAD_DIR`.
+3. Backend creates a recognition task and immediately returns `taskId`.
+4. Backend runs OCR/template/AI Vision asynchronously.
+5. Frontend polls task status and can show historical task records.
+6. When recognition completes, backend saves the recognized invoice and items to the database.
+7. Failed tasks keep their error message and can be retried.
+
+Task statuses:
+
+- `pending`
+- `processing`
+- `completed`
+- `failed`
+
+Recognition task APIs:
+
+```text
+POST /api/invoice-recognition/tasks
+GET /api/invoice-recognition/tasks
+GET /api/invoice-recognition/tasks/:id
+POST /api/invoice-recognition/tasks/:id/retry
+```
+
+The frontend includes a task history page:
+
+```text
+/recognition-tasks
 ```
 
 ## Sync Model
@@ -75,7 +86,7 @@ Every synced record includes:
 - `updatedAt`
 - `deletedAt`
 
-The backend ignores client-provided `companyId` for authorization decisions. `/api/sync/push` and `/api/sync/pull` use the logged-in user's token and only read/write that user's company data.
+The backend ignores client-provided `companyId` for authorization decisions. `/api/sync/push` and `/api/sync/pull` use the authenticated user's company, or `demo-company` in `DEMO_NO_AUTH` mode.
 
 Supported sync tables:
 
@@ -86,6 +97,8 @@ Supported sync tables:
 - `products`
 - `price_history`
 - `supplier_templates`
+
+Recognition task history is stored in the backend table `invoice_recognition_tasks`.
 
 ## Run Locally
 
@@ -142,13 +155,14 @@ Local SQLite development can run with no required env vars.
 Render production should use:
 
 ```text
-DATABASE_URL=PostgreSQL连接地址
-OPENAI_API_KEY=你的 OpenAI Key
+DATABASE_URL=PostgreSQL connection string
+OPENAI_API_KEY=your OpenAI key
 OPENAI_MODEL=gpt-4.1-mini
-CORS_ORIGIN=https://前端地址.onrender.com
+CORS_ORIGIN=https://your-frontend-name.onrender.com
 DATA_DIR=/var/data
 UPLOAD_DIR=/var/data/uploads
-AUTH_SECRET=生成一个长随机字符串
+AUTH_SECRET=generate-a-long-random-secret
+DEMO_NO_AUTH=true
 ```
 
 `DATABASE_URL` controls database mode:
@@ -156,12 +170,15 @@ AUTH_SECRET=生成一个长随机字符串
 - Missing: SQLite
 - Present: PostgreSQL
 
+OpenAI keys must only be configured in backend environment variables. Never put `OPENAI_API_KEY` in the frontend.
+
 ## Frontend Environment Variables
 
 Render Static Site:
 
 ```text
-VITE_API_BASE_URL=https://后端地址.onrender.com
+VITE_API_BASE_URL=https://your-backend-name.onrender.com
+VITE_DEMO_NO_AUTH=true
 ```
 
 ## Render Deployment
@@ -170,7 +187,7 @@ Deploy the backend first, then the frontend.
 
 ### 1. PostgreSQL
 
-Create a Render PostgreSQL database and copy its internal or external connection string into the backend `DATABASE_URL`.
+Create a Render PostgreSQL database and copy its connection string into the backend `DATABASE_URL`.
 
 ### 2. Backend: Render Web Service
 
@@ -182,13 +199,14 @@ Create a Render PostgreSQL database and copy its internal or external connection
 Environment variables:
 
 ```text
-DATABASE_URL=PostgreSQL连接地址
-OPENAI_API_KEY=你的 OpenAI Key
+DATABASE_URL=PostgreSQL connection string
+OPENAI_API_KEY=your OpenAI key
 OPENAI_MODEL=gpt-4.1-mini
 CORS_ORIGIN=https://your-frontend-name.onrender.com
 DATA_DIR=/var/data
 UPLOAD_DIR=/var/data/uploads
-AUTH_SECRET=生成一个长随机字符串
+AUTH_SECRET=generate-a-long-random-secret
+DEMO_NO_AUTH=true
 ```
 
 Optional Render Disk:
@@ -197,7 +215,7 @@ Optional Render Disk:
 /var/data
 ```
 
-The disk is useful for uploaded invoice images. PostgreSQL stores the business data.
+The disk is useful for uploaded invoice images. PostgreSQL stores the business data and recognition task history.
 
 Health check:
 
@@ -215,6 +233,7 @@ Environment variable:
 
 ```text
 VITE_API_BASE_URL=https://your-backend-name.onrender.com
+VITE_DEMO_NO_AUTH=true
 ```
 
 After the frontend deploys, update backend:

@@ -94,6 +94,11 @@ export const api = {
     console.log('OCR upload URL:', `${API_BASE}/api/ocr`);
     return request('/api/ocr', { method: 'POST', body: formData });
   },
+  createRecognitionTask: (formData) => request('/api/invoice-recognition/tasks', { method: 'POST', body: formData }),
+  getRecognitionTasks: () => request('/api/invoice-recognition/tasks'),
+  getRecognitionTask: (id) => request(`/api/invoice-recognition/tasks/${id}`),
+  retryRecognitionTask: (id) => request(`/api/invoice-recognition/tasks/${id}/retry`, { method: 'POST' }),
+  forceSaveRecognitionTask: (id) => request(`/api/invoice-recognition/tasks/${id}/force-save`, { method: 'POST' }),
   syncPush: (payload) => request('/api/sync/push', { method: 'POST', body: JSON.stringify(payload) }),
   syncPull: (since) => request(`/api/sync/pull${since ? `?since=${encodeURIComponent(since)}` : ''}`)
 };

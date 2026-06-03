@@ -367,6 +367,394 @@ async function invoiceWithSupplierRows(companyId) {
   `, [companyId]);
 }
 
+function parseTaskRow(row) {
+  if (!row) return null;
+  let result = null;
+  try {
+    result = row.resultJson ? JSON.parse(row.resultJson) : null;
+  } catch {
+    result = null;
+  }
+  return {
+    ...row,
+    usedTemplate: Boolean(Number(row.usedTemplate || 0)),
+    usedAI: Boolean(Number(row.usedAI || 0)),
+    retryCount: Number(row.retryCount || 0),
+    fileSize: Number(row.fileSize || 0),
+    result
+  };
+}
+
+function taskFileFromRow(task) {
+  return {
+    path: task.filePath,
+    filename: path.basename(task.filePath || task.imagePath || ''),
+    originalname: task.originalName || '',
+    mimetype: task.mimeType || 'image/jpeg',
+    size: Number(task.fileSize || 0)
+  };
+}
+
+const runningRecognitionTasks = new Set();
+
+async function createRecognitionTask(file, user, deviceId = 'web') {
+  const timestamp = nowIso();
+  const task = {
+    id: id(),
+    companyId: user.companyId,
+    status: 'pending',
+    imagePath: `/uploads/${file.filename}`,
+    filePath: file.path,
+    originalName: file.originalname || '',
+    mimeType: file.mimetype || '',
+    fileSize: Number(file.size || 0),
+    source: '',
+    recognitionSource: '',
+    ocrLanguage: '',
+    usedTemplate: 0,
+    usedAI: 0,
+    invoiceId: '',
+    resultJson: '',
+    error: '',
+    retryCount: 0,
+    createdAt: timestamp,
+    updatedAt: timestamp,
+    startedAt: '',
+    completedAt: '',
+    deviceId
+  };
+  await upsertRecord('invoice_recognition_tasks', task);
+  enqueueRecognitionTask(task.id);
+  return parseTaskRow(task);
+}
+
+function enqueueRecognitionTask(taskId) {
+  if (!taskId || runningRecognitionTasks.has(taskId)) return;
+  runningRecognitionTasks.add(taskId);
+  setImmediate(() => {
+    processRecognitionTask(taskId)
+      .catch((error) => console.error('[recognition-task] unhandled failure:', taskId, error))
+      .finally(() => runningRecognitionTasks.delete(taskId));
+  });
+}
+
+async function processRecognitionTask(taskId) {
+  const task = await queryGet(`SELECT * FROM ${quoteTable('invoice_recognition_tasks')} WHERE ${quoteIdentifier('id')} = ? LIMIT 1`, [taskId]);
+  if (!task || !['pending', 'processing'].includes(task.status)) return;
+  if (!task.filePath || !fs.existsSync(task.filePath)) {
+    await markRecognitionTaskFailed(taskId, `Invoice image file not found: ${task.filePath || ''}`);
+    return;
+  }
+
+  const startedAt = nowIso();
+  await run(`
+    UPDATE ${quoteTable('invoice_recognition_tasks')}
+    SET ${quoteIdentifier('status')} = 'processing',
+        ${quoteIdentifier('startedAt')} = ?,
+        ${quoteIdentifier('updatedAt')} = ?,
+        ${quoteIdentifier('error')} = ''
+    WHERE ${quoteIdentifier('id')} = ?
+  `, [startedAt, startedAt, taskId]);
+
+  try {
+    console.log('[recognition-task] start:', taskId);
+    const result = await withTimeout(recognizeInvoice(taskFileFromRow(task), { companyId: task.companyId }), OCR_TIMEOUT_MS, 'Invoice recognition');
+    const saveResult = await saveRecognizedInvoiceFromTask(task, result);
+    const completedResult = {
+      ...result,
+      duplicateCheck: saveResult.duplicateCheck,
+      imageHash: saveResult.imageHash || result.imageHash || ''
+    };
+    const completedAt = nowIso();
+    await run(`
+      UPDATE ${quoteTable('invoice_recognition_tasks')}
+      SET ${quoteIdentifier('status')} = 'completed',
+          ${quoteIdentifier('source')} = ?,
+          ${quoteIdentifier('recognitionSource')} = ?,
+          ${quoteIdentifier('ocrLanguage')} = ?,
+          ${quoteIdentifier('usedTemplate')} = ?,
+          ${quoteIdentifier('usedAI')} = ?,
+          ${quoteIdentifier('invoiceId')} = ?,
+          ${quoteIdentifier('resultJson')} = ?,
+          ${quoteIdentifier('error')} = '',
+          ${quoteIdentifier('completedAt')} = ?,
+          ${quoteIdentifier('updatedAt')} = ?
+      WHERE ${quoteIdentifier('id')} = ?
+    `, [
+      completedResult.source || '',
+      completedResult.recognitionSource || '',
+      completedResult.ocrLanguage || OCR_LANGUAGE,
+      completedResult.usedTemplate ? 1 : 0,
+      completedResult.usedAI ? 1 : 0,
+      saveResult.invoiceId || '',
+      JSON.stringify(completedResult),
+      completedAt,
+      completedAt,
+      taskId
+    ]);
+    console.log('[recognition-task] completed:', taskId, saveResult.invoiceId || 'duplicate-skipped');
+  } catch (error) {
+    await markRecognitionTaskFailed(taskId, describeOcrError(error));
+  }
+}
+
+async function markRecognitionTaskFailed(taskId, error) {
+  const timestamp = nowIso();
+  console.error('[recognition-task] failed:', taskId, error);
+  await run(`
+    UPDATE ${quoteTable('invoice_recognition_tasks')}
+    SET ${quoteIdentifier('status')} = 'failed',
+        ${quoteIdentifier('error')} = ?,
+        ${quoteIdentifier('completedAt')} = ?,
+        ${quoteIdentifier('updatedAt')} = ?
+    WHERE ${quoteIdentifier('id')} = ?
+  `, [error || 'Recognition failed', timestamp, timestamp, taskId]);
+}
+
+function emptyDuplicateCheck() {
+  return {
+    isDuplicate: false,
+    duplicate: false,
+    duplicateReason: '',
+    sameInvoiceGroup: false,
+    possibleSameInvoicePages: false,
+    sameInvoiceGroupReason: '',
+    sameSupplierBatch: false,
+    skippedSave: false
+  };
+}
+
+function normalizeComparisonText(value) {
+  return String(value || '').trim().toLowerCase();
+}
+
+function normalizeSupplierComparisonKey(value) {
+  return normalizeComparisonText(value).replace(/[^a-z0-9\u4e00-\u9fff]+/g, '');
+}
+
+function comparisonAmount(value) {
+  const number = Number(value || 0);
+  return Number.isFinite(number) ? number : 0;
+}
+
+function amountsNearlyEqual(a, b) {
+  return Math.abs(comparisonAmount(a) - comparisonAmount(b)) < 0.01;
+}
+
+function comparisonSimilarity(a, b) {
+  const left = String(a || '');
+  const right = String(b || '');
+  if (!left && !right) return 1;
+  if (!left || !right) return 0;
+  const previous = Array.from({ length: right.length + 1 }, (_, index) => index);
+  for (let i = 0; i < left.length; i += 1) {
+    let diagonal = previous[0];
+    previous[0] = i + 1;
+    for (let j = 0; j < right.length; j += 1) {
+      const oldDiagonal = previous[j + 1];
+      const cost = left[i] === right[j] ? 0 : 1;
+      previous[j + 1] = Math.min(previous[j + 1] + 1, previous[j] + 1, diagonal + cost);
+      diagonal = oldDiagonal;
+    }
+  }
+  return 1 - previous[right.length] / Math.max(left.length, right.length);
+}
+
+function supplierNamesNearlyEqual(a, b) {
+  const left = normalizeSupplierComparisonKey(a);
+  const right = normalizeSupplierComparisonKey(b);
+  if (!left || !right) return false;
+  if (left === right) return true;
+  if (left.length >= 5 && right.includes(left)) return true;
+  if (right.length >= 5 && left.includes(right)) return true;
+  return comparisonSimilarity(left, right) >= 0.86;
+}
+
+function itemComparisonName(item = {}) {
+  return normalizeComparisonText(item.productNameNormalized || item.normalizedName || item.productNameOriginal || item.name || [item.nameCn, item.nameEn].filter(Boolean).join(' ')).replace(/\s+/g, ' ');
+}
+
+function invoiceComparisonFingerprint({ supplierName = '', invoiceNo = '', totalAmount = 0, items = [] }) {
+  return {
+    supplierName,
+    invoiceNo: normalizeComparisonText(invoiceNo),
+    totalAmount: comparisonAmount(totalAmount),
+    itemCount: items.length,
+    itemNames: items.map(itemComparisonName).filter(Boolean).sort(),
+    totalQuantity: comparisonAmount(items.reduce((sum, item) => sum + Number(item.quantity ?? item.qty ?? 0), 0))
+  };
+}
+
+function itemNameSimilarity(left = [], right = []) {
+  if (left.length === 0 && right.length === 0) return 1;
+  if (left.length === 0 || right.length === 0) return 0;
+  const rightSet = new Set(right);
+  let matches = 0;
+  for (const name of left) {
+    if (rightSet.has(name) || right.some((candidate) => comparisonSimilarity(name, candidate) >= 0.88)) matches += 1;
+  }
+  return matches / Math.max(left.length, right.length);
+}
+
+function invoiceItemsNearlyEqual(a, b) {
+  if (a.itemCount !== b.itemCount) return false;
+  if (a.itemCount === 0 && b.itemCount === 0) return true;
+  if (itemNameSimilarity(a.itemNames, b.itemNames) >= 0.8) return true;
+  return a.itemNames.length === 0 && b.itemNames.length === 0 && amountsNearlyEqual(a.totalQuantity, b.totalQuantity);
+}
+
+function compareInvoiceForDuplicate(current, candidate, label) {
+  const result = emptyDuplicateCheck();
+  if (!current.invoiceNo || current.invoiceNo !== candidate.invoiceNo) return result;
+  if (!supplierNamesNearlyEqual(current.supplierName, candidate.supplierName)) return result;
+
+  result.sameSupplierBatch = true;
+  const sameAmount = amountsNearlyEqual(current.totalAmount, candidate.totalAmount);
+  const sameItems = invoiceItemsNearlyEqual(current, candidate);
+
+  if (sameAmount && sameItems) {
+    result.isDuplicate = true;
+    result.duplicate = true;
+    result.duplicateReason = `${label}：同供应商、同发票号、同金额，且商品明细高度相似`;
+    result.skippedSave = true;
+    return result;
+  }
+
+  result.sameInvoiceGroup = true;
+  result.possibleSameInvoicePages = !sameAmount;
+  result.sameInvoiceGroupReason = sameAmount
+    ? '同供应商同发票号，金额相同但商品明细不同，请人工确认。'
+    : '同供应商同发票号，但金额不同，可能是同一发票的不同页/同批次发票，请人工确认。';
+  return result;
+}
+
+async function sha256File(filePath) {
+  if (!filePath || !fs.existsSync(filePath)) return '';
+  return new Promise((resolve, reject) => {
+    const hash = crypto.createHash('sha256');
+    const stream = fs.createReadStream(filePath);
+    stream.on('data', (chunk) => hash.update(chunk));
+    stream.on('error', reject);
+    stream.on('end', () => resolve(hash.digest('hex')));
+  });
+}
+
+async function findRecognitionDuplicate(companyId, parsed, totalAmount, currentItems, excludeInvoiceId = '') {
+  const current = invoiceComparisonFingerprint({
+    supplierName: parsed.supplierName || '',
+    invoiceNo: parsed.invoiceNo || '',
+    totalAmount,
+    items: currentItems
+  });
+  if (!current.invoiceNo) return emptyDuplicateCheck();
+
+  const candidates = await queryAll(`
+    SELECT invoices.*, suppliers.${quoteIdentifier('name')} AS "supplierName"
+    FROM ${quoteTable('invoices')} invoices
+    LEFT JOIN ${quoteTable('suppliers')} suppliers
+      ON suppliers.${quoteIdentifier('companyId')} = invoices.${quoteIdentifier('companyId')}
+      AND (suppliers.${quoteIdentifier('id')} = invoices.${quoteIdentifier('supplierId')} OR suppliers.${quoteIdentifier('serverId')} = invoices.${quoteIdentifier('supplierId')})
+    WHERE invoices.${quoteIdentifier('companyId')} = ?
+      AND invoices.${quoteIdentifier('deletedAt')} IS NULL
+      AND LOWER(invoices.${quoteIdentifier('invoiceNo')}) = ?
+  `, [companyId, current.invoiceNo]);
+
+  let groupInfo = emptyDuplicateCheck();
+  for (const candidate of candidates) {
+    const candidateIdList = [candidate.id, candidate.localId, candidate.serverId].filter(Boolean);
+    if (excludeInvoiceId && candidateIdList.includes(excludeInvoiceId)) continue;
+    if (candidateIdList.length === 0) continue;
+    const items = await queryAll(`
+      SELECT * FROM ${quoteTable('invoice_items')}
+      WHERE ${quoteIdentifier('companyId')} = ?
+        AND ${quoteIdentifier('deletedAt')} IS NULL
+        AND ${quoteIdentifier('invoiceId')} IN (${candidateIdList.map(() => '?').join(',')})
+    `, [companyId, ...candidateIdList]);
+    const candidateFingerprint = invoiceComparisonFingerprint({
+      supplierName: candidate.supplierName || '',
+      invoiceNo: candidate.invoiceNo || '',
+      totalAmount: candidate.totalAmount || items.reduce((sum, item) => sum + Number(item.totalPrice || 0), 0),
+      items
+    });
+    const duplicateInfo = compareInvoiceForDuplicate(current, candidateFingerprint, '云端已有发票');
+    if (duplicateInfo.isDuplicate) return duplicateInfo;
+    if (duplicateInfo.sameInvoiceGroup && !groupInfo.sameInvoiceGroup) groupInfo = duplicateInfo;
+  }
+  return groupInfo;
+}
+
+async function saveRecognizedInvoiceFromTask(task, result, options = {}) {
+  const parsed = result.parsed || {};
+  const items = Array.isArray(parsed.items) ? parsed.items : [];
+  const deviceId = task.deviceId || 'recognition-task';
+  const companyId = task.companyId;
+  const now = nowIso();
+  const itemTotal = items.reduce((sum, item) => sum + Number(item.totalPrice || 0), 0);
+  const totalAmount = Number(parsed.totalAmount || 0) > 0 ? Number(parsed.totalAmount) : itemTotal;
+  const imageHash = await sha256File(task.filePath);
+  const duplicateCheck = await findRecognitionDuplicate(companyId, parsed, totalAmount, items, task.invoiceId);
+  if (duplicateCheck.isDuplicate && !options.force) {
+    return { invoiceId: '', duplicateCheck, imageHash };
+  }
+  if (options.force) {
+    duplicateCheck.forcedSave = true;
+    duplicateCheck.skippedSave = false;
+  }
+  const supplier = await findOrCreateSupplier(parsed.supplierName, deviceId, companyId);
+  const invoiceId = task.invoiceId || id();
+  const invoice = await prepareRecordWithReferences('invoices', {
+    id: invoiceId,
+    localId: invoiceId,
+    serverId: invoiceId,
+    supplierId: supplier?.serverId || supplier?.id || '',
+    invoiceNo: parsed.invoiceNo || '',
+    invoiceDate: parsed.invoiceDate || today(),
+    imagePath: result.imagePath || task.imagePath || '',
+    ocrText: result.ocrText || '',
+    totalAmount,
+    status: 'recognized',
+    createdAt: task.createdAt || now,
+    updatedAt: now
+  }, deviceId, companyId);
+
+  await withTransaction(async (client) => {
+    await upsertRecord('invoices', invoice, client);
+    await run(`
+      UPDATE ${quoteTable('invoice_items')}
+      SET ${quoteIdentifier('deletedAt')} = ?, ${quoteIdentifier('updatedAt')} = ?
+      WHERE ${quoteIdentifier('companyId')} = ? AND ${quoteIdentifier('invoiceId')} = ?
+    `, [now, now, companyId, invoice.serverId], client);
+    for (const item of items.filter((entry) => (entry.productNameOriginal || entry.name || '').trim())) {
+      const itemRecord = await prepareRecordWithReferences('invoice_items', {
+        productNameOriginal: item.productNameOriginal || item.name || '',
+        productNameNormalized: item.productNameNormalized || item.normalizedName || item.name || '',
+        category: item.category || '',
+        quantity: Number(item.quantity ?? item.qty ?? 0),
+        unit: item.unit || item.spec || '',
+        unitPrice: Number(item.unitPrice || 0),
+        totalPrice: Number(item.totalPrice || 0),
+        notes: item.notes || '',
+        invoiceId: invoice.serverId,
+        supplierId: invoice.supplierId,
+        invoiceDate: invoice.invoiceDate,
+        updatedAt: now
+      }, deviceId, companyId, client);
+      await upsertRecord('invoice_items', itemRecord, client);
+    }
+  });
+
+  return { invoiceId: invoice.serverId || invoice.id, duplicateCheck, imageHash };
+}
+
+async function resumeRecognitionTasks() {
+  const tasks = await queryAll(`
+    SELECT ${quoteIdentifier('id')} FROM ${quoteTable('invoice_recognition_tasks')}
+    WHERE ${quoteIdentifier('status')} IN ('pending', 'processing')
+    ORDER BY ${quoteIdentifier('createdAt')} ASC
+  `);
+  for (const task of tasks) enqueueRecognitionTask(task.id);
+}
+
 app.get('/api/health', (req, res) => {
   res.json({ ok: true, database: usingPostgres ? 'postgres' : 'sqlite', time: nowIso() });
 });
@@ -629,6 +1017,97 @@ app.get('/api/products/:name', requireAuth, asyncHandler(async (req, res) => {
   res.json(rows);
 }));
 
+app.post('/api/invoice-recognition/tasks', requireAuth, upload.single('image'), asyncHandler(async (req, res) => {
+  if (!req.file) {
+    res.status(400).json({ success: false, error: 'No invoice image uploaded' });
+    return;
+  }
+  const task = await createRecognitionTask(req.file, req.user, req.body.deviceId || 'web');
+  res.status(202).json({ success: true, taskId: task.id, task });
+}));
+
+app.get('/api/invoice-recognition/tasks', requireAuth, asyncHandler(async (req, res) => {
+  const rows = await queryAll(`
+    SELECT * FROM ${quoteTable('invoice_recognition_tasks')}
+    WHERE ${quoteIdentifier('companyId')} = ?
+    ORDER BY ${quoteIdentifier('createdAt')} DESC
+  `, [req.user.companyId]);
+  res.json(rows.map(parseTaskRow));
+}));
+
+app.get('/api/invoice-recognition/tasks/:id', requireAuth, asyncHandler(async (req, res) => {
+  const task = await queryGet(`
+    SELECT * FROM ${quoteTable('invoice_recognition_tasks')}
+    WHERE ${quoteIdentifier('id')} = ? AND ${quoteIdentifier('companyId')} = ?
+    LIMIT 1
+  `, [req.params.id, req.user.companyId]);
+  if (!task) return res.status(404).json({ error: 'Recognition task not found' });
+  res.json(parseTaskRow(task));
+}));
+
+app.post('/api/invoice-recognition/tasks/:id/retry', requireAuth, asyncHandler(async (req, res) => {
+  const task = await queryGet(`
+    SELECT * FROM ${quoteTable('invoice_recognition_tasks')}
+    WHERE ${quoteIdentifier('id')} = ? AND ${quoteIdentifier('companyId')} = ?
+    LIMIT 1
+  `, [req.params.id, req.user.companyId]);
+  if (!task) return res.status(404).json({ error: 'Recognition task not found' });
+  if (!task.filePath || !fs.existsSync(task.filePath)) return res.status(400).json({ error: 'Original invoice image is missing' });
+  const timestamp = nowIso();
+  await run(`
+    UPDATE ${quoteTable('invoice_recognition_tasks')}
+    SET ${quoteIdentifier('status')} = 'pending',
+        ${quoteIdentifier('error')} = '',
+        ${quoteIdentifier('startedAt')} = '',
+        ${quoteIdentifier('completedAt')} = '',
+        ${quoteIdentifier('retryCount')} = COALESCE(${quoteIdentifier('retryCount')}, 0) + 1,
+        ${quoteIdentifier('updatedAt')} = ?
+    WHERE ${quoteIdentifier('id')} = ? AND ${quoteIdentifier('companyId')} = ?
+  `, [timestamp, req.params.id, req.user.companyId]);
+  enqueueRecognitionTask(req.params.id);
+  const updated = await queryGet(`
+    SELECT * FROM ${quoteTable('invoice_recognition_tasks')}
+    WHERE ${quoteIdentifier('id')} = ? AND ${quoteIdentifier('companyId')} = ?
+    LIMIT 1
+  `, [req.params.id, req.user.companyId]);
+  res.json({ success: true, task: parseTaskRow(updated) });
+}));
+
+app.post('/api/invoice-recognition/tasks/:id/force-save', requireAuth, asyncHandler(async (req, res) => {
+  const task = await queryGet(`
+    SELECT * FROM ${quoteTable('invoice_recognition_tasks')}
+    WHERE ${quoteIdentifier('id')} = ? AND ${quoteIdentifier('companyId')} = ?
+    LIMIT 1
+  `, [req.params.id, req.user.companyId]);
+  if (!task) return res.status(404).json({ error: 'Recognition task not found' });
+  if (task.status !== 'completed') return res.status(409).json({ error: 'Only completed recognition tasks can be force saved' });
+
+  const parsedTask = parseTaskRow(task);
+  if (parsedTask.invoiceId) return res.json({ success: true, task: parsedTask });
+  if (!parsedTask.result?.parsed) return res.status(409).json({ error: 'Recognition result is empty' });
+
+  const saveResult = await saveRecognizedInvoiceFromTask(task, parsedTask.result, { force: true });
+  const resultJson = {
+    ...parsedTask.result,
+    duplicateCheck: saveResult.duplicateCheck,
+    imageHash: saveResult.imageHash || parsedTask.result.imageHash || ''
+  };
+  const timestamp = nowIso();
+  await run(`
+    UPDATE ${quoteTable('invoice_recognition_tasks')}
+    SET ${quoteIdentifier('invoiceId')} = ?,
+        ${quoteIdentifier('resultJson')} = ?,
+        ${quoteIdentifier('updatedAt')} = ?
+    WHERE ${quoteIdentifier('id')} = ? AND ${quoteIdentifier('companyId')} = ?
+  `, [saveResult.invoiceId || '', JSON.stringify(resultJson), timestamp, req.params.id, req.user.companyId]);
+  const updated = await queryGet(`
+    SELECT * FROM ${quoteTable('invoice_recognition_tasks')}
+    WHERE ${quoteIdentifier('id')} = ? AND ${quoteIdentifier('companyId')} = ?
+    LIMIT 1
+  `, [req.params.id, req.user.companyId]);
+  res.json({ success: true, task: parseTaskRow(updated) });
+}));
+
 app.post('/api/ocr', requireAuth, upload.single('image'), asyncHandler(async (req, res) => {
   console.log('[ocr] request received');
   console.log('[ocr] companyId:', req.user.companyId);
@@ -748,6 +1227,10 @@ if (fs.existsSync(frontendDist)) {
   app.use(express.static(frontendDist));
   app.get('*', (req, res) => res.sendFile(path.join(frontendDist, 'index.html')));
 }
+
+setTimeout(() => {
+  resumeRecognitionTasks().catch((error) => console.error('[recognition-task] resume failed:', error));
+}, 500);
 
 app.listen(PORT, '0.0.0.0', () => {
   console.log(`Server running on 0.0.0.0:${PORT}`);

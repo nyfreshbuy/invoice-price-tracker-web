@@ -40,10 +40,10 @@ const emptySupplier = {
 
 const emptyTemplate = (supplierName = '') => ({
   supplierNameKeywords: supplierName,
-  invoiceNoKeywords: '发票号,单号,票号',
-  dateKeywords: '日期,开票日期',
-  itemTableStartKeywords: '品名,商品,名称',
-  itemTableEndKeywords: '合计,总计',
+  invoiceNoKeywords: '发票号,单号,票号,invoice no,invoice #',
+  dateKeywords: '日期,开票日期,invoice date,date',
+  itemTableStartKeywords: '品名,商品,名称,description,item',
+  itemTableEndKeywords: '合计,总计,total',
   itemNameColumnIndex: 0,
   quantityColumnIndex: 1,
   unitColumnIndex: 2,
@@ -104,6 +104,7 @@ export default function App() {
           <Route path="/invoices" element={<InvoiceListPage />} />
           <Route path="/invoices/new" element={<InvoiceFormPage />} />
           <Route path="/invoices/batch" element={<BatchImportPage />} />
+          <Route path="/recognition-tasks" element={<RecognitionTaskListPage />} />
           <Route path="/invoices/:id" element={<InvoiceDetailPage />} />
           <Route path="/products" element={<ProductSearchPage />} />
           <Route path="/products/:name" element={<ProductDetailPage />} />
@@ -182,8 +183,9 @@ function HomePage() {
   return (
     <Page title="InvoicePriceTracker" subtitle="云端储存、本地离线、自动同步">
       <Section title="发票">
-        <ActionLink to="/invoices/new" icon={<Camera />} title="新增发票" subtitle="先保存到本机，联网后自动同步云端" />
-        <ActionLink to="/invoices/batch" icon={<Upload />} title="批量导入发票" subtitle="多张图片批量 OCR/AI 识别并生成采购批次" />
+        <ActionLink to="/invoices/new" icon={<Camera />} title="新增发票" subtitle="上传后创建后台识别任务，完成后自动保存" />
+        <ActionLink to="/invoices/batch" icon={<Upload />} title="批量导入发票" subtitle="多张图片批量创建后台识别任务" />
+        <ActionLink to="/recognition-tasks" icon={<RefreshCw />} title="识别记录/任务列表" subtitle="查看后台 AI 识别状态和历史结果" />
         <ActionLink to="/invoices" icon={<FileText />} title="发票列表" subtitle="按日期倒序查看本地数据" />
       </Section>
       <Section title="查询">
@@ -234,6 +236,39 @@ function BatchImportPage() {
   const groupedEntries = useMemo(() => groupBySupplier(analyzedEntries), [analyzedEntries]);
   const successfulEntries = analyzedEntries.filter((entry) => entry.status === 'success');
   const nonDuplicateEntries = successfulEntries.filter((entry) => !entry.isDuplicate);
+  const sameInvoiceGroupEntries = successfulEntries.filter((entry) => entry.sameInvoiceGroup && !entry.isDuplicate);
+  const activeTaskIds = entries.filter((entry) => entry.taskId && !['success', 'failed'].includes(entry.status)).map((entry) => entry.taskId);
+
+  useEffect(() => {
+    if (activeTaskIds.length === 0) return undefined;
+    let cancelled = false;
+    async function refreshTasks() {
+      try {
+        const tasks = await Promise.all(activeTaskIds.map((taskId) => api.getRecognitionTask(taskId)));
+        if (cancelled) return;
+        setEntries((current) => current.map((entry) => {
+          const task = tasks.find((item) => item.id === entry.taskId);
+          if (!task) return entry;
+          return {
+            ...entry,
+            task,
+            status: taskStatusToEntryStatus(task.status),
+            result: task.result || entry.result,
+            error: task.error || entry.error
+          };
+        }));
+        if (tasks.some((task) => task.status === 'completed')) syncNow();
+      } catch (error) {
+        console.error('Refresh recognition tasks failed:', error);
+      }
+    }
+    refreshTasks();
+    const timer = window.setInterval(refreshTasks, 3000);
+    return () => {
+      cancelled = true;
+      window.clearInterval(timer);
+    };
+  }, [activeTaskIds.join('|')]);
 
   function updateEntry(id, patch) {
     setEntries((current) => current.map((entry) => entry.id === id ? { ...entry, ...patch } : entry));
@@ -265,13 +300,15 @@ function BatchImportPage() {
       const data = new FormData();
       data.append('image', entry.file);
       try {
-        const result = await api.ocrUpload(data);
-        console.log('Batch OCR result:', entry.fileName, result);
-        if (result.success === false) {
-          updateEntry(entry.id, { status: 'failed', result, error: result.error || '识别失败' });
-        } else {
-          updateEntry(entry.id, { status: 'success', result, error: '' });
-        }
+        const created = await api.createRecognitionTask(data);
+        console.log('Batch recognition task:', entry.fileName, created);
+        updateEntry(entry.id, {
+          taskId: created.taskId,
+          task: created.task,
+          status: taskStatusToEntryStatus(created.task?.status || 'pending'),
+          result: created.task?.result || null,
+          error: ''
+        });
       } catch (error) {
         console.error('Batch OCR failed:', entry.fileName, error);
         updateEntry(entry.id, { status: 'failed', error: error.message || '识别失败' });
@@ -280,54 +317,12 @@ function BatchImportPage() {
   }
 
   async function saveBatch() {
-    if (nonDuplicateEntries.length === 0) {
-      setMessage('没有可保存的非重复发票。');
-      return;
-    }
-    setSaving(true);
-    setMessage('');
-    try {
-      const supplierNames = new Set(nonDuplicateEntries.map((entry) => entry.parsed.supplierName || '未命名供应商'));
-      const totalAmount = nonDuplicateEntries.reduce((sum, entry) => sum + Number(entry.parsed.totalAmount || entry.itemTotal || 0), 0);
-      const batch = await localDb.createPurchaseBatch({
-        batchName: `采购批次 ${new Date().toLocaleString()}`,
-        supplierCount: supplierNames.size,
-        invoiceCount: nonDuplicateEntries.length,
-        totalAmount
-      });
-
-      for (const entry of nonDuplicateEntries) {
-        await localDb.createInvoice({
-          batchId: batch.id,
-          supplierName: entry.parsed.supplierName || '未命名供应商',
-          invoiceNo: entry.parsed.invoiceNo || '',
-          invoiceDate: entry.parsed.invoiceDate || today(),
-          totalAmount: Number(entry.parsed.totalAmount || entry.itemTotal || 0),
-          imagePath: entry.result.imagePath || '',
-          ocrText: entry.result.ocrText || '',
-          items: (entry.parsed.items || []).map((item) => ({
-            productNameOriginal: displayInvoiceItemName(item),
-            productNameNormalized: displayInvoiceItemNormalizedName(item),
-            category: item.category || '',
-            quantity: Number(item.quantity ?? item.qty ?? 0),
-            unit: item.unit || item.spec || item.size || '',
-            unitPrice: Number(item.unitPrice || 0),
-            totalPrice: Number(item.totalPrice ?? item.amount ?? 0),
-            notes: item.notes || ''
-          }))
-        });
-      }
-      syncNow();
-      navigate('/invoices');
-    } catch (error) {
-      setMessage(error.message || '保存批次失败');
-    } finally {
-      setSaving(false);
-    }
+    syncNow();
+    navigate('/recognition-tasks');
   }
 
   return (
-    <Page title="批量导入发票" subtitle="一次选择多张图片，批量 OCR/AI 识别并创建采购批次">
+    <Page title="批量导入发票" subtitle="一次选择多张图片，后台 OCR/AI 识别并自动保存">
       <Section title="选择图片">
         <div className="field">
           <span>发票图片</span>
@@ -352,6 +347,7 @@ function BatchImportPage() {
         <Info label="已选择" value={entries.length} />
         <Info label="识别成功" value={successfulEntries.length} />
         <Info label="重复发票" value={analyzedEntries.filter((entry) => entry.isDuplicate).length} />
+        <Info label="同号不同金额" value={sameInvoiceGroupEntries.length} />
         <Info label="可保存" value={nonDuplicateEntries.length} />
       </Section>
 
@@ -361,8 +357,9 @@ function BatchImportPage() {
             <div className="detail-item" key={entry.id}>
               <div className="split">
                 <strong>{entry.fileName}</strong>
-                <strong>{batchStatusText(entry)}</strong>
+                <strong className={entry.isDuplicate ? 'text-danger' : entry.sameInvoiceGroup ? 'warning-text' : ''}>{batchStatusText(entry)}</strong>
               </div>
+              {entry.taskId && <p>任务 ID：{entry.taskId}</p>}
               <img className="invoice-preview" src={entry.previewUrl} alt={entry.fileName} />
               {entry.status === 'success' && (
                 <>
@@ -370,6 +367,7 @@ function BatchImportPage() {
                   <p>日期：{entry.parsed.invoiceDate || '-'} · 金额：{money(entry.parsed.totalAmount || entry.itemTotal)}</p>
                   <p>识别来源：{entry.result.recognitionSource || sourceLabel(entry.result.source)} · 商品 {entry.parsed.items?.length || 0} 行</p>
                   {entry.isDuplicate && <p className="error">检测到重复发票：{entry.duplicateReason}</p>}
+                  {entry.sameInvoiceGroup && !entry.isDuplicate && <p className="warning-text">{entry.sameInvoiceGroupReason}</p>}
                   {entry.sequenceNote && <p className="hint">{entry.sequenceNote}</p>}
                 </>
               )}
@@ -381,9 +379,87 @@ function BatchImportPage() {
 
       {message && <p className="error">{message}</p>}
       <div className="sticky-actions">
-        <button className="primary-button" disabled={saving || nonDuplicateEntries.length === 0} onClick={saveBatch}>
-          <Save size={18} />{saving ? '保存中...' : '确认保存采购批次'}
+        <button className="primary-button" onClick={saveBatch}>
+          <Save size={18} />查看识别记录
         </button>
+      </div>
+    </Page>
+  );
+}
+
+function RecognitionTaskListPage() {
+  const [tasks, setTasks] = useState([]);
+  const [message, setMessage] = useState('');
+
+  async function load() {
+    try {
+      const data = await api.getRecognitionTasks();
+      setTasks(data);
+      if (data.some((task) => task.status === 'completed')) syncNow();
+    } catch (error) {
+      setMessage(error.message || '读取识别任务失败');
+    }
+  }
+
+  useEffect(() => {
+    let cancelled = false;
+    const run = () => {
+      load().catch(() => {
+        if (!cancelled) setMessage('读取识别任务失败');
+      });
+    };
+    run();
+    const timer = window.setInterval(run, 4000);
+    return () => {
+      cancelled = true;
+      window.clearInterval(timer);
+    };
+  }, []);
+
+  async function retry(taskId) {
+    try {
+      await api.retryRecognitionTask(taskId);
+      setMessage('已重新加入后台识别队列');
+      load();
+    } catch (error) {
+      setMessage(error.message || '重新识别失败');
+    }
+  }
+
+  async function forceSave(taskId) {
+    try {
+      await api.forceSaveRecognitionTask(taskId);
+      setMessage('已强制保存该识别结果');
+      syncNow();
+      load();
+    } catch (error) {
+      setMessage(error.message || '强制保存失败');
+    }
+  }
+
+  return (
+    <Page title="识别记录/任务列表" action={<Link className="icon-button" to="/invoices/new"><Plus size={18} />新增</Link>}>
+      {message && <p className="error">{message}</p>}
+      {tasks.length === 0 && <EmptyState text="暂无识别任务" />}
+      <div className="card-list">
+        {tasks.map((task) => (
+          <div className="row-card" key={task.id}>
+            <div>
+              <h3>{task.originalName || task.id}</h3>
+              <p>状态：{recognitionTaskStatusText(task.status)} · 创建时间 {task.createdAt || '-'}</p>
+              <p>来源：{task.recognitionSource || sourceLabel(task.source)} · 重试 {task.retryCount || 0} 次</p>
+              {task.result?.parsed && <p>{task.result.parsed.supplierName || '未识别供应商'} · {task.result.parsed.invoiceNo || '无发票号'} · {money(task.result.parsed.totalAmount)}</p>}
+              {task.result?.duplicateCheck?.isDuplicate && <p className="error">重复发票：{task.result.duplicateCheck.duplicateReason}</p>}
+              {task.result?.duplicateCheck?.sameInvoiceGroup && !task.result?.duplicateCheck?.isDuplicate && <p className="warning-text">{task.result.duplicateCheck.sameInvoiceGroupReason}</p>}
+              {task.error && <p className="error">{task.error}</p>}
+            </div>
+            <div className="row-actions">
+              {task.invoiceId && <Link className="icon-button" to={`/invoices/${task.invoiceId}`}>发票</Link>}
+              {task.status === 'failed' && <button onClick={() => retry(task.id)}>重新识别</button>}
+              {task.status === 'completed' && task.result?.duplicateCheck?.isDuplicate && !task.invoiceId && <button onClick={() => forceSave(task.id)}>强制保存</button>}
+            </div>
+          </div>
+        ))}
       </div>
     </Page>
   );
@@ -407,6 +483,7 @@ function InvoiceFormPage() {
   const [message, setMessage] = useState('');
   const [ocrStatus, setOcrStatus] = useState('');
   const [imagePreviewUrl, setImagePreviewUrl] = useState('');
+  const [recognitionTask, setRecognitionTask] = useState(null);
   const itemTotal = useMemo(() => form.items.reduce((sum, item) => sum + Number(item.totalPrice || 0), 0), [form.items]);
   const total = Number(form.totalAmount || 0) > 0 ? Number(form.totalAmount) : itemTotal;
 
@@ -418,6 +495,35 @@ function InvoiceFormPage() {
     };
   }, [imagePreviewUrl]);
 
+  useEffect(() => {
+    if (!recognitionTask?.id || ['completed', 'failed'].includes(recognitionTask.status)) return undefined;
+    let cancelled = false;
+    async function refreshTask() {
+      try {
+        const task = await api.getRecognitionTask(recognitionTask.id);
+        if (cancelled) return;
+        setRecognitionTask(task);
+        setOcrStatus(`后台识别：${recognitionTaskStatusText(task.status)}`);
+        if (task.status === 'completed') {
+          applyRecognitionTaskToForm(task);
+          setMessage(task.invoiceId ? '识别完成，后端已保存发票。' : '识别完成。');
+          syncNow();
+        }
+        if (task.status === 'failed') {
+          setMessage(task.error || '识别失败');
+        }
+      } catch (error) {
+        if (!cancelled) setMessage(error.message || '读取识别任务失败');
+      }
+    }
+    refreshTask();
+    const timer = window.setInterval(refreshTask, 3000);
+    return () => {
+      cancelled = true;
+      window.clearInterval(timer);
+    };
+  }, [recognitionTask?.id, recognitionTask?.status]);
+
   function updateItem(index, field, value) {
     setForm((current) => {
       const items = [...current.items];
@@ -428,6 +534,23 @@ function InvoiceFormPage() {
       items[index] = next;
       return { ...current, items };
     });
+  }
+
+  function applyRecognitionTaskToForm(task) {
+    const result = task.result || {};
+    const parsedItems = Array.isArray(result.parsed?.items) ? result.parsed.items.map(normalizeParsedItemForForm) : [];
+    const recognitionSource = result.recognitionSource || sourceLabel(result.source);
+    setForm((current) => ({
+      ...current,
+      supplierName: result.parsed?.supplierName || current.supplierName,
+      invoiceNo: result.parsed?.invoiceNo || current.invoiceNo,
+      invoiceDate: normalizeDateInput(result.parsed?.invoiceDate) || current.invoiceDate,
+      totalAmount: Number(result.parsed?.totalAmount || current.totalAmount || 0),
+      imagePath: result.imagePath || task.imagePath || current.imagePath,
+      ocrText: result.ocrText || current.ocrText,
+      items: parsedItems.length > 0 ? parsedItems : current.items
+    }));
+    setOcrStatus(`识别完成 · 识别来源：${recognitionSource}`);
   }
 
   async function handleInvoiceImageSelected(file) {
@@ -447,38 +570,24 @@ function InvoiceFormPage() {
     const data = new FormData();
     data.append('image', file);
     try {
-      const result = await api.ocrUpload(data);
-      console.log('OCR result:', result);
-      if (result.success === false) {
-        const errorMessage = result.error || 'OCR 识别失败';
-        setOcrStatus(`识别失败：${errorMessage}｜识别来源：${result.recognitionSource || sourceLabel(result.source)}`);
-        setMessage(errorMessage);
-        return;
-      }
-      const parsedItems = Array.isArray(result.parsed?.items) ? result.parsed.items.map(normalizeParsedItemForForm) : [];
-      const recognitionSource = result.recognitionSource || sourceLabel(result.source);
-      setForm((current) => ({
-        ...current,
-        supplierName: result.parsed?.supplierName || current.supplierName,
-        invoiceNo: result.parsed?.invoiceNo || current.invoiceNo,
-        invoiceDate: normalizeDateInput(result.parsed?.invoiceDate) || current.invoiceDate,
-        totalAmount: Number(result.parsed?.totalAmount || current.totalAmount || 0),
-        imagePath: result.imagePath || current.imagePath,
-        ocrText: result.ocrText || result.message || '',
-        items: parsedItems.length > 0 ? parsedItems : current.items
-      }));
-      setOcrStatus(result.ocrText ? `识别成功｜识别来源：${recognitionSource}` : `识别失败：${result.message || 'OCR 未识别到文字'}｜识别来源：${recognitionSource}`);
-      if (!result.ocrText) {
-        setMessage(result.message || 'OCR 未识别到文字，请手动录入。');
-      }
+      const created = await api.createRecognitionTask(data);
+      console.log('Recognition task:', created);
+      setRecognitionTask(created.task);
+      setOcrStatus(`后台识别：${recognitionTaskStatusText(created.task?.status || 'pending')}`);
+      setMessage(`已创建后台识别任务：${created.taskId}`);
     } catch (error) {
       console.error('OCR failed:', error);
-      setOcrStatus(`识别失败：${error.message || '未知错误'}｜识别来源：OCR`);
+      setOcrStatus(`识别失败：${error.message || '未知错误'} · 识别来源：OCR`);
       setMessage(error.message);
     }
   }
 
   async function save() {
+    if (recognitionTask?.status === 'completed' && recognitionTask.invoiceId) {
+      await syncNow();
+      navigate(`/invoices/${recognitionTask.invoiceId}`);
+      return;
+    }
     setSaving(true);
     setMessage('');
     try {
@@ -493,7 +602,7 @@ function InvoiceFormPage() {
   }
 
   return (
-    <Page title="新增发票" subtitle="第一阶段允许手动录入；OCR 接口已预留">
+    <Page title="新增发票" subtitle="上传后创建后台识别任务，完成后自动保存；也可以手动录入。">
       <Section title="发票信息">
         <label className="field">
           <span>供应商名称</span>
@@ -542,6 +651,14 @@ function InvoiceFormPage() {
           <span>OCR 状态</span>
           <strong>{ocrStatus || '未识别'}</strong>
         </div>
+        {recognitionTask && (
+          <div className="detail-item">
+            <div className="split"><strong>后台识别任务</strong><strong>{recognitionTaskStatusText(recognitionTask.status)}</strong></div>
+            <p>任务 ID：{recognitionTask.id}</p>
+            {recognitionTask.invoiceId && <p>已保存发票：{recognitionTask.invoiceId}</p>}
+            {recognitionTask.error && <p className="error">{recognitionTask.error}</p>}
+          </div>
+        )}
         <label className="field"><span>OCR 原文</span><textarea rows="4" value={form.ocrText} onChange={(event) => setForm({ ...form, ocrText: event.target.value })} /></label>
       </Section>
 
@@ -569,7 +686,7 @@ function InvoiceFormPage() {
 
       {message && <p className="error">{message}</p>}
       <div className="sticky-actions">
-        <button className="primary-button" disabled={saving} onClick={save}><Save size={18} />{saving ? '保存中...' : '保存到本机'}</button>
+        <button className="primary-button" disabled={saving || ['pending', 'processing'].includes(recognitionTask?.status)} onClick={save}><Save size={18} />{recognitionTask?.invoiceId ? '查看已保存发票' : saving ? '保存中...' : '保存到本机'}</button>
       </div>
     </Page>
   );
@@ -736,11 +853,11 @@ function SettingsPage() {
     <Page title="设置/导出">
       <Section title="导出">
         <a className="primary-button" href={api.exportUrl()}><Upload size={18} />导出云端 CSV</a>
-        <p className="hint">CSV 导出来自后端云端 SQLite；离线时请先同步后再导出。</p>
+        <p className="hint">CSV 导出来自后端云端数据库；离线时请先同步后再导出。</p>
       </Section>
       <Section title="本地数据库统计">
         <Info label="供应商" value={stats.suppliers ?? 0} />
-        <Info label="发票" value={stats.invoices ?? 0} />
+        <Info label="鍙戠エ" value={stats.invoices ?? 0} />
         <Info label="商品明细" value={stats.invoice_items ?? 0} />
         <Info label="商品" value={stats.products ?? 0} />
         <Info label="价格历史" value={stats.price_history ?? 0} />
@@ -892,12 +1009,12 @@ function useLocalReload(loader, deps = []) {
 function statusText(status) {
   if (status === 'pending') return '待同步';
   if (status === 'deleted') return '待删除同步';
-  if (status === 'conflict') return '冲突';
+  if (status === 'conflict') return '鍐茬獊';
   return '已同步';
 }
 
 function sourceLabel(source) {
-  if (source === 'template') return '模板';
+  if (source === 'template') return '妯℃澘';
   if (source === 'ai') return 'AI Vision';
   if (source === 'plain_ocr') return 'OCR';
   return 'OCR';
@@ -907,8 +1024,24 @@ function batchStatusText(entry) {
   if (entry.status === 'recognizing') return '识别中';
   if (entry.status === 'failed') return '识别失败';
   if (entry.status === 'success' && entry.isDuplicate) return '重复发票';
+  if (entry.status === 'success' && entry.sameInvoiceGroup) return '同发票号不同金额，可能是多页/同批次';
   if (entry.status === 'success') return '识别成功';
   return '待识别';
+}
+
+function taskStatusToEntryStatus(status) {
+  if (status === 'completed') return 'success';
+  if (status === 'failed') return 'failed';
+  if (status === 'processing') return 'recognizing';
+  return 'pending';
+}
+
+function recognitionTaskStatusText(status) {
+  if (status === 'pending') return 'pending';
+  if (status === 'processing') return 'processing';
+  if (status === 'completed') return 'completed';
+  if (status === 'failed') return 'failed';
+  return status || '-';
 }
 
 function groupBySupplier(entries) {
@@ -920,44 +1053,190 @@ function groupBySupplier(entries) {
   }, {});
 }
 
+function emptyDuplicateInfo() {
+  return {
+    isDuplicate: false,
+    duplicateReason: '',
+    sameInvoiceGroup: false,
+    possibleSameInvoicePages: false,
+    sameInvoiceGroupReason: '',
+    sameSupplierBatch: false
+  };
+}
+
+function invoiceFingerprintFromParsed(parsed = {}, itemTotal = 0) {
+  const items = Array.isArray(parsed.items) ? parsed.items : [];
+  return {
+    supplierName: parsed.supplierName || '',
+    supplierKey: normalizedSupplierKey(parsed.supplierName),
+    invoiceNo: normalizedKey(parsed.invoiceNo),
+    totalAmount: normalizedAmount(Number(parsed.totalAmount || 0) > 0 ? parsed.totalAmount : itemTotal),
+    itemCount: items.length,
+    itemNames: normalizedItemNames(items.map((item) => displayInvoiceItemNormalizedName(item) || displayInvoiceItemName(item))),
+    totalQuantity: normalizedAmount(items.reduce((sum, item) => sum + Number(item.quantity ?? item.qty ?? 0), 0))
+  };
+}
+
+function invoiceFingerprintFromInvoice(invoice = {}) {
+  return {
+    supplierName: invoice.supplierName || '',
+    supplierKey: normalizedSupplierKey(invoice.supplierName),
+    invoiceNo: normalizedKey(invoice.invoiceNo),
+    totalAmount: normalizedAmount(Number(invoice.totalAmount || 0) > 0 ? invoice.totalAmount : invoice.itemTotal),
+    itemCount: Number(invoice.itemCount || 0),
+    itemNames: normalizedItemNames(invoice.itemNames || []),
+    totalQuantity: normalizedAmount(invoice.itemTotalQuantity || 0)
+  };
+}
+
+function compareInvoiceFingerprints(current, candidate, sourceLabelText) {
+  const result = emptyDuplicateInfo();
+  if (!current.invoiceNo || current.invoiceNo !== candidate.invoiceNo) return result;
+  if (!supplierNamesSimilar(current.supplierName, candidate.supplierName)) return result;
+
+  result.sameSupplierBatch = true;
+  const sameAmount = amountsClose(current.totalAmount, candidate.totalAmount);
+  const similarItems = invoiceItemsHighlySimilar(current, candidate);
+
+  if (sameAmount && similarItems) {
+    result.isDuplicate = true;
+    result.duplicateReason = `${sourceLabelText}：同供应商、同发票号、同金额，且商品明细高度相似`;
+    return result;
+  }
+
+  result.sameInvoiceGroup = true;
+  result.possibleSameInvoicePages = !sameAmount;
+  result.sameInvoiceGroupReason = sameAmount
+    ? '同供应商同发票号，金额相同但商品明细不同，请人工确认。'
+    : '同供应商同发票号，但金额不同，可能是同一发票的不同页/同批次发票，请人工确认。';
+  return result;
+}
+
+function normalizedAmount(value) {
+  const amount = Number(value || 0);
+  return Number.isFinite(amount) ? amount : 0;
+}
+
+function amountsClose(a, b) {
+  return Math.abs(normalizedAmount(a) - normalizedAmount(b)) < 0.01;
+}
+
+function normalizedSupplierKey(value) {
+  return String(value || '').trim().toLowerCase().replace(/[^a-z0-9\u4e00-\u9fff]+/g, '');
+}
+
+function supplierNamesSimilar(a, b) {
+  const left = normalizedSupplierKey(a);
+  const right = normalizedSupplierKey(b);
+  if (!left || !right) return false;
+  if (left === right) return true;
+  if (left.length >= 5 && right.includes(left)) return true;
+  if (right.length >= 5 && left.includes(right)) return true;
+  return similarityScore(left, right) >= 0.86;
+}
+
+function normalizedItemNames(names = []) {
+  return names
+    .map((name) => normalizedKey(name).replace(/\s+/g, ' '))
+    .filter(Boolean)
+    .sort();
+}
+
+function invoiceItemsHighlySimilar(a, b) {
+  if (a.itemCount !== b.itemCount) return false;
+  if (a.itemCount === 0 && b.itemCount === 0) return true;
+  const nameSimilarity = itemNameSetSimilarity(a.itemNames, b.itemNames);
+  if (nameSimilarity >= 0.8) return true;
+  return a.itemNames.length === 0 && b.itemNames.length === 0 && amountsClose(a.totalQuantity, b.totalQuantity);
+}
+
+function itemNameSetSimilarity(left = [], right = []) {
+  if (left.length === 0 && right.length === 0) return 1;
+  if (left.length === 0 || right.length === 0) return 0;
+  const rightSet = new Set(right);
+  let matches = 0;
+  for (const name of left) {
+    if (rightSet.has(name)) {
+      matches += 1;
+      continue;
+    }
+    if (right.some((candidate) => similarityScore(name, candidate) >= 0.88)) matches += 1;
+  }
+  return matches / Math.max(left.length, right.length);
+}
+
+function similarityScore(a, b) {
+  const left = String(a || '');
+  const right = String(b || '');
+  if (!left && !right) return 1;
+  if (!left || !right) return 0;
+  const distance = levenshteinDistance(left, right);
+  return 1 - distance / Math.max(left.length, right.length);
+}
+
+function levenshteinDistance(a, b) {
+  const previous = Array.from({ length: b.length + 1 }, (_, index) => index);
+  for (let i = 0; i < a.length; i += 1) {
+    let diagonal = previous[0];
+    previous[0] = i + 1;
+    for (let j = 0; j < b.length; j += 1) {
+      const oldDiagonal = previous[j + 1];
+      const cost = a[i] === b[j] ? 0 : 1;
+      previous[j + 1] = Math.min(previous[j + 1] + 1, previous[j] + 1, diagonal + cost);
+      diagonal = oldDiagonal;
+    }
+  }
+  return previous[b.length];
+}
+
 function analyzeBatchEntries(entries, existingInvoices = []) {
-  const seenInBatch = new Map();
+  const seenInBatch = [];
   const analyzed = entries.map((entry) => {
     const parsed = normalizeParsedInvoice(entry.result?.parsed);
     const itemTotal = totalFromItems(parsed.items);
-    const invoiceKey = normalizedKey(parsed.invoiceNo);
-    const supplierKey = normalizedKey(parsed.supplierName);
-    let isDuplicate = false;
-    let duplicateReason = '';
+    const fingerprint = invoiceFingerprintFromParsed(parsed, itemTotal);
+    let duplicateInfo = emptyDuplicateInfo();
 
-    if (entry.status === 'success' && invoiceKey) {
-      const supplierRecognized = supplierKey && parsed.supplierName !== '未识别供应商';
-      const existing = existingInvoices.find((invoice) => {
-        const sameInvoiceNo = normalizedKey(invoice.invoiceNo) === invoiceKey;
-        const sameSupplier = !supplierRecognized || normalizedKey(invoice.supplierName) === supplierKey;
-        return sameInvoiceNo && sameSupplier;
-      });
-
-      if (existing) {
-        isDuplicate = true;
-        duplicateReason = `本地已有同供应商同发票号：${existing.invoiceNo}`;
+    if (entry.status === 'success' && fingerprint.invoiceNo) {
+      for (const invoice of existingInvoices) {
+        duplicateInfo = compareInvoiceFingerprints(fingerprint, invoiceFingerprintFromInvoice(invoice), '本地已有发票');
+        if (duplicateInfo.isDuplicate || duplicateInfo.sameInvoiceGroup) break;
       }
 
-      const batchKey = `${supplierKey}|${invoiceKey}`;
-      if (seenInBatch.has(batchKey)) {
-        isDuplicate = true;
-        duplicateReason = `本次选择中已出现同供应商同发票号：${parsed.invoiceNo}`;
-      } else {
-        seenInBatch.set(batchKey, entry.id);
+      if (!duplicateInfo.isDuplicate) {
+        for (const previous of seenInBatch) {
+          const batchDuplicateInfo = compareInvoiceFingerprints(fingerprint, previous.fingerprint, '本次选择中已有发票');
+          if (batchDuplicateInfo.isDuplicate || (!duplicateInfo.sameInvoiceGroup && batchDuplicateInfo.sameInvoiceGroup)) {
+            duplicateInfo = batchDuplicateInfo;
+            if (duplicateInfo.isDuplicate) break;
+          }
+        }
       }
+
+      seenInBatch.push({ id: entry.id, fingerprint });
+    }
+
+    if (entry.result?.duplicateCheck?.isDuplicate) {
+      duplicateInfo = {
+        ...duplicateInfo,
+        ...entry.result.duplicateCheck,
+        isDuplicate: true,
+        duplicateReason: entry.result.duplicateCheck.duplicateReason || duplicateInfo.duplicateReason
+      };
+    } else if (entry.result?.duplicateCheck?.sameInvoiceGroup && !duplicateInfo.isDuplicate) {
+      duplicateInfo = {
+        ...duplicateInfo,
+        ...entry.result.duplicateCheck,
+        sameInvoiceGroup: true,
+        sameInvoiceGroupReason: entry.result.duplicateCheck.sameInvoiceGroupReason || duplicateInfo.sameInvoiceGroupReason
+      };
     }
 
     return {
       ...entry,
       parsed,
       itemTotal,
-      isDuplicate,
-      duplicateReason,
+      ...duplicateInfo,
       sequenceNote: ''
     };
   });
@@ -1062,7 +1341,7 @@ function detectContinuousInvoiceNumbers(entries) {
       const first = run[0].entry.parsed.invoiceNo;
       const last = run[run.length - 1].entry.parsed.invoiceNo;
       for (const item of run) {
-        notes.set(item.entry.id, `连续发票号：${first} - ${last}`);
+        notes.set(item.entry.id, `杩炵画鍙戠エ鍙凤細${first} - ${last}`);
       }
       run = [];
     }
