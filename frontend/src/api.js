@@ -1,0 +1,83 @@
+const API_BASE = (import.meta.env.VITE_API_BASE_URL || 'http://localhost:3000').replace(/\/$/, '');
+const AUTH_KEY = 'invoicePriceTrackerAuth';
+
+export function getAuthSession() {
+  try {
+    return JSON.parse(localStorage.getItem(AUTH_KEY) || 'null');
+  } catch {
+    return null;
+  }
+}
+
+export function setAuthSession(session) {
+  if (session?.token) {
+    localStorage.setItem(AUTH_KEY, JSON.stringify(session));
+  } else {
+    localStorage.removeItem(AUTH_KEY);
+  }
+  window.dispatchEvent(new Event('auth-change'));
+}
+
+export function getAuthToken() {
+  return getAuthSession()?.token || '';
+}
+
+export function getCompanyId() {
+  return getAuthSession()?.company?.id || getAuthSession()?.user?.companyId || '';
+}
+
+async function request(path, options = {}) {
+  const token = getAuthToken();
+  const headers = options.body instanceof FormData ? {} : { 'Content-Type': 'application/json' };
+  if (token) headers.Authorization = `Bearer ${token}`;
+  const response = await fetch(`${API_BASE}${path}`, {
+    headers,
+    ...options
+  });
+
+  if (!response.ok) {
+    let message = '请求失败';
+    try {
+      const data = await response.json();
+      message = data.error || message;
+    } catch {
+      message = response.statusText || message;
+    }
+    throw new Error(message);
+  }
+
+  const contentType = response.headers.get('content-type') || '';
+  if (contentType.includes('application/json')) return response.json();
+  return response;
+}
+
+export const api = {
+  login: (payload) => request('/api/auth/login', { method: 'POST', body: JSON.stringify(payload) }),
+  register: (payload) => request('/api/auth/register', { method: 'POST', body: JSON.stringify(payload) }),
+  me: () => request('/api/auth/me'),
+
+  getInvoices: () => request('/api/invoices'),
+  getInvoice: (id) => request(`/api/invoices/${id}`),
+  createInvoice: (payload) => request('/api/invoices', { method: 'POST', body: JSON.stringify(payload) }),
+  deleteInvoice: (id) => request(`/api/invoices/${id}`, { method: 'DELETE' }),
+
+  getSuppliers: () => request('/api/suppliers'),
+  createSupplier: (payload) => request('/api/suppliers', { method: 'POST', body: JSON.stringify(payload) }),
+  updateSupplier: (id, payload) => request(`/api/suppliers/${id}`, { method: 'PUT', body: JSON.stringify(payload) }),
+  deleteSupplier: (id) => request(`/api/suppliers/${id}`, { method: 'DELETE' }),
+  getTemplate: (supplierId) => request(`/api/suppliers/${supplierId}/template`),
+  saveTemplate: (supplierId, payload) => request(`/api/suppliers/${supplierId}/template`, { method: 'PUT', body: JSON.stringify(payload) }),
+
+  searchProducts: (q) => request(`/api/products/search?q=${encodeURIComponent(q)}`),
+  getProduct: (name) => request(`/api/products/${encodeURIComponent(name)}`),
+
+  getStats: () => request('/api/stats'),
+  clearData: () => request('/api/dev/clear', { method: 'DELETE' }),
+  exportUrl: () => `${API_BASE}/api/export.csv?token=${encodeURIComponent(getAuthToken())}`,
+  ocrUpload: (formData) => {
+    console.log('OCR upload URL:', `${API_BASE}/api/ocr`);
+    return request('/api/ocr', { method: 'POST', body: formData });
+  },
+  syncPush: (payload) => request('/api/sync/push', { method: 'POST', body: JSON.stringify(payload) }),
+  syncPull: (since) => request(`/api/sync/pull${since ? `?since=${encodeURIComponent(since)}` : ''}`)
+};
