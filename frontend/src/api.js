@@ -1,11 +1,27 @@
 const API_BASE = (import.meta.env.VITE_API_BASE_URL || 'http://localhost:3000').replace(/\/$/, '');
 const AUTH_KEY = 'invoicePriceTrackerAuth';
+export const DEMO_NO_AUTH = import.meta.env.VITE_DEMO_NO_AUTH !== 'false';
+export const DEMO_SESSION = {
+  token: '',
+  user: {
+    id: 'demo-user',
+    username: 'demo',
+    email: 'demo@example.com',
+    name: 'demo',
+    companyId: 'demo-company'
+  },
+  company: {
+    id: 'demo-company',
+    name: '测试公司'
+  },
+  demo: true
+};
 
 export function getAuthSession() {
   try {
-    return JSON.parse(localStorage.getItem(AUTH_KEY) || 'null');
+    return JSON.parse(localStorage.getItem(AUTH_KEY) || 'null') || (DEMO_NO_AUTH ? DEMO_SESSION : null);
   } catch {
-    return null;
+    return DEMO_NO_AUTH ? DEMO_SESSION : null;
   }
 }
 

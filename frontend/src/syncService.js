@@ -9,11 +9,11 @@ export async function getSyncSnapshot() {
   const pendingCount = await localDb.getPendingCount();
   return {
     online: navigator.onLine,
-    authenticated: Boolean(session?.token),
+    authenticated: Boolean(session),
     pendingCount,
     syncing,
     lastError,
-    label: !session?.token
+    label: !session
       ? '请先登录'
       : !navigator.onLine
         ? '离线模式'
@@ -27,7 +27,7 @@ export async function getSyncSnapshot() {
 
 export async function syncNow() {
   if (syncing) return getSyncSnapshot();
-  if (!getAuthSession()?.token) {
+  if (!getAuthSession()) {
     lastError = '';
     return getSyncSnapshot();
   }

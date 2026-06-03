@@ -25,6 +25,37 @@ The app now supports:
 
 OpenAI keys must only be configured in backend environment variables. Never put `OPENAI_API_KEY` in the frontend.
 
+## DEMO_NO_AUTH Mode
+
+Current testing mode skips login by default.
+
+- Frontend default demo company: `demo-company` / `测试公司`
+- Frontend default demo user: `demo-user` / `demo`
+- IndexedDB records are written under `demo-company`
+- Backend requests without `Authorization` are allowed when `DEMO_NO_AUTH` is enabled
+- Sync, invoice, supplier, OCR, and AI invoice APIs use `demo-company` when no token is provided
+- Login and registration code is still present and can be restored later
+
+Environment variables:
+
+```text
+# backend
+DEMO_NO_AUTH=true
+
+# frontend
+VITE_DEMO_NO_AUTH=true
+```
+
+To restore normal login for production:
+
+```text
+# backend
+DEMO_NO_AUTH=false
+
+# frontend
+VITE_DEMO_NO_AUTH=false
+```
+
 ## Sync Model
 
 The browser stores data in IndexedDB first. New, edited, and deleted records are marked with:

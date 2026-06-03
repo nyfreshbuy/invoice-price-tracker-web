@@ -91,7 +91,7 @@ export default function App() {
     setAuthSession(null);
   }
 
-  if (!authSession?.token) {
+  if (!authSession) {
     return <AuthPage onAuthenticated={setAuthState} />;
   }
 
