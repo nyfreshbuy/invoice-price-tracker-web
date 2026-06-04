@@ -1,22 +1,28 @@
 import crypto from 'node:crypto';
 import { nowIso, queryAll, queryGet, quoteIdentifier, quoteTable, run, upsertRecord } from '../db.js';
 import { createInvoiceTemplate, parseInvoiceTemplate } from '../models/InvoiceTemplate.js';
+import { applyHandwrittenCatalogRules, buildInvoiceGroupKey } from './handwrittenInvoiceService.js';
 
 export function hashImageFile(buffer) {
   return crypto.createHash('sha256').update(buffer).digest('hex');
 }
 
 export function normalizeInvoiceResult(result = {}) {
+  const layoutAdjusted = applyHandwrittenCatalogRules(result, result.ocrText || '');
   const items = Array.isArray(result.items) ? result.items : [];
   return {
-    supplierName: result.supplierName || '',
-    invoiceNo: result.invoiceNo || '',
-    invoiceDate: normalizeInvoiceDate(result.invoiceDate),
-    totalAmount: Number(result.totalAmount || 0),
-    items: items.map(normalizeInvoiceItem),
-    templateCandidate: result.templateCandidate || defaultTemplateCandidate(result.supplierName || ''),
-    confidence: Number(result.confidence || 0),
-    warnings: Array.isArray(result.warnings) ? result.warnings : []
+    supplierName: layoutAdjusted.supplierName || '',
+    invoiceNo: layoutAdjusted.invoiceNo || '',
+    invoiceDate: normalizeInvoiceDate(layoutAdjusted.invoiceDate),
+    totalAmount: Number(layoutAdjusted.totalAmount || 0),
+    pageNumber: Number(layoutAdjusted.pageNumber || 0),
+    pageCount: Number(layoutAdjusted.pageCount || 0),
+    invoiceGroupKey: layoutAdjusted.invoiceGroupKey || buildInvoiceGroupKey(layoutAdjusted),
+    invoiceLayoutType: layoutAdjusted.invoiceLayoutType || 'normal_invoice',
+    items: (Array.isArray(layoutAdjusted.items) ? layoutAdjusted.items : items).map(normalizeInvoiceItem),
+    templateCandidate: layoutAdjusted.templateCandidate || defaultTemplateCandidate(layoutAdjusted.supplierName || ''),
+    confidence: Number(layoutAdjusted.confidence || 0),
+    warnings: Array.isArray(layoutAdjusted.warnings) ? layoutAdjusted.warnings : []
   };
 }
 
@@ -54,7 +60,13 @@ export function normalizeInvoiceItem(item = {}) {
     unitPrice: Number(item.unitPrice ?? item.price ?? 0),
     totalPrice: Number(item.totalPrice ?? item.amount ?? 0),
     isFreeItem: Boolean(item.isFreeItem) || Number(item.unitPrice ?? item.price ?? 0) === 0 || Number(item.totalPrice ?? item.amount ?? 0) === 0,
-    freeReason: item.freeReason || ''
+    freeReason: item.freeReason || '',
+    candidateOnly: Boolean(item.candidateOnly),
+    isHandwrittenQuantity: Boolean(item.isHandwrittenQuantity),
+    isHandwrittenPrice: Boolean(item.isHandwrittenPrice),
+    isHandwrittenAmount: Boolean(item.isHandwrittenAmount),
+    isCircled: Boolean(item.isCircled),
+    isChecked: Boolean(item.isChecked)
   };
 }
 
@@ -72,6 +84,7 @@ function formatDateParts(year, month, day) {
 export function defaultTemplateCandidate(supplierName) {
   return {
     supplierKeywords: supplierName ? [supplierName] : [],
+    invoiceLayoutType: 'normal_invoice',
     tableHeaderKeywords: ['Code', 'Item', 'Description', 'Name', 'Qty', 'Price', 'Amount', 'Total'],
     columns: [
       { name: 'barcode', keywords: ['Code', 'Barcode', 'Item'] },
@@ -82,7 +95,9 @@ export function defaultTemplateCandidate(supplierName) {
       { name: 'qty', keywords: ['Qty', 'Quantity'] },
       { name: 'unitPrice', keywords: ['Unit Price', 'Price'] },
       { name: 'totalPrice', keywords: ['Amount', 'Total'] }
-    ]
+    ],
+    tableRegion: {},
+    handwrittenRegions: []
   };
 }
 
@@ -183,8 +198,11 @@ export async function saveOrUpdateTemplateFromResult(result, sampleImageHash, co
     companyId,
     supplierName,
     supplierKeywords: uniqueStrings([supplierName, ...(candidate.supplierKeywords || [])].filter(Boolean)),
+    invoiceLayoutType: normalized.invoiceLayoutType || candidate.invoiceLayoutType || existing?.invoiceLayoutType || 'normal_invoice',
     tableHeaderKeywords: uniqueStrings(candidate.tableHeaderKeywords || []),
     columns: candidate.columns || [],
+    tableRegion: candidate.tableRegion || parseInvoiceTemplate(existing)?.tableRegion || {},
+    handwrittenRegions: candidate.handwrittenRegions || parseInvoiceTemplate(existing)?.handwrittenRegions || [],
     totalKeywords: existing ? parseInvoiceTemplate(existing).totalKeywords : ['total', 'amount', '合计', '总计'],
     invoiceNoKeywords: existing ? parseInvoiceTemplate(existing).invoiceNoKeywords : ['invoice no', 'invoice #', '发票号', '单号'],
     dateKeywords: existing ? parseInvoiceTemplate(existing).dateKeywords : ['date', 'invoice date', '日期'],

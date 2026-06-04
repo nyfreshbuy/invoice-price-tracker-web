@@ -117,6 +117,10 @@ function responsePayload({ source, imagePath, ocrText, result, template, sampleI
     supplierName: result.supplierName,
     invoiceNo: result.invoiceNo,
     invoiceDate: normalizeInvoiceDate(result.invoiceDate),
+    pageNumber: Number(result.pageNumber || 0),
+    pageCount: Number(result.pageCount || 0),
+    invoiceGroupKey: result.invoiceGroupKey || '',
+    invoiceLayoutType: result.invoiceLayoutType || 'normal_invoice',
     totalAmount: result.totalAmount,
     invoiceTotal,
     calculatedTotal,
@@ -148,6 +152,12 @@ function responsePayload({ source, imagePath, ocrText, result, template, sampleI
         totalPrice: item.totalPrice || 0,
         isFreeItem: Boolean(item.isFreeItem) || Number(item.unitPrice || 0) === 0 || Number(item.totalPrice || 0) === 0,
         freeReason: item.freeReason || ((Number(item.unitPrice || 0) === 0 || Number(item.totalPrice || 0) === 0) ? '免费/赠品行' : ''),
+        candidateOnly: Boolean(item.candidateOnly),
+        isHandwrittenQuantity: Boolean(item.isHandwrittenQuantity),
+        isHandwrittenPrice: Boolean(item.isHandwrittenPrice),
+        isHandwrittenAmount: Boolean(item.isHandwrittenAmount),
+        isCircled: Boolean(item.isCircled),
+        isChecked: Boolean(item.isChecked),
         notes: ''
       };
     }),

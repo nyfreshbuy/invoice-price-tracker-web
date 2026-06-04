@@ -1,6 +1,9 @@
 const OCR_CORRECTIONS = [
   [/干页豆腐/g, '千页豆腐'],
   [/仟页豆腐/g, '千页豆腐'],
+  [/龍眼/g, '龙眼'],
+  [/鳳梨/g, '凤梨'],
+  [/蘋果/g, '苹果'],
   [/\bITO\s+EN\b/gi, 'ITOEN'],
   [/\bI\s*T\s*O\s*E\s*N\b/gi, 'ITOEN']
 ];

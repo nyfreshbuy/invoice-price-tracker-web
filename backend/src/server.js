@@ -36,6 +36,7 @@ import {
   normalizeProductNameAdvanced,
   promoGroupCandidate
 } from './services/productNormalizationService.js';
+import { buildInvoiceGroupKey } from './services/handwrittenInvoiceService.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
@@ -227,6 +228,14 @@ function prepareRecord(table, record, deviceId, companyId) {
       invoiceNo: record.invoiceNo || '',
       invoiceDate: record.invoiceDate || today(),
       pageNumber: Number(record.pageNumber || 0),
+      pageCount: Number(record.pageCount || 0),
+      invoiceGroupKey: record.invoiceGroupKey || buildInvoiceGroupKey({
+        supplierName: record.supplierName || '',
+        invoiceNo: record.invoiceNo || '',
+        totalAmount: record.totalAmount || 0
+      }),
+      isMergedInvoice: record.isMergedInvoice ? 1 : 0,
+      invoiceLayoutType: record.invoiceLayoutType || 'normal_invoice',
       imagePath: record.imagePath || '',
       ocrText: record.ocrText || '',
       totalAmount: Number(record.totalAmount || 0),
@@ -267,6 +276,12 @@ function prepareRecord(table, record, deviceId, companyId) {
       promoGroupRule: record.promoGroupRule || '',
       isFreeItem: record.isFreeItem ? 1 : 0,
       isDiscountLine: record.isDiscountLine ? 1 : 0,
+      candidateOnly: record.candidateOnly ? 1 : 0,
+      isHandwrittenQuantity: record.isHandwrittenQuantity ? 1 : 0,
+      isHandwrittenPrice: record.isHandwrittenPrice ? 1 : 0,
+      isHandwrittenAmount: record.isHandwrittenAmount ? 1 : 0,
+      isCircled: record.isCircled ? 1 : 0,
+      isChecked: record.isChecked ? 1 : 0,
       freeReason: record.freeReason || '',
       invoiceDate: record.invoiceDate || today(),
       notes: record.notes || ''
@@ -481,6 +496,7 @@ function splitInvoiceRows(items = []) {
   const discountItems = [];
   const productItems = [];
   for (const item of items) {
+    if (item.candidateOnly) continue;
     if (detectDiscountLine(item)) discountItems.push(item);
     else productItems.push(item);
   }
@@ -881,6 +897,10 @@ function resultFromFinalPayload(payload = {}) {
     invoiceNo: payload.invoiceNo || '',
     invoiceDate: payload.invoiceDate || '',
     totalAmount: Number(payload.totalAmount || 0),
+    pageNumber: Number(payload.pageNumber || 0),
+    pageCount: Number(payload.pageCount || 0),
+    invoiceGroupKey: payload.invoiceGroupKey || buildInvoiceGroupKey({ supplierName: supplier?.name || payload.supplierName || '', invoiceNo: payload.invoiceNo || '', totalAmount }),
+    invoiceLayoutType: payload.invoiceLayoutType || 'normal_invoice',
     items: (payload.items || []).map((item) => ({
       rawName: item.rawName || item.productNameOriginal || item.name || '',
       nameCn: item.nameCn || '',
@@ -893,7 +913,13 @@ function resultFromFinalPayload(payload = {}) {
       qty: Number(item.quantity ?? item.qty ?? 0),
       unit: item.unit || '',
       unitPrice: Number(item.unitPrice || 0),
-      totalPrice: Number(item.totalPrice || 0)
+      totalPrice: Number(item.totalPrice || 0),
+      candidateOnly: Boolean(item.candidateOnly),
+      isHandwrittenQuantity: Boolean(item.isHandwrittenQuantity),
+      isHandwrittenPrice: Boolean(item.isHandwrittenPrice),
+      isHandwrittenAmount: Boolean(item.isHandwrittenAmount),
+      isCircled: Boolean(item.isCircled),
+      isChecked: Boolean(item.isChecked)
     })),
     templateCandidate: payload.templateCandidate,
     confidence: Number(payload.confidence || 0.95),
@@ -916,6 +942,10 @@ async function saveInvoicePayloadWithLearning(payload, user, options = {}) {
     ...payload,
     supplierId: supplier?.serverId || supplier?.id || '',
     totalAmount,
+    pageNumber: Number(payload.pageNumber || 0),
+    pageCount: Number(payload.pageCount || 0),
+    invoiceGroupKey: payload.invoiceGroupKey || '',
+    invoiceLayoutType: payload.invoiceLayoutType || 'normal_invoice',
     updatedAt: now
   }, deviceId, companyId);
   const itemRecords = [];
@@ -953,6 +983,12 @@ async function saveInvoicePayloadWithLearning(payload, user, options = {}) {
         promoGroupName: item.promoGroupName,
         promoGroupRule: item.promoGroupRule,
         isFreeItem: item.isFreeItem ? 1 : 0,
+        candidateOnly: item.candidateOnly ? 1 : 0,
+        isHandwrittenQuantity: item.isHandwrittenQuantity ? 1 : 0,
+        isHandwrittenPrice: item.isHandwrittenPrice ? 1 : 0,
+        isHandwrittenAmount: item.isHandwrittenAmount ? 1 : 0,
+        isCircled: item.isCircled ? 1 : 0,
+        isChecked: item.isChecked ? 1 : 0,
         freeReason: item.freeReason || '',
         invoiceId: invoice.serverId,
         supplierId: invoice.supplierId,
@@ -1314,7 +1350,7 @@ function daysBetweenDates(a, b) {
   return Math.abs(left - right) / 86400000;
 }
 
-function invoiceComparisonFingerprint({ supplierId = '', supplierName = '', invoiceNo = '', invoiceDate = '', totalAmount = 0, items = [], batchId = '', scanBatchId = '', pageNumber = 0, createdAt = '' }) {
+function invoiceComparisonFingerprint({ supplierId = '', supplierName = '', invoiceNo = '', invoiceDate = '', totalAmount = 0, items = [], batchId = '', scanBatchId = '', pageNumber = 0, pageCount = 0, invoiceGroupKey = '', createdAt = '' }) {
   return {
     supplierId,
     supplierName,
@@ -1327,6 +1363,8 @@ function invoiceComparisonFingerprint({ supplierId = '', supplierName = '', invo
     batchId,
     scanBatchId,
     pageNumber: Number(pageNumber || 0),
+    pageCount: Number(pageCount || 0),
+    invoiceGroupKey,
     createdAt
   };
 }
@@ -1387,6 +1425,7 @@ function compareInvoiceForDuplicateV2(current, candidate, label) {
   const sameOrCloseDate = daysBetweenDates(current.invoiceDate, candidate.invoiceDate) <= 1;
   const sameBatch = Boolean(current.batchId && candidate.batchId && current.batchId === candidate.batchId);
   const differentPageNumber = Boolean(current.pageNumber && candidate.pageNumber && current.pageNumber !== candidate.pageNumber);
+  const sameGroupKey = Boolean(current.invoiceGroupKey && candidate.invoiceGroupKey && current.invoiceGroupKey === candidate.invoiceGroupKey);
 
   result.sameSupplierBatch = true;
 
@@ -1404,7 +1443,7 @@ function compareInvoiceForDuplicateV2(current, candidate, label) {
     return result;
   }
 
-  if (sameAmount && sameItems && differentPageNumber) {
+  if ((sameGroupKey || (sameInvoiceNo && sameAmount)) && differentPageNumber) {
     result.sameInvoiceGroup = true;
     result.possibleSameInvoicePages = true;
     result.multiPageInvoice = true;
@@ -1453,6 +1492,8 @@ async function findRecognitionDuplicate(companyId, parsed, totalAmount, currentI
     batchId,
     scanBatchId: batchId,
     pageNumber: parsed.pageNumber || 0,
+    pageCount: parsed.pageCount || 0,
+    invoiceGroupKey: parsed.invoiceGroupKey || buildInvoiceGroupKey({ supplierName: parsed.supplierName || '', invoiceNo: parsed.invoiceNo || '', totalAmount }),
     createdAt: parsed.createdAt || ''
   });
   if (!current.invoiceNo) return emptyDuplicateCheck();
@@ -1490,6 +1531,8 @@ async function findRecognitionDuplicate(companyId, parsed, totalAmount, currentI
       batchId: candidate.batchId || '',
       scanBatchId: candidate.scanBatchId || candidate.batchId || '',
       pageNumber: candidate.pageNumber || 0,
+      pageCount: candidate.pageCount || 0,
+      invoiceGroupKey: candidate.invoiceGroupKey || '',
       createdAt: candidate.createdAt || ''
     });
     const duplicateInfo = compareInvoiceForDuplicateV2(current, candidateFingerprint, 'Cloud invoice');
@@ -1556,6 +1599,11 @@ async function saveRecognizedInvoiceFromTask(task, result, options = {}) {
     supplierId: supplier?.serverId || supplier?.id || '',
     invoiceNo: parsed.invoiceNo || '',
     invoiceDate: parsed.invoiceDate || today(),
+    pageNumber: Number(parsed.pageNumber || 0),
+    pageCount: Number(parsed.pageCount || 0),
+    invoiceGroupKey: parsed.invoiceGroupKey || '',
+    isMergedInvoice: Boolean(existingInvoice),
+    invoiceLayoutType: parsed.invoiceLayoutType || 'normal_invoice',
     batchId: task.batchId || existingInvoice?.batchId || '',
     scanBatchId: task.batchId || existingInvoice?.scanBatchId || existingInvoice?.batchId || '',
     duplicateStatus: duplicateCheck.duplicateStatus || (duplicateCheck.isDuplicate ? 'confirmed' : duplicateCheck.sameInvoiceGroup ? 'possible' : 'none'),
@@ -1609,6 +1657,12 @@ async function saveRecognizedInvoiceFromTask(task, result, options = {}) {
         promoGroupName: item.promoGroupName,
         promoGroupRule: item.promoGroupRule,
         isFreeItem: item.isFreeItem ? 1 : 0,
+        candidateOnly: item.candidateOnly ? 1 : 0,
+        isHandwrittenQuantity: item.isHandwrittenQuantity ? 1 : 0,
+        isHandwrittenPrice: item.isHandwrittenPrice ? 1 : 0,
+        isHandwrittenAmount: item.isHandwrittenAmount ? 1 : 0,
+        isCircled: item.isCircled ? 1 : 0,
+        isChecked: item.isChecked ? 1 : 0,
         freeReason: item.freeReason || '',
         notes: [item.notes, duplicateCheck.multiPageInvoice ? `pageTotal=${totalAmount.toFixed(2)}` : ''].filter(Boolean).join(' | '),
         invoiceId: invoice.serverId,
@@ -1827,6 +1881,11 @@ async function supplierInvoiceHistoryRows(companyId, supplierId, filters = {}) {
   });
 }
 
+function rowsToExcelTsv(header, rows) {
+  const escapeCell = (value) => String(value ?? '').replace(/\t/g, ' ').replace(/\r?\n/g, ' ');
+  return [header.map(escapeCell).join('\t'), ...rows.map((row) => header.map((key) => escapeCell(row[key])).join('\t'))].join('\n');
+}
+
 app.get('/api/suppliers/:id/invoices', requireAuth, asyncHandler(async (req, res) => {
   res.json(await supplierInvoiceHistoryRows(req.user.companyId, req.params.id, req.query));
 }));
@@ -1838,6 +1897,14 @@ app.get('/api/suppliers/:id/invoices.csv', requireAuth, asyncHandler(async (req,
   res.header('Content-Type', 'text/csv; charset=utf-8');
   res.attachment(`SupplierInvoiceHistory-${today()}.csv`);
   res.send(`\uFEFF${csv}`);
+}));
+
+app.get('/api/suppliers/:id/invoices.xls', requireAuth, asyncHandler(async (req, res) => {
+  const rows = await supplierInvoiceHistoryRows(req.user.companyId, req.params.id, req.query);
+  const header = ['id', 'supplierName', 'invoiceNo', 'invoiceDate', 'totalAmount', 'itemCount', 'hasGifts', 'hasDiscounts', 'hasWarnings', 'isMultipage', 'duplicateStatus', 'recognitionSource'];
+  res.header('Content-Type', 'application/vnd.ms-excel; charset=utf-8');
+  res.attachment(`SupplierInvoiceHistory-${today()}.xls`);
+  res.send(`\uFEFF${rowsToExcelTsv(header, rows)}`);
 }));
 
 app.get('/api/invoices', requireAuth, asyncHandler(async (req, res) => {
@@ -1877,7 +1944,13 @@ app.post('/api/invoices', requireAuth, asyncHandler(async (req, res) => {
   const items = applyDiscountAllocation(applyGiftAccounting(productItems), discountItems);
   const itemTotal = items.reduce((sum, item) => sum + Number(item.totalPrice || 0), 0);
   const totalAmount = Number(req.body.totalAmount || 0) > 0 ? Number(req.body.totalAmount) : itemTotal;
-  const invoice = await prepareRecordWithReferences('invoices', { ...req.body, supplierId: supplier?.serverId || supplier?.id || '', totalAmount, updatedAt: now }, deviceId, req.user.companyId);
+  const invoice = await prepareRecordWithReferences('invoices', {
+    ...req.body,
+    supplierId: supplier?.serverId || supplier?.id || '',
+    totalAmount,
+    invoiceGroupKey: req.body.invoiceGroupKey || buildInvoiceGroupKey({ supplierName: supplier?.name || req.body.supplierName || '', invoiceNo: req.body.invoiceNo || '', totalAmount }),
+    updatedAt: now
+  }, deviceId, req.user.companyId);
 
   await withTransaction(async (client) => {
     await upsertRecord('invoices', invoice, client);
@@ -1966,6 +2039,7 @@ app.get('/api/products/search', requireAuth, asyncHandler(async (req, res) => {
     WHERE ${quoteIdentifier('companyId')} = ?
       AND ${quoteIdentifier('deletedAt')} IS NULL
       AND COALESCE(${quoteIdentifier('isDiscountLine')}, 0) = 0
+      AND COALESCE(${quoteIdentifier('candidateOnly')}, 0) = 0
   `, [req.user.companyId]);
   const matched = rows.filter((row) => {
     const haystack = `${normalizeProductNameAdvanced(row.rawName || row.productNameOriginal || '')} ${normalizeProductNameAdvanced(row.normalizedName || row.productNameNormalized || '')}`;
@@ -2007,7 +2081,7 @@ app.get('/api/products/:name', requireAuth, asyncHandler(async (req, res) => {
     .map((alias) => alias.productId)
     .filter(Boolean));
   const rows = await queryAll(`
-    SELECT invoice_items.*, suppliers.${quoteIdentifier('name')} AS "supplierName", invoices.${quoteIdentifier('invoiceNo')} AS "invoiceNo"
+    SELECT invoice_items.*, suppliers.${quoteIdentifier('name')} AS "supplierName", invoices.${quoteIdentifier('invoiceNo')} AS "invoiceNo", invoices.${quoteIdentifier('imagePath')} AS "invoiceImagePath"
     FROM ${quoteTable('invoice_items')} invoice_items
     LEFT JOIN ${quoteTable('suppliers')} suppliers
       ON suppliers.${quoteIdentifier('companyId')} = invoice_items.${quoteIdentifier('companyId')}
@@ -2018,6 +2092,7 @@ app.get('/api/products/:name', requireAuth, asyncHandler(async (req, res) => {
     WHERE invoice_items.${quoteIdentifier('companyId')} = ?
       AND invoice_items.${quoteIdentifier('deletedAt')} IS NULL
       AND COALESCE(invoice_items.${quoteIdentifier('isDiscountLine')}, 0) = 0
+      AND COALESCE(invoice_items.${quoteIdentifier('candidateOnly')}, 0) = 0
     ORDER BY invoice_items.${quoteIdentifier('invoiceDate')} DESC, invoice_items.${quoteIdentifier('createdAt')} DESC
   `, [req.user.companyId]);
   res.json(rows.filter((row) => {
@@ -2294,6 +2369,8 @@ app.get('/api/export.csv', requireAuth, asyncHandler(async (req, res) => {
       ON suppliers.${quoteIdentifier('companyId')} = invoice_items.${quoteIdentifier('companyId')}
       AND (suppliers.${quoteIdentifier('id')} = invoice_items.${quoteIdentifier('supplierId')} OR suppliers.${quoteIdentifier('serverId')} = invoice_items.${quoteIdentifier('supplierId')})
     WHERE invoice_items.${quoteIdentifier('companyId')} = ? AND invoice_items.${quoteIdentifier('deletedAt')} IS NULL
+      AND COALESCE(invoice_items.${quoteIdentifier('isDiscountLine')}, 0) = 0
+      AND COALESCE(invoice_items.${quoteIdentifier('candidateOnly')}, 0) = 0
     ORDER BY invoices.${quoteIdentifier('invoiceDate')} DESC, invoice_items.${quoteIdentifier('createdAt')} DESC
   `, [req.user.companyId]);
   const header = ['invoiceId', 'invoiceNo', 'invoiceDate', 'supplier', 'productNameOriginal', 'productNameNormalized', 'category', 'quantity', 'unit', 'unitPrice', 'totalPrice', 'notes', 'imagePath'];
@@ -2301,6 +2378,42 @@ app.get('/api/export.csv', requireAuth, asyncHandler(async (req, res) => {
   res.header('Content-Type', 'text/csv; charset=utf-8');
   res.attachment(`InvoicePriceTrackerExport-${today()}.csv`);
   res.send(`\uFEFF${csv}`);
+}));
+
+app.get('/api/export.xls', requireAuth, asyncHandler(async (req, res) => {
+  const rows = await queryAll(`
+    SELECT invoices.${quoteIdentifier('id')} AS "invoiceId", invoices.${quoteIdentifier('invoiceNo')} AS "invoiceNo", invoices.${quoteIdentifier('invoiceDate')} AS "invoiceDate",
+           invoices.${quoteIdentifier('pageNumber')} AS "pageNumber", invoices.${quoteIdentifier('pageCount')} AS "pageCount", invoices.${quoteIdentifier('invoiceLayoutType')} AS "invoiceLayoutType",
+           suppliers.${quoteIdentifier('name')} AS "supplier",
+           invoice_items.${quoteIdentifier('rawName')} AS "rawName",
+           invoice_items.${quoteIdentifier('productNameOriginal')} AS "productNameOriginal",
+           invoice_items.${quoteIdentifier('productNameNormalized')} AS "productNameNormalized",
+           invoice_items.${quoteIdentifier('category')} AS "category",
+           invoice_items.${quoteIdentifier('quantity')} AS "quantity",
+           invoice_items.${quoteIdentifier('unit')} AS "unit",
+           invoice_items.${quoteIdentifier('unitPrice')} AS "unitPrice",
+           invoice_items.${quoteIdentifier('totalPrice')} AS "totalPrice",
+           invoice_items.${quoteIdentifier('freeQty')} AS "freeQty",
+           invoice_items.${quoteIdentifier('effectiveUnitCost')} AS "effectiveUnitCost",
+           invoice_items.${quoteIdentifier('discountAmount')} AS "discountAmount",
+           invoice_items.${quoteIdentifier('promoGroupName')} AS "promoGroupName",
+           invoices.${quoteIdentifier('imagePath')} AS "imagePath"
+    FROM ${quoteTable('invoice_items')} invoice_items
+    LEFT JOIN ${quoteTable('invoices')} invoices
+      ON invoices.${quoteIdentifier('companyId')} = invoice_items.${quoteIdentifier('companyId')}
+      AND (invoices.${quoteIdentifier('id')} = invoice_items.${quoteIdentifier('invoiceId')} OR invoices.${quoteIdentifier('serverId')} = invoice_items.${quoteIdentifier('invoiceId')})
+    LEFT JOIN ${quoteTable('suppliers')} suppliers
+      ON suppliers.${quoteIdentifier('companyId')} = invoice_items.${quoteIdentifier('companyId')}
+      AND (suppliers.${quoteIdentifier('id')} = invoice_items.${quoteIdentifier('supplierId')} OR suppliers.${quoteIdentifier('serverId')} = invoice_items.${quoteIdentifier('supplierId')})
+    WHERE invoice_items.${quoteIdentifier('companyId')} = ? AND invoice_items.${quoteIdentifier('deletedAt')} IS NULL
+      AND COALESCE(invoice_items.${quoteIdentifier('isDiscountLine')}, 0) = 0
+      AND COALESCE(invoice_items.${quoteIdentifier('candidateOnly')}, 0) = 0
+    ORDER BY invoices.${quoteIdentifier('invoiceDate')} DESC, invoice_items.${quoteIdentifier('createdAt')} DESC
+  `, [req.user.companyId]);
+  const header = ['invoiceId', 'invoiceNo', 'invoiceDate', 'pageNumber', 'pageCount', 'invoiceLayoutType', 'supplier', 'rawName', 'productNameOriginal', 'productNameNormalized', 'category', 'quantity', 'unit', 'unitPrice', 'totalPrice', 'freeQty', 'effectiveUnitCost', 'discountAmount', 'promoGroupName', 'imagePath'];
+  res.header('Content-Type', 'application/vnd.ms-excel; charset=utf-8');
+  res.attachment(`InvoicePriceTrackerExport-${today()}.xls`);
+  res.send(`\uFEFF${rowsToExcelTsv(header, rows)}`);
 }));
 
 app.delete('/api/dev/clear', requireAuth, asyncHandler(async (req, res) => {

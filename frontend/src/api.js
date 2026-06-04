@@ -99,6 +99,10 @@ export const api = {
     const query = new URLSearchParams({ ...Object.fromEntries(Object.entries(params).filter(([, value]) => value !== '' && value !== false && value !== null && value !== undefined)), token: getAuthToken() }).toString();
     return `${API_BASE}/api/suppliers/${supplierId}/invoices.csv?${query}`;
   },
+  supplierInvoicesExcelUrl: (supplierId, params = {}) => {
+    const query = new URLSearchParams({ ...Object.fromEntries(Object.entries(params).filter(([, value]) => value !== '' && value !== false && value !== null && value !== undefined)), token: getAuthToken() }).toString();
+    return `${API_BASE}/api/suppliers/${supplierId}/invoices.xls?${query}`;
+  },
 
   searchProducts: (q) => request(`/api/products/search?q=${encodeURIComponent(q)}`),
   getProduct: (name) => request(`/api/products/${encodeURIComponent(name)}`),
@@ -106,6 +110,7 @@ export const api = {
   getStats: () => request('/api/stats'),
   clearData: () => request('/api/dev/clear', { method: 'DELETE' }),
   exportUrl: () => `${API_BASE}/api/export.csv?token=${encodeURIComponent(getAuthToken())}`,
+  exportExcelUrl: () => `${API_BASE}/api/export.xls?token=${encodeURIComponent(getAuthToken())}`,
   ocrUpload: (formData) => {
     console.log('OCR upload URL:', `${API_BASE}/api/ocr`);
     return request('/api/ocr', { method: 'POST', body: formData });

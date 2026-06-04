@@ -40,6 +40,12 @@ const emptyItem = () => ({
   promoGroupRule: '',
   isFreeItem: false,
   isDiscountLine: false,
+  candidateOnly: false,
+  isHandwrittenQuantity: false,
+  isHandwrittenPrice: false,
+  isHandwrittenAmount: false,
+  isCircled: false,
+  isChecked: false,
   freeReason: '',
   notes: ''
 });
@@ -566,6 +572,10 @@ function InvoiceFormPage() {
     supplierName: '',
     invoiceNo: '',
     invoiceDate: today(),
+    pageNumber: 0,
+    pageCount: 0,
+    invoiceGroupKey: '',
+    invoiceLayoutType: 'normal_invoice',
     totalAmount: 0,
     ocrText: '',
     imagePath: '',
@@ -641,6 +651,10 @@ function InvoiceFormPage() {
       supplierName: result.parsed?.supplierName || current.supplierName,
       invoiceNo: result.parsed?.invoiceNo || current.invoiceNo,
       invoiceDate: normalizeDateInput(result.parsed?.invoiceDate) || current.invoiceDate,
+      pageNumber: Number(result.parsed?.pageNumber || current.pageNumber || 0),
+      pageCount: Number(result.parsed?.pageCount || current.pageCount || 0),
+      invoiceGroupKey: result.parsed?.invoiceGroupKey || current.invoiceGroupKey || '',
+      invoiceLayoutType: result.parsed?.invoiceLayoutType || current.invoiceLayoutType || 'normal_invoice',
       totalAmount: Number(result.parsed?.totalAmount || current.totalAmount || 0),
       imagePath: result.imagePath || task.imagePath || current.imagePath,
       ocrText: result.ocrText || current.ocrText,
@@ -724,6 +738,20 @@ function InvoiceFormPage() {
         <label className="field"><span>发票号</span><input value={form.invoiceNo} onChange={(event) => setForm({ ...form, invoiceNo: event.target.value })} /></label>
         <label className="field"><span>发票日期</span><input type="date" value={form.invoiceDate} onChange={(event) => setForm({ ...form, invoiceDate: event.target.value })} /></label>
         <label className="field"><span>发票总金额</span><input type="number" value={form.totalAmount} onChange={(event) => setForm({ ...form, totalAmount: event.target.value })} /></label>
+        <div className="grid-2">
+          <label className="field"><span>页码</span><input type="number" value={form.pageNumber} onChange={(event) => setForm({ ...form, pageNumber: Number(event.target.value) })} /></label>
+          <label className="field"><span>总页数</span><input type="number" value={form.pageCount} onChange={(event) => setForm({ ...form, pageCount: Number(event.target.value) })} /></label>
+          <label className="field"><span>发票分组 Key</span><input value={form.invoiceGroupKey || ''} onChange={(event) => setForm({ ...form, invoiceGroupKey: event.target.value })} /></label>
+          <label className="field">
+            <span>发票版式</span>
+            <select value={form.invoiceLayoutType || 'normal_invoice'} onChange={(event) => setForm({ ...form, invoiceLayoutType: event.target.value })}>
+              <option value="normal_invoice">normal_invoice</option>
+              <option value="printed_catalog_handwritten">printed_catalog_handwritten</option>
+              <option value="multi_page">multi_page</option>
+              <option value="mixed">mixed</option>
+            </select>
+          </label>
+        </div>
         <div className="field">
           <span>发票图片/OCR 预留</span>
           <div className="file-actions">
@@ -788,7 +816,18 @@ function InvoiceFormPage() {
               <label className="field"><span>数量</span><input type="number" value={item.quantity} onChange={(event) => updateItem(index, 'quantity', event.target.value)} /></label>
               <label className="field"><span>单价</span><input type="number" value={item.unitPrice} onChange={(event) => updateItem(index, 'unitPrice', event.target.value)} /></label>
               <label className="field"><span>总价</span><input type="number" value={item.totalPrice} onChange={(event) => updateItem(index, 'totalPrice', event.target.value)} /></label>
+              <label className="field"><span>收费数量</span><input type="number" value={item.chargedQty || 0} onChange={(event) => updateItem(index, 'chargedQty', event.target.value)} /></label>
+              <label className="field"><span>赠品数量</span><input type="number" value={item.freeQty || 0} onChange={(event) => updateItem(index, 'freeQty', event.target.value)} /></label>
+              <label className="field"><span>实际数量</span><input type="number" value={item.actualQty || item.totalQty || 0} onChange={(event) => updateItem(index, 'actualQty', event.target.value)} /></label>
+              <label className="field"><span>分摊组 ID</span><input value={item.promoGroupId || ''} onChange={(event) => updateItem(index, 'promoGroupId', event.target.value)} /></label>
+              <label className="field"><span>分摊组名称</span><input value={item.promoGroupName || ''} onChange={(event) => updateItem(index, 'promoGroupName', event.target.value)} /></label>
               <label className="field"><span>是否赠品</span><input type="checkbox" checked={Boolean(item.isFreeItem)} onChange={(event) => updateItem(index, 'isFreeItem', event.target.checked)} /></label>
+              <label className="field"><span>候选行不保存</span><input type="checkbox" checked={Boolean(item.candidateOnly)} onChange={(event) => updateItem(index, 'candidateOnly', event.target.checked)} /></label>
+              <label className="field"><span>手写数量</span><input type="checkbox" checked={Boolean(item.isHandwrittenQuantity)} onChange={(event) => updateItem(index, 'isHandwrittenQuantity', event.target.checked)} /></label>
+              <label className="field"><span>手写价格</span><input type="checkbox" checked={Boolean(item.isHandwrittenPrice)} onChange={(event) => updateItem(index, 'isHandwrittenPrice', event.target.checked)} /></label>
+              <label className="field"><span>手写金额</span><input type="checkbox" checked={Boolean(item.isHandwrittenAmount)} onChange={(event) => updateItem(index, 'isHandwrittenAmount', event.target.checked)} /></label>
+              <label className="field"><span>圈选</span><input type="checkbox" checked={Boolean(item.isCircled)} onChange={(event) => updateItem(index, 'isCircled', event.target.checked)} /></label>
+              <label className="field"><span>勾选</span><input type="checkbox" checked={Boolean(item.isChecked)} onChange={(event) => updateItem(index, 'isChecked', event.target.checked)} /></label>
               <label className="field"><span>赠品原因</span><input value={item.freeReason || ''} onChange={(event) => updateItem(index, 'freeReason', event.target.value)} /></label>
               <label className="field"><span>备注</span><input value={item.notes} onChange={(event) => updateItem(index, 'notes', event.target.value)} /></label>
             </div>
@@ -872,6 +911,9 @@ function InvoiceDetailPageWithGifts() {
         <Info label="发票号" value={invoice.invoiceNo || '-'} />
         <Info label="日期" value={invoice.invoiceDate || '-'} />
         <Info label="总金额" value={money(invoice.totalAmount)} />
+        <Info label="页码" value={invoice.pageCount ? `${invoice.pageNumber || '-'} / ${invoice.pageCount}` : (invoice.pageNumber || '-')} />
+        <Info label="发票版式" value={invoice.invoiceLayoutType || 'normal_invoice'} />
+        <Info label="多页合并" value={Number(invoice.isMergedInvoice || 0) ? '是' : '否'} />
         <Info label="AI/OCR 来源" value={sourceLabel(invoice.recognitionSource)} />
         <Info label="重复状态" value={duplicateStatusLabel(invoice.duplicateStatus)} />
         <Info label="同步状态" value={statusText(invoice.syncStatus)} />
@@ -979,8 +1021,9 @@ function ProductDetailPage() {
             <p>{record.supplierName || '未命名供应商'}</p>
             <p>原始名：{record.productNameOriginal}</p>
             <p>原始单价 {money(record.unitPrice)} · 实际摊薄成本 {money(record.effectiveUnitCost || record.unitPrice)} · 折后实际成本 {money(record.discountedEffectiveUnitCost || record.effectiveUnitCost || record.unitPrice)}</p>
-            <p>数量 {record.quantity} {record.unit} · 总价 {money(record.totalPrice)} · 是否赠品 {Number(record.isFreeItem || 0) ? '是' : '否'} · 发票号 {record.invoiceNo || '-'}</p>
+            <p>数量 {record.quantity} {record.unit} · 总价 {money(record.totalPrice)} · 赠品数量 {numberText(record.freeQty || 0)} · 折扣 {money(record.discountAmount || 0)} · 是否赠品 {Number(record.isFreeItem || 0) ? '是' : '否'} · 发票号 {record.invoiceNo || '-'}</p>
             <p>分摊组：{record.promoGroupName || '-'} · {record.promoGroupRule || '-'}</p>
+            {record.invoiceRecordId && <Link className="secondary-button" to={`/invoices/${encodeURIComponent(record.invoiceRecordId)}`}>查看发票/图片</Link>}
           </div>
         ))}
       </Section>
@@ -1052,9 +1095,19 @@ function SupplierInvoiceHistoryPage() {
   function updateFilter(field, value) {
     setFilters((current) => ({ ...current, [field]: value }));
   }
+  const historyStats = {
+    invoiceCount: rows.length,
+    totalAmount: rows.reduce((sum, invoice) => sum + Number(invoice.totalAmount || 0), 0),
+    recentDate: rows[0]?.invoiceDate || ''
+  };
 
   return (
     <Page title="历史发票" subtitle={supplier?.name || '供应商'}>
+      <Section title="汇总">
+        <Info label="发票数量" value={historyStats.invoiceCount} />
+        <Info label="累计采购金额" value={money(historyStats.totalAmount)} />
+        <Info label="最近采购时间" value={historyStats.recentDate || '-'} />
+      </Section>
       <Section title="筛选">
         <div className="grid-2">
           <label className="field"><span>开始日期</span><input type="date" value={filters.dateFrom} onChange={(event) => updateFilter('dateFrom', event.target.value)} /></label>
@@ -1067,6 +1120,7 @@ function SupplierInvoiceHistoryPage() {
           <label><input type="checkbox" checked={filters.hasWarnings} onChange={(event) => updateFilter('hasWarnings', event.target.checked)} /> 有异常</label>
           <label><input type="checkbox" checked={filters.isMultipage} onChange={(event) => updateFilter('isMultipage', event.target.checked)} /> 多页发票</label>
           <a className="secondary-button" href={api.supplierInvoicesExportUrl(id, filters)}>导出 CSV</a>
+          <a className="secondary-button" href={api.supplierInvoicesExcelUrl(id, filters)}>导出 Excel</a>
         </div>
       </Section>
       <Section title="发票">
@@ -1104,6 +1158,7 @@ function SettingsPage() {
     <Page title="设置/导出">
       <Section title="导出">
         <a className="primary-button" href={api.exportUrl()}><Upload size={18} />导出云端 CSV</a>
+        <a className="secondary-button" href={api.exportExcelUrl()}><Upload size={18} />导出云端 Excel</a>
         <p className="hint">CSV 导出来自后端云端数据库；离线时请先同步后再导出。</p>
       </Section>
       <Section title="本地数据库统计">
@@ -1348,6 +1403,9 @@ function invoiceFingerprintFromParsed(parsed = {}, itemTotal = 0) {
     supplierKey: normalizedSupplierKey(parsed.supplierName),
     invoiceNo: normalizedKey(parsed.invoiceNo),
     invoiceDate: parsed.invoiceDate || '',
+    pageNumber: Number(parsed.pageNumber || 0),
+    pageCount: Number(parsed.pageCount || 0),
+    invoiceGroupKey: parsed.invoiceGroupKey || '',
     totalAmount: normalizedAmount(Number(parsed.totalAmount || 0) > 0 ? parsed.totalAmount : itemTotal),
     itemCount: items.length,
     itemNames: normalizedItemNames(items.map((item) => displayInvoiceItemNormalizedName(item) || displayInvoiceItemName(item))),
@@ -1361,6 +1419,9 @@ function invoiceFingerprintFromInvoice(invoice = {}) {
     supplierKey: normalizedSupplierKey(invoice.supplierName),
     invoiceNo: normalizedKey(invoice.invoiceNo),
     invoiceDate: invoice.invoiceDate || '',
+    pageNumber: Number(invoice.pageNumber || 0),
+    pageCount: Number(invoice.pageCount || 0),
+    invoiceGroupKey: invoice.invoiceGroupKey || '',
     totalAmount: normalizedAmount(Number(invoice.totalAmount || 0) > 0 ? invoice.totalAmount : invoice.itemTotal),
     itemCount: Number(invoice.itemCount || 0),
     itemNames: normalizedItemNames(invoice.itemNames || []),
@@ -1377,6 +1438,8 @@ function compareInvoiceFingerprints(current, candidate, sourceLabelText) {
   const sameAmount = amountsClose(current.totalAmount, candidate.totalAmount);
   const similarItems = invoiceItemsHighlySimilar(current, candidate);
   const sameOrCloseDate = daysBetweenDates(current.invoiceDate, candidate.invoiceDate) <= 1;
+  const sameGroupKey = Boolean(current.invoiceGroupKey && candidate.invoiceGroupKey && current.invoiceGroupKey === candidate.invoiceGroupKey);
+  const differentPageNumber = Boolean(current.pageNumber && candidate.pageNumber && current.pageNumber !== candidate.pageNumber);
 
   if (!sameInvoiceNo) {
     if (sameAmount && similarItems && sameOrCloseDate) {
@@ -1388,6 +1451,14 @@ function compareInvoiceFingerprints(current, candidate, sourceLabelText) {
 
   if (!sameOrCloseDate) {
     result.duplicateStatus = 'none';
+    return result;
+  }
+
+  if ((sameGroupKey || (sameInvoiceNo && sameAmount)) && differentPageNumber) {
+    result.sameInvoiceGroup = true;
+    result.possibleSameInvoicePages = true;
+    result.duplicateStatus = 'none';
+    result.sameInvoiceGroupReason = '同一发票分组但页码不同，按多页发票处理。';
     return result;
   }
 
@@ -1558,6 +1629,10 @@ function normalizeParsedInvoice(parsed = {}) {
     supplierName: (parsed.supplierName || '').trim() || '未识别供应商',
     invoiceNo: (parsed.invoiceNo || '').trim(),
     invoiceDate: normalizeDateInput(parsed.invoiceDate) || today(),
+    pageNumber: Number(parsed.pageNumber || 0),
+    pageCount: Number(parsed.pageCount || 0),
+    invoiceGroupKey: parsed.invoiceGroupKey || '',
+    invoiceLayoutType: parsed.invoiceLayoutType || 'normal_invoice',
     totalAmount: Number(parsed.totalAmount || 0),
     items
   };
@@ -1589,6 +1664,12 @@ function normalizeParsedItemForForm(item = {}) {
     promoGroupRule: item.promoGroupRule || '',
     isFreeItem: Boolean(item.isFreeItem) || Number(item.unitPrice || 0) === 0 || Number(item.totalPrice ?? item.amount ?? 0) === 0,
     isDiscountLine: Boolean(item.isDiscountLine),
+    candidateOnly: Boolean(item.candidateOnly),
+    isHandwrittenQuantity: Boolean(item.isHandwrittenQuantity),
+    isHandwrittenPrice: Boolean(item.isHandwrittenPrice),
+    isHandwrittenAmount: Boolean(item.isHandwrittenAmount),
+    isCircled: Boolean(item.isCircled),
+    isChecked: Boolean(item.isChecked),
     freeReason: item.freeReason || '',
     notes: item.notes || ''
   };

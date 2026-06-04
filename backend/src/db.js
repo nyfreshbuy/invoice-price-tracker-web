@@ -56,8 +56,8 @@ export const syncTables = [
 export const tableColumns = {
   purchase_batches: ['id', 'companyId', 'localId', 'serverId', 'syncStatus', 'batchName', 'supplierCount', 'invoiceCount', 'totalAmount', 'createdAt', 'updatedAt', 'deletedAt', 'deviceId'],
   suppliers: ['id', 'companyId', 'localId', 'serverId', 'syncStatus', 'name', 'phone', 'email', 'address', 'notes', 'createdAt', 'updatedAt', 'deletedAt', 'deviceId'],
-  invoices: ['id', 'companyId', 'localId', 'serverId', 'syncStatus', 'batchId', 'scanBatchId', 'supplierId', 'invoiceNo', 'invoiceDate', 'pageNumber', 'imagePath', 'ocrText', 'totalAmount', 'duplicateStatus', 'recognitionSource', 'recognitionWarnings', 'status', 'createdAt', 'updatedAt', 'deletedAt', 'deviceId'],
-  invoice_items: ['id', 'companyId', 'localId', 'serverId', 'syncStatus', 'invoiceId', 'supplierId', 'productId', 'rawName', 'productNameOriginal', 'productNameNormalized', 'normalizedName', 'category', 'quantity', 'unit', 'unitPrice', 'totalPrice', 'chargedQty', 'freeQty', 'totalQty', 'actualQty', 'originalUnitCost', 'effectiveUnitCost', 'discountAmount', 'discountedEffectiveUnitCost', 'promoGroupId', 'promoGroupName', 'promoGroupRule', 'isFreeItem', 'isDiscountLine', 'freeReason', 'invoiceDate', 'notes', 'createdAt', 'updatedAt', 'deletedAt', 'deviceId'],
+  invoices: ['id', 'companyId', 'localId', 'serverId', 'syncStatus', 'batchId', 'scanBatchId', 'supplierId', 'invoiceNo', 'invoiceDate', 'pageNumber', 'pageCount', 'invoiceGroupKey', 'isMergedInvoice', 'invoiceLayoutType', 'imagePath', 'ocrText', 'totalAmount', 'duplicateStatus', 'recognitionSource', 'recognitionWarnings', 'status', 'createdAt', 'updatedAt', 'deletedAt', 'deviceId'],
+  invoice_items: ['id', 'companyId', 'localId', 'serverId', 'syncStatus', 'invoiceId', 'supplierId', 'productId', 'rawName', 'productNameOriginal', 'productNameNormalized', 'normalizedName', 'category', 'quantity', 'unit', 'unitPrice', 'totalPrice', 'chargedQty', 'freeQty', 'totalQty', 'actualQty', 'originalUnitCost', 'effectiveUnitCost', 'discountAmount', 'discountedEffectiveUnitCost', 'promoGroupId', 'promoGroupName', 'promoGroupRule', 'isFreeItem', 'isDiscountLine', 'candidateOnly', 'isHandwrittenQuantity', 'isHandwrittenPrice', 'isHandwrittenAmount', 'isCircled', 'isChecked', 'freeReason', 'invoiceDate', 'notes', 'createdAt', 'updatedAt', 'deletedAt', 'deviceId'],
   products: ['id', 'companyId', 'localId', 'serverId', 'syncStatus', 'name', 'normalizedName', 'category', 'notes', 'createdAt', 'updatedAt', 'deletedAt', 'deviceId'],
   price_history: ['id', 'companyId', 'localId', 'serverId', 'syncStatus', 'productId', 'invoiceItemId', 'supplierId', 'price', 'quantity', 'unit', 'invoiceDate', 'invoiceNo', 'createdAt', 'updatedAt', 'deletedAt', 'deviceId'],
   invoice_discounts: ['id', 'companyId', 'localId', 'serverId', 'syncStatus', 'invoiceId', 'supplierId', 'discountName', 'amount', 'discountType', 'appliedToProductIds', 'createdAt', 'updatedAt', 'deletedAt', 'deviceId'],
@@ -67,7 +67,7 @@ export const tableColumns = {
   recognition_corrections: ['id', 'companyId', 'localId', 'serverId', 'syncStatus', 'fieldName', 'beforeValue', 'afterValue', 'supplierId', 'invoiceTemplateId', 'invoiceId', 'invoiceItemId', 'createdAt', 'updatedAt', 'deletedAt', 'deviceId'],
   price_anomalies: ['id', 'companyId', 'localId', 'serverId', 'syncStatus', 'supplierId', 'productId', 'invoiceId', 'invoiceItemId', 'unitPrice', 'averagePrice', 'deviationPercent', 'invoiceDate', 'invoiceNo', 'status', 'message', 'createdAt', 'updatedAt', 'deletedAt', 'deviceId'],
   invoice_recognition_tasks: ['id', 'companyId', 'batchId', 'supplierHint', 'status', 'imagePath', 'filePath', 'originalName', 'mimeType', 'fileSize', 'source', 'recognitionSource', 'ocrLanguage', 'usedTemplate', 'usedAI', 'invoiceId', 'resultJson', 'error', 'retryCount', 'createdAt', 'updatedAt', 'startedAt', 'completedAt', 'deviceId'],
-  invoice_templates: ['id', 'companyId', 'supplierName', 'supplierKeywords', 'tableHeaderKeywords', 'columns', 'totalKeywords', 'invoiceNoKeywords', 'dateKeywords', 'sampleImageHash', 'successCount', 'failCount', 'lastUsedAt', 'accuracyScore', 'isActive', 'createdAt', 'updatedAt'],
+  invoice_templates: ['id', 'companyId', 'supplierName', 'invoiceLayoutType', 'supplierKeywords', 'tableHeaderKeywords', 'columns', 'totalKeywords', 'invoiceNoKeywords', 'dateKeywords', 'tableRegion', 'handwrittenRegions', 'sampleImageHash', 'successCount', 'failCount', 'lastUsedAt', 'accuracyScore', 'isActive', 'createdAt', 'updatedAt'],
   companies: ['id', 'name', 'createdAt', 'updatedAt'],
   users: ['id', 'companyId', 'email', 'passwordHash', 'name', 'createdAt', 'updatedAt']
 };
@@ -91,6 +91,8 @@ const numericColumns = new Set([
   'isDiscountLine',
   'amount',
   'pageNumber',
+  'pageCount',
+  'isMergedInvoice',
   'price',
   'minPrice',
   'maxPrice',
@@ -121,8 +123,22 @@ const integerColumns = new Set([
   'invoiceCount',
   'isFreeItem',
   'isDiscountLine',
+  'candidateOnly',
+  'isHandwrittenQuantity',
+  'isHandwrittenPrice',
+  'isHandwrittenAmount',
+  'isCircled',
+  'isChecked',
   'createdByUser',
   'pageNumber',
+  'pageCount',
+  'isMergedInvoice',
+  'candidateOnly',
+  'isHandwrittenQuantity',
+  'isHandwrittenPrice',
+  'isHandwrittenAmount',
+  'isCircled',
+  'isChecked',
   'itemNameColumnIndex',
   'quantityColumnIndex',
   'unitColumnIndex',
@@ -226,6 +242,7 @@ export async function migrate() {
   await execute(`CREATE INDEX IF NOT EXISTS ${quoteIdentifier('idx_suppliers_company')} ON ${quoteTable('suppliers')} (${quoteIdentifier('companyId')});`);
   await execute(`CREATE INDEX IF NOT EXISTS ${quoteIdentifier('idx_invoices_company_date')} ON ${quoteTable('invoices')} (${quoteIdentifier('companyId')}, ${quoteIdentifier('invoiceDate')});`);
   await execute(`CREATE INDEX IF NOT EXISTS ${quoteIdentifier('idx_invoices_batch')} ON ${quoteTable('invoices')} (${quoteIdentifier('batchId')});`);
+  await execute(`CREATE INDEX IF NOT EXISTS ${quoteIdentifier('idx_invoices_group_key')} ON ${quoteTable('invoices')} (${quoteIdentifier('companyId')}, ${quoteIdentifier('invoiceGroupKey')});`);
   await execute(`CREATE INDEX IF NOT EXISTS ${quoteIdentifier('idx_invoices_duplicate_status')} ON ${quoteTable('invoices')} (${quoteIdentifier('companyId')}, ${quoteIdentifier('duplicateStatus')});`);
   await execute(`CREATE INDEX IF NOT EXISTS ${quoteIdentifier('idx_invoice_items_company_product_original')} ON ${quoteTable('invoice_items')} (${quoteIdentifier('companyId')}, ${quoteIdentifier('productNameOriginal')});`);
   await execute(`CREATE INDEX IF NOT EXISTS ${quoteIdentifier('idx_invoice_items_company_product_normalized')} ON ${quoteTable('invoice_items')} (${quoteIdentifier('companyId')}, ${quoteIdentifier('productNameNormalized')});`);

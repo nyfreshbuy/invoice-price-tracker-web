@@ -57,6 +57,14 @@ export async function recognizeInvoiceWithAI(imagePath, options = {}) {
               'Use the invoice bottom Total as totalAmount. Do not overwrite it with the item sum.',
               'Item totals are only for validation.',
               'If the invoice has a page total, put it in totalAmount for that page.',
+              'Detect multipage invoices. Return pageNumber and pageCount when printed, such as "Page 1 of 2".',
+              'Set invoiceGroupKey to supplierName + invoiceNo + totalAmount when possible.',
+              'Detect invoiceLayoutType as one of: normal_invoice, printed_catalog_handwritten, multi_page, mixed.',
+              'For printed catalog handwritten forms, do not return every catalog item as a purchased item.',
+              'For printed catalog handwritten forms, return only rows with handwritten quantity, handwritten price, handwritten amount, circled item, or checked item.',
+              'For catalog rows that are visible but not purchased, set candidateOnly=true. They will not be saved.',
+              'For each item, return isHandwrittenQuantity, isHandwrittenPrice, isHandwrittenAmount, isCircled, isChecked when visible.',
+              'Detect discount rows separately by name containing discount, rebate, promotion, 折扣, or negative amount/unit price.',
               'If unsure, add warnings and lower confidence.',
               'Schema:',
               JSON.stringify(invoiceJsonShape())
@@ -91,6 +99,10 @@ function invoiceJsonShape() {
     supplierName: '',
     invoiceNo: '',
     invoiceDate: '',
+    pageNumber: 0,
+    pageCount: 0,
+    invoiceGroupKey: '',
+    invoiceLayoutType: 'normal_invoice',
     totalAmount: 0,
     items: [
       {
@@ -104,11 +116,18 @@ function invoiceJsonShape() {
         qty: 0,
         unit: '',
         unitPrice: 0,
-        totalPrice: 0
+        totalPrice: 0,
+        candidateOnly: false,
+        isHandwrittenQuantity: false,
+        isHandwrittenPrice: false,
+        isHandwrittenAmount: false,
+        isCircled: false,
+        isChecked: false
       }
     ],
     templateCandidate: {
       supplierKeywords: [],
+      invoiceLayoutType: 'normal_invoice',
       tableHeaderKeywords: [],
       columns: [
         { name: 'barcode', keywords: ['Code', 'Barcode', 'Item'] },
@@ -119,7 +138,9 @@ function invoiceJsonShape() {
         { name: 'qty', keywords: ['Qty', 'Quantity'] },
         { name: 'unitPrice', keywords: ['Unit Price', 'Price'] },
         { name: 'totalPrice', keywords: ['Amount', 'Total'] }
-      ]
+      ],
+      tableRegion: {},
+      handwrittenRegions: []
     },
     confidence: 0,
     warnings: []

@@ -35,6 +35,9 @@ export function normalizeProductName(value = '') {
     .trim()
     .replace(/干页豆腐/g, '千页豆腐')
     .replace(/仟页豆腐/g, '千页豆腐')
+    .replace(/龍眼/g, '龙眼')
+    .replace(/鳳梨/g, '凤梨')
+    .replace(/蘋果/g, '苹果')
     .replace(/\bITO\s+EN\b/gi, 'ITOEN')
     .replace(/(\d+)\.0+\s*(FZ|OZ|ML|G|KG|LB|L)\b/gi, '$1$2')
     .replace(/(\d+\.\d*?[1-9])0+\s*(FZ|OZ|ML|G|KG|LB|L)\b/gi, '$1$2')
@@ -89,7 +92,7 @@ function isDiscountLine(item = {}) {
 
 function splitInvoiceRows(items = []) {
   return {
-    productItems: items.filter((item) => !isDiscountLine(item)),
+    productItems: items.filter((item) => !isDiscountLine(item) && !item.candidateOnly),
     discountItems: items.filter(isDiscountLine)
   };
 }
@@ -378,6 +381,10 @@ export const localDb = {
       supplierId: supplier?.id || '',
       invoiceNo: payload.invoiceNo || '',
       invoiceDate,
+      pageNumber: Number(payload.pageNumber || 0),
+      pageCount: Number(payload.pageCount || 0),
+      invoiceGroupKey: payload.invoiceGroupKey || [payload.supplierName || supplier?.name || '', payload.invoiceNo || '', Number(totalAmount || 0).toFixed(2)].join('|').toLowerCase(),
+      invoiceLayoutType: payload.invoiceLayoutType || 'normal_invoice',
       imagePath: payload.imagePath || '',
       ocrText: payload.ocrText || '',
       totalAmount,
@@ -408,6 +415,12 @@ export const localDb = {
         promoGroupRule: rawItem.promoGroupRule || '',
         isFreeItem: rawItem.isFreeItem ? 1 : 0,
         isDiscountLine: 0,
+        candidateOnly: rawItem.candidateOnly ? 1 : 0,
+        isHandwrittenQuantity: rawItem.isHandwrittenQuantity ? 1 : 0,
+        isHandwrittenPrice: rawItem.isHandwrittenPrice ? 1 : 0,
+        isHandwrittenAmount: rawItem.isHandwrittenAmount ? 1 : 0,
+        isCircled: rawItem.isCircled ? 1 : 0,
+        isChecked: rawItem.isChecked ? 1 : 0,
         freeReason: rawItem.freeReason || '',
         invoiceDate
       });
@@ -486,7 +499,7 @@ export const localDb = {
       .map((alias) => alias.productId)
       .filter(Boolean));
     const items = (await all('invoice_items')).filter((item) => {
-      if (!active(item) || Number(item.isDiscountLine || 0)) return false;
+      if (!active(item) || Number(item.isDiscountLine || 0) || Number(item.candidateOnly || 0)) return false;
       const haystack = `${normalizeProductName(item.rawName || item.productNameOriginal || '')} ${normalizeProductName(item.normalizedName || item.productNameNormalized || '')}`;
       return haystack.includes(q) || aliasProductIds.has(item.productId);
     });
@@ -523,13 +536,13 @@ export const localDb = {
       .map((alias) => alias.productId)
       .filter(Boolean));
     return (await all('invoice_items')).filter((item) => {
-      if (!active(item) || Number(item.isDiscountLine || 0)) return false;
+      if (!active(item) || Number(item.isDiscountLine || 0) || Number(item.candidateOnly || 0)) return false;
       const haystack = `${normalizeProductName(item.rawName || item.productNameOriginal || '')} ${normalizeProductName(item.normalizedName || item.productNameNormalized || '')}`;
       return haystack.includes(q) || item.productId === name || aliasProductIds.has(item.productId);
     }).map((item) => {
       const supplier = resolveByAnyId(suppliers, item.supplierId);
       const invoice = resolveByAnyId(invoices, item.invoiceId);
-      return { ...item, supplierName: supplier?.name || '未命名供应商', invoiceNo: invoice?.invoiceNo || '' };
+      return { ...item, supplierName: supplier?.name || '未命名供应商', invoiceNo: invoice?.invoiceNo || '', invoiceImagePath: invoice?.imagePath || '', invoiceRecordId: invoice?.id || '' };
     }).sort((a, b) => `${b.invoiceDate}${b.createdAt}`.localeCompare(`${a.invoiceDate}${a.createdAt}`));
   },
 
