@@ -30,9 +30,16 @@ const emptyItem = () => ({
   chargedQty: 0,
   freeQty: 0,
   totalQty: 0,
+  actualQty: 0,
   originalUnitCost: 0,
   effectiveUnitCost: 0,
+  discountedEffectiveUnitCost: 0,
+  discountAmount: 0,
+  promoGroupId: '',
+  promoGroupName: '',
+  promoGroupRule: '',
   isFreeItem: false,
+  isDiscountLine: false,
   freeReason: '',
   notes: ''
 });
@@ -116,6 +123,7 @@ export default function App() {
           <Route path="/products" element={<ProductSearchPage />} />
           <Route path="/products/:name" element={<ProductDetailPage />} />
           <Route path="/suppliers" element={<SupplierPage />} />
+          <Route path="/suppliers/:id/invoices" element={<SupplierInvoiceHistoryPage />} />
           <Route path="/settings" element={<SettingsPage />} />
         </Routes>
       </main>
@@ -245,6 +253,7 @@ function BatchImportPage() {
   const successfulEntries = analyzedEntries.filter((entry) => entry.status === 'success');
   const nonDuplicateEntries = successfulEntries.filter((entry) => !entry.isDuplicate);
   const sameInvoiceGroupEntries = successfulEntries.filter((entry) => entry.sameInvoiceGroup && !entry.isDuplicate);
+  const possibleDuplicateEntries = successfulEntries.filter((entry) => entry.duplicateStatus === 'possible' && !entry.isDuplicate);
   const activeTaskIds = entries.filter((entry) => entry.taskId && !['success', 'failed'].includes(entry.status)).map((entry) => entry.taskId);
 
   useEffect(() => {
@@ -376,7 +385,8 @@ function BatchImportPage() {
       <Section title="识别结果汇总">
         <Info label="已选择" value={entries.length} />
         <Info label="识别成功" value={successfulEntries.length} />
-        <Info label="重复发票" value={analyzedEntries.filter((entry) => entry.isDuplicate).length} />
+        <Info label="重复发票" value={analyzedEntries.filter((entry) => entry.duplicateStatus === 'confirmed' || entry.isDuplicate).length} />
+        <Info label="疑似重复" value={possibleDuplicateEntries.length} />
         <Info label="同号不同金额" value={sameInvoiceGroupEntries.length} />
         <Info label="可保存" value={nonDuplicateEntries.length} />
       </Section>
@@ -387,7 +397,7 @@ function BatchImportPage() {
             <div className="detail-item" key={entry.id}>
               <div className="split">
                 <strong>{entry.fileName}</strong>
-                <strong className={entry.isDuplicate ? 'text-danger' : entry.sameInvoiceGroup ? 'warning-text' : ''}>{batchStatusText(entry)}</strong>
+                <strong className={(entry.duplicateStatus === 'confirmed' || entry.isDuplicate) ? 'text-danger' : (entry.duplicateStatus === 'possible' || entry.sameInvoiceGroup) ? 'warning-text' : ''}>{batchStatusText(entry)}</strong>
               </div>
               {entry.taskId && <p>任务 ID：{entry.taskId}</p>}
               <img className="invoice-preview" src={entry.previewUrl} alt={entry.fileName} />
@@ -396,7 +406,8 @@ function BatchImportPage() {
                   <p>发票号：{entry.parsed.invoiceNo || '-'}</p>
                   <p>日期：{entry.parsed.invoiceDate || '-'} · 金额：{money(entry.parsed.totalAmount || entry.itemTotal)}</p>
                   <p>识别来源：{entry.result.recognitionSource || sourceLabel(entry.result.source)} · 商品 {entry.parsed.items?.length || 0} 行</p>
-                  {entry.isDuplicate && <p className="error">检测到重复发票：{entry.duplicateReason}</p>}
+                  {(entry.duplicateStatus === 'confirmed' || entry.isDuplicate) && <p className="error">检测到重复发票：{entry.duplicateReason}</p>}
+                  {entry.duplicateStatus === 'possible' && !entry.isDuplicate && <p className="warning-text">{entry.possibleDuplicateReason || '疑似重复，请确认。'}</p>}
                   {entry.sameInvoiceGroup && !entry.isDuplicate && <p className="warning-text">{entry.sameInvoiceGroupReason}</p>}
                   {entry.sequenceNote && <p className="hint">{entry.sequenceNote}</p>}
                 </>
@@ -507,7 +518,8 @@ function RecognitionTaskListPage() {
               {task.imagePath && <img className="invoice-preview" src={api.fileUrl(task.imagePath)} alt={task.originalName || task.id} />}
               {task.result?.parsed && <p>{task.result.parsed.supplierName || '未识别供应商'} · {task.result.parsed.invoiceNo || '无发票号'} · {money(task.result.parsed.totalAmount)}</p>}
               {task.result?.parsed?.totalDifference > 0.05 && <p className="warning-text">商品明细与发票总额不一致，请检查。差额：{money(task.result.parsed.totalDifference)}</p>}
-              {task.result?.duplicateCheck?.isDuplicate && <p className="error">重复发票：{task.result.duplicateCheck.duplicateReason}</p>}
+              {(task.result?.duplicateCheck?.duplicateStatus === 'confirmed' || task.result?.duplicateCheck?.isDuplicate) && <p className="error">重复发票：{task.result.duplicateCheck.duplicateReason}</p>}
+              {task.result?.duplicateCheck?.duplicateStatus === 'possible' && !task.result?.duplicateCheck?.isDuplicate && <p className="warning-text">{task.result.duplicateCheck.possibleDuplicateReason || '疑似重复，请确认。'}</p>}
               {task.result?.duplicateCheck?.sameInvoiceGroup && !task.result?.duplicateCheck?.isDuplicate && <p className="warning-text">{task.result.duplicateCheck.sameInvoiceGroupReason}</p>}
               {task.error && <p className="error">{task.error}</p>}
             </div>
@@ -850,8 +862,9 @@ function InvoiceDetailPageWithGifts() {
 
   if (!detail) return <Page title="发票详情"><EmptyState text="未找到发票" /></Page>;
 
-  const { invoice, items } = detail;
+  const { invoice, items, discounts = [] } = detail;
   const giftSummary = summarizeGiftAccounting(items);
+  const promoGroups = summarizePromoGroups(items);
   return (
     <Page title="发票详情" action={<button className="danger-button" onClick={remove}><Trash2 size={16} />删除</button>}>
       <Section title="发票信息">
@@ -859,8 +872,11 @@ function InvoiceDetailPageWithGifts() {
         <Info label="发票号" value={invoice.invoiceNo || '-'} />
         <Info label="日期" value={invoice.invoiceDate || '-'} />
         <Info label="总金额" value={money(invoice.totalAmount)} />
+        <Info label="AI/OCR 来源" value={sourceLabel(invoice.recognitionSource)} />
+        <Info label="重复状态" value={duplicateStatusLabel(invoice.duplicateStatus)} />
         <Info label="同步状态" value={statusText(invoice.syncStatus)} />
       </Section>
+      {invoice.recognitionWarnings && <Section title="识别警告"><p className="warning-text">{invoice.recognitionWarnings}</p></Section>}
       {giftSummary.freeQty > 0 && (
         <Section title="赠品核算">
           <Info label="收费数量" value={numberText(giftSummary.chargedQty)} />
@@ -871,6 +887,29 @@ function InvoiceDetailPageWithGifts() {
           <Info label="实际成本" value={money(giftSummary.effectiveUnitCost)} />
         </Section>
       )}
+      {promoGroups.length > 0 && (
+        <Section title="赠品分摊组">
+          {promoGroups.map((group) => (
+            <div className="detail-item" key={group.id}>
+              <strong>{group.name}</strong>
+              <p>规则：{group.rule || '-'}</p>
+              <p>收费数量 {numberText(group.chargedQty)} · 免费数量 {numberText(group.freeQty)} · 实际数量 {numberText(group.actualQty)}</p>
+              <p>发票金额 {money(group.invoiceAmount)} · 原始单价 {money(group.originalUnitCost)} · 实际摊薄成本 {money(group.effectiveUnitCost)}</p>
+            </div>
+          ))}
+        </Section>
+      )}
+      {discounts.length > 0 && (
+        <Section title="折扣">
+          {discounts.map((discount) => (
+            <div className="detail-item" key={discount.id}>
+              <strong>{discount.discountName}</strong>
+              <p>金额 {money(discount.amount)} · 类型 {discount.discountType || 'unknown'}</p>
+              <p>{discount.appliedToProductIds ? `已关联商品：${discount.appliedToProductIds}` : '未确定关联商品，请人工分配折扣'}</p>
+            </div>
+          ))}
+        </Section>
+      )}
       {invoice.imagePath && <Section title="发票图片"><img className="invoice-image" src={invoice.imagePath} alt="发票" /></Section>}
       <Section title="商品明细">
         {items.map((item) => (
@@ -879,7 +918,8 @@ function InvoiceDetailPageWithGifts() {
             <p>标准名：{item.productNameNormalized || '-'}</p>
             <p>数量 {numberText(item.quantity)} {item.unit} · 原单价 {money(item.unitPrice)} · 总价 {money(item.totalPrice)}</p>
             <p>是否赠品：{Number(item.isFreeItem || 0) ? `是（${item.freeReason || '免费行'}）` : '否'} · 收费数量 {numberText(item.chargedQty)} · 免费数量 {numberText(item.freeQty)} · 实际数量 {numberText(item.totalQty)}</p>
-            <p>原始单价 {money(item.originalUnitCost || item.unitPrice)} · 实际摊薄成本 {money(item.effectiveUnitCost || item.unitPrice)}</p>
+            <p>分摊组：{item.promoGroupName || '-'} · {item.promoGroupRule || '-'}</p>
+            <p>原始单价 {money(item.originalUnitCost || item.unitPrice)} · 实际摊薄成本 {money(item.effectiveUnitCost || item.unitPrice)} · 折后实际成本 {money(item.discountedEffectiveUnitCost || item.effectiveUnitCost || item.unitPrice)}</p>
           </div>
         ))}
       </Section>
@@ -935,10 +975,12 @@ function ProductDetailPage() {
         {records.length === 0 && <EmptyState text="暂无采购记录" />}
         {records.map((record) => (
           <div className="detail-item" key={record.id}>
-            <div className="split"><strong>{record.invoiceDate}</strong><strong>{money(record.unitPrice)}</strong></div>
+            <div className="split"><strong>{record.invoiceDate}</strong><strong>{money(record.discountedEffectiveUnitCost || record.effectiveUnitCost || record.unitPrice)}</strong></div>
             <p>{record.supplierName || '未命名供应商'}</p>
             <p>原始名：{record.productNameOriginal}</p>
-            <p>数量 {record.quantity} {record.unit} · 总价 {money(record.totalPrice)} · 实际成本 {money(record.effectiveUnitCost || record.unitPrice)} · 发票号 {record.invoiceNo || '-'}</p>
+            <p>原始单价 {money(record.unitPrice)} · 实际摊薄成本 {money(record.effectiveUnitCost || record.unitPrice)} · 折后实际成本 {money(record.discountedEffectiveUnitCost || record.effectiveUnitCost || record.unitPrice)}</p>
+            <p>数量 {record.quantity} {record.unit} · 总价 {money(record.totalPrice)} · 是否赠品 {Number(record.isFreeItem || 0) ? '是' : '否'} · 发票号 {record.invoiceNo || '-'}</p>
+            <p>分摊组：{record.promoGroupName || '-'} · {record.promoGroupRule || '-'}</p>
           </div>
         ))}
       </Section>
@@ -979,6 +1021,7 @@ function SupplierPage() {
               <p>{supplier.phone || '无电话'} · {supplier.email || '无邮箱'} · {statusText(supplier.syncStatus)}</p>
             </div>
             <div className="row-actions">
+              <Link to={`/suppliers/${encodeURIComponent(supplier.id)}/invoices`}>历史发票</Link>
               <button onClick={() => setTemplateSupplier(supplier)}>模板</button>
               <button onClick={() => setEditing(supplier)}>编辑</button>
               <button className="text-danger" onClick={() => deleteSupplier(supplier)}>删除</button>
@@ -988,6 +1031,59 @@ function SupplierPage() {
       </div>
       {editing && <SupplierDialog supplier={editing} onClose={() => setEditing(null)} onSave={saveSupplier} />}
       {templateSupplier && <TemplateDialog supplier={templateSupplier} onClose={() => setTemplateSupplier(null)} />}
+    </Page>
+  );
+}
+
+function SupplierInvoiceHistoryPage() {
+  const { id } = useParams();
+  const [filters, setFilters] = useState({ dateFrom: '', dateTo: '', invoiceNo: '', totalAmount: '', hasGifts: false, hasWarnings: false, isMultipage: false });
+  const [rows, setRows] = useState([]);
+  const [supplier, setSupplier] = useState(null);
+
+  const load = async () => {
+    const suppliers = await localDb.getSuppliers();
+    const found = suppliers.find((entry) => [entry.id, entry.localId, entry.serverId].includes(id));
+    setSupplier(found || null);
+    setRows(await localDb.getSupplierInvoices(id, filters));
+  };
+  useLocalReload(load, [id, JSON.stringify(filters)]);
+
+  function updateFilter(field, value) {
+    setFilters((current) => ({ ...current, [field]: value }));
+  }
+
+  return (
+    <Page title="历史发票" subtitle={supplier?.name || '供应商'}>
+      <Section title="筛选">
+        <div className="grid-2">
+          <label className="field"><span>开始日期</span><input type="date" value={filters.dateFrom} onChange={(event) => updateFilter('dateFrom', event.target.value)} /></label>
+          <label className="field"><span>结束日期</span><input type="date" value={filters.dateTo} onChange={(event) => updateFilter('dateTo', event.target.value)} /></label>
+          <label className="field"><span>发票号</span><input value={filters.invoiceNo} onChange={(event) => updateFilter('invoiceNo', event.target.value)} /></label>
+          <label className="field"><span>总金额</span><input type="number" value={filters.totalAmount} onChange={(event) => updateFilter('totalAmount', event.target.value)} /></label>
+        </div>
+        <div className="row-actions">
+          <label><input type="checkbox" checked={filters.hasGifts} onChange={(event) => updateFilter('hasGifts', event.target.checked)} /> 有赠品</label>
+          <label><input type="checkbox" checked={filters.hasWarnings} onChange={(event) => updateFilter('hasWarnings', event.target.checked)} /> 有异常</label>
+          <label><input type="checkbox" checked={filters.isMultipage} onChange={(event) => updateFilter('isMultipage', event.target.checked)} /> 多页发票</label>
+          <a className="secondary-button" href={api.supplierInvoicesExportUrl(id, filters)}>导出 CSV</a>
+        </div>
+      </Section>
+      <Section title="发票">
+        {rows.length === 0 && <EmptyState text="暂无历史发票" />}
+        <div className="card-list">
+          {rows.map((invoice) => (
+            <Link className="row-card" to={`/invoices/${encodeURIComponent(invoice.id)}`} key={invoice.id}>
+              <div>
+                <h3>{invoice.invoiceNo || '无发票号'}</h3>
+                <p>{invoice.invoiceDate || '-'} · {money(invoice.totalAmount)} · {invoice.itemCount || 0} 行</p>
+                <p>{invoice.hasGifts ? '有赠品 · ' : ''}{invoice.hasDiscounts ? '有折扣 · ' : ''}{invoice.isMultipage ? '多页发票 · ' : ''}{duplicateStatusLabel(invoice.duplicateStatus)}</p>
+              </div>
+              <ChevronRight />
+            </Link>
+          ))}
+        </div>
+      </Section>
     </Page>
   );
 }
@@ -1192,10 +1288,17 @@ function sourceLabel(source) {
   return 'OCR';
 }
 
+function duplicateStatusLabel(status) {
+  if (status === 'confirmed') return '重复发票';
+  if (status === 'possible') return '疑似重复，请确认';
+  return '正常';
+}
+
 function batchStatusText(entry) {
   if (entry.status === 'recognizing') return '🔄 识别中';
   if (entry.status === 'failed') return '❌ 失败';
-  if (entry.status === 'success' && entry.isDuplicate) return '重复发票';
+  if (entry.status === 'success' && (entry.duplicateStatus === 'confirmed' || entry.isDuplicate)) return '重复发票';
+  if (entry.status === 'success' && entry.duplicateStatus === 'possible') return '疑似重复，请确认';
   if (entry.status === 'success' && entry.sameInvoiceGroup) return '同发票号不同金额，可能是多页/同批次';
   if (entry.status === 'success') return '✅ 已完成';
   return '⏳ 等待中';
@@ -1232,7 +1335,9 @@ function emptyDuplicateInfo() {
     sameInvoiceGroup: false,
     possibleSameInvoicePages: false,
     sameInvoiceGroupReason: '',
-    sameSupplierBatch: false
+    sameSupplierBatch: false,
+    duplicateStatus: 'none',
+    possibleDuplicateReason: ''
   };
 }
 
@@ -1242,6 +1347,7 @@ function invoiceFingerprintFromParsed(parsed = {}, itemTotal = 0) {
     supplierName: parsed.supplierName || '',
     supplierKey: normalizedSupplierKey(parsed.supplierName),
     invoiceNo: normalizedKey(parsed.invoiceNo),
+    invoiceDate: parsed.invoiceDate || '',
     totalAmount: normalizedAmount(Number(parsed.totalAmount || 0) > 0 ? parsed.totalAmount : itemTotal),
     itemCount: items.length,
     itemNames: normalizedItemNames(items.map((item) => displayInvoiceItemNormalizedName(item) || displayInvoiceItemName(item))),
@@ -1254,6 +1360,7 @@ function invoiceFingerprintFromInvoice(invoice = {}) {
     supplierName: invoice.supplierName || '',
     supplierKey: normalizedSupplierKey(invoice.supplierName),
     invoiceNo: normalizedKey(invoice.invoiceNo),
+    invoiceDate: invoice.invoiceDate || '',
     totalAmount: normalizedAmount(Number(invoice.totalAmount || 0) > 0 ? invoice.totalAmount : invoice.itemTotal),
     itemCount: Number(invoice.itemCount || 0),
     itemNames: normalizedItemNames(invoice.itemNames || []),
@@ -1263,19 +1370,35 @@ function invoiceFingerprintFromInvoice(invoice = {}) {
 
 function compareInvoiceFingerprints(current, candidate, sourceLabelText) {
   const result = emptyDuplicateInfo();
-  if (!current.invoiceNo || current.invoiceNo !== candidate.invoiceNo) return result;
   if (!supplierNamesSimilar(current.supplierName, candidate.supplierName)) return result;
 
   result.sameSupplierBatch = true;
+  const sameInvoiceNo = Boolean(current.invoiceNo && current.invoiceNo === candidate.invoiceNo);
   const sameAmount = amountsClose(current.totalAmount, candidate.totalAmount);
   const similarItems = invoiceItemsHighlySimilar(current, candidate);
+  const sameOrCloseDate = daysBetweenDates(current.invoiceDate, candidate.invoiceDate) <= 1;
+
+  if (!sameInvoiceNo) {
+    if (sameAmount && similarItems && sameOrCloseDate) {
+      result.duplicateStatus = 'possible';
+      result.possibleDuplicateReason = `${sourceLabelText}: 发票号不同，只能标记疑似重复。`;
+    }
+    return result;
+  }
+
+  if (!sameOrCloseDate) {
+    result.duplicateStatus = 'none';
+    return result;
+  }
 
   if (sameAmount && similarItems) {
     result.isDuplicate = true;
+    result.duplicateStatus = 'confirmed';
     result.duplicateReason = `${sourceLabelText}：同供应商、同发票号、同金额，且商品明细高度相似`;
     return result;
   }
 
+  result.duplicateStatus = 'possible';
   result.sameInvoiceGroup = true;
   result.possibleSameInvoicePages = !sameAmount;
   result.sameInvoiceGroupReason = sameAmount
@@ -1291,6 +1414,14 @@ function normalizedAmount(value) {
 
 function amountsClose(a, b) {
   return Math.abs(normalizedAmount(a) - normalizedAmount(b)) < 0.01;
+}
+
+function daysBetweenDates(a, b) {
+  if (!a || !b) return Number.POSITIVE_INFINITY;
+  const left = new Date(`${String(a).slice(0, 10)}T00:00:00Z`).getTime();
+  const right = new Date(`${String(b).slice(0, 10)}T00:00:00Z`).getTime();
+  if (!Number.isFinite(left) || !Number.isFinite(right)) return Number.POSITIVE_INFINITY;
+  return Math.abs(left - right) / 86400000;
 }
 
 function normalizedSupplierKey(value) {
@@ -1448,9 +1579,16 @@ function normalizeParsedItemForForm(item = {}) {
     chargedQty: Number(item.chargedQty || 0),
     freeQty: Number(item.freeQty || 0),
     totalQty: Number(item.totalQty || item.quantity || item.qty || 0),
+    actualQty: Number(item.actualQty || item.totalQty || item.quantity || item.qty || 0),
     originalUnitCost: Number(item.originalUnitCost || item.unitPrice || 0),
     effectiveUnitCost: Number(item.effectiveUnitCost || item.unitPrice || 0),
+    discountedEffectiveUnitCost: Number(item.discountedEffectiveUnitCost || item.effectiveUnitCost || item.unitPrice || 0),
+    discountAmount: Number(item.discountAmount || 0),
+    promoGroupId: item.promoGroupId || '',
+    promoGroupName: item.promoGroupName || '',
+    promoGroupRule: item.promoGroupRule || '',
     isFreeItem: Boolean(item.isFreeItem) || Number(item.unitPrice || 0) === 0 || Number(item.totalPrice ?? item.amount ?? 0) === 0,
+    isDiscountLine: Boolean(item.isDiscountLine),
     freeReason: item.freeReason || '',
     notes: item.notes || ''
   };
@@ -1552,11 +1690,11 @@ function numberText(value) {
 function summarizeGiftAccounting(items = []) {
   const groups = new Map();
   for (const item of items) {
-    const key = normalizedKey(item.productNameNormalized || item.productNameOriginal || item.id);
+    const key = item.promoGroupId || normalizedKey(item.productNameNormalized || item.productNameOriginal || item.id);
     if (groups.has(key)) continue;
     const chargedQty = Number(item.chargedQty || (Number(item.isFreeItem || 0) ? 0 : item.quantity) || 0);
     const freeQty = Number(item.freeQty || (Number(item.isFreeItem || 0) ? item.quantity : 0) || 0);
-    const totalQty = Number(item.totalQty || chargedQty + freeQty);
+    const totalQty = Number(item.actualQty || item.totalQty || chargedQty + freeQty);
     const originalUnitCost = Number(item.originalUnitCost || item.unitPrice || 0);
     groups.set(key, {
       chargedQty,
@@ -1576,4 +1714,34 @@ function summarizeGiftAccounting(items = []) {
     originalUnitCost: summary.chargedQty > 0 ? summary.invoiceAmount / summary.chargedQty : 0,
     effectiveUnitCost: summary.totalQty > 0 ? summary.invoiceAmount / summary.totalQty : 0
   };
+}
+
+function summarizePromoGroups(items = []) {
+  const groups = new Map();
+  for (const item of items) {
+    const key = item.promoGroupId || normalizedKey(item.promoGroupName || item.productNameNormalized || item.productNameOriginal || item.id);
+    const current = groups.get(key) || {
+      id: key,
+      name: item.promoGroupName || '需要人工确认分摊组',
+      rule: item.promoGroupRule || '',
+      chargedQty: 0,
+      freeQty: 0,
+      actualQty: 0,
+      invoiceAmount: 0
+    };
+    if (!Number(item.isFreeItem || 0)) {
+      current.invoiceAmount += Number(item.totalPrice || 0);
+    }
+    current.chargedQty = Math.max(current.chargedQty, Number(item.chargedQty || 0));
+    current.freeQty = Math.max(current.freeQty, Number(item.freeQty || 0));
+    current.actualQty = Math.max(current.actualQty, Number(item.actualQty || item.totalQty || 0));
+    groups.set(key, current);
+  }
+  return [...groups.values()]
+    .filter((group) => group.freeQty > 0 || group.name === '需要人工确认分摊组')
+    .map((group) => ({
+      ...group,
+      originalUnitCost: group.chargedQty > 0 ? group.invoiceAmount / group.chargedQty : 0,
+      effectiveUnitCost: group.actualQty > 0 ? group.invoiceAmount / group.actualQty : 0
+    }));
 }

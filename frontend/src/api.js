@@ -91,6 +91,14 @@ export const api = {
   deleteSupplier: (id) => request(`/api/suppliers/${id}`, { method: 'DELETE' }),
   getTemplate: (supplierId) => request(`/api/suppliers/${supplierId}/template`),
   saveTemplate: (supplierId, payload) => request(`/api/suppliers/${supplierId}/template`, { method: 'PUT', body: JSON.stringify(payload) }),
+  getSupplierInvoices: (supplierId, params = {}) => {
+    const query = new URLSearchParams(Object.entries(params).filter(([, value]) => value !== '' && value !== false && value !== null && value !== undefined)).toString();
+    return request(`/api/suppliers/${supplierId}/invoices${query ? `?${query}` : ''}`);
+  },
+  supplierInvoicesExportUrl: (supplierId, params = {}) => {
+    const query = new URLSearchParams({ ...Object.fromEntries(Object.entries(params).filter(([, value]) => value !== '' && value !== false && value !== null && value !== undefined)), token: getAuthToken() }).toString();
+    return `${API_BASE}/api/suppliers/${supplierId}/invoices.csv?${query}`;
+  },
 
   searchProducts: (q) => request(`/api/products/search?q=${encodeURIComponent(q)}`),
   getProduct: (name) => request(`/api/products/${encodeURIComponent(name)}`),

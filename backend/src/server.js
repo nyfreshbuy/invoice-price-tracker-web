@@ -28,6 +28,14 @@ import {
 import aiInvoiceRoutes from './routes/aiInvoice.js';
 import { recognizeInvoice } from './services/aiInvoiceOrchestrator.js';
 import { saveOrUpdateTemplateFromResult } from './services/invoiceTemplateService.js';
+import {
+  detectDiscountLine,
+  discountTypeFor,
+  displayRawName,
+  displayStandardName,
+  normalizeProductNameAdvanced,
+  promoGroupCandidate
+} from './services/productNormalizationService.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
@@ -211,15 +219,36 @@ function prepareRecord(table, record, deviceId, companyId) {
     return { ...base, name: record.name || '', phone: record.phone || '', email: record.email || '', address: record.address || '', notes: record.notes || '' };
   }
   if (table === 'invoices') {
-    return { ...base, batchId: record.batchId || '', supplierId: record.supplierId || '', invoiceNo: record.invoiceNo || '', invoiceDate: record.invoiceDate || today(), imagePath: record.imagePath || '', ocrText: record.ocrText || '', totalAmount: Number(record.totalAmount || 0), status: record.status || 'saved' };
+    return {
+      ...base,
+      batchId: record.batchId || '',
+      scanBatchId: record.scanBatchId || record.batchId || '',
+      supplierId: record.supplierId || '',
+      invoiceNo: record.invoiceNo || '',
+      invoiceDate: record.invoiceDate || today(),
+      pageNumber: Number(record.pageNumber || 0),
+      imagePath: record.imagePath || '',
+      ocrText: record.ocrText || '',
+      totalAmount: Number(record.totalAmount || 0),
+      duplicateStatus: record.duplicateStatus || 'none',
+      recognitionSource: record.recognitionSource || '',
+      recognitionWarnings: Array.isArray(record.recognitionWarnings) ? JSON.stringify(record.recognitionWarnings) : (record.recognitionWarnings || ''),
+      status: record.status || 'saved'
+    };
   }
   if (table === 'invoice_items') {
+    const rawName = displayRawName(record);
+    const standardName = displayStandardName(record) || rawName;
+    const normalizedName = normalizeProductNameAdvanced(record.normalizedName || record.productNameNormalized || standardName || rawName);
     return {
       ...base,
       invoiceId: record.invoiceId || '',
       supplierId: record.supplierId || '',
-      productNameOriginal: record.productNameOriginal || '',
-      productNameNormalized: normalizeProductName(record.productNameNormalized || record.productNameOriginal || ''),
+      productId: record.productId || '',
+      rawName,
+      productNameOriginal: standardName,
+      productNameNormalized: normalizedName,
+      normalizedName,
       category: record.category || '',
       quantity: Number(record.quantity || 0),
       unit: record.unit || '',
@@ -228,24 +257,46 @@ function prepareRecord(table, record, deviceId, companyId) {
       chargedQty: Number(record.chargedQty || 0),
       freeQty: Number(record.freeQty || 0),
       totalQty: Number(record.totalQty || record.quantity || 0),
+      actualQty: Number(record.actualQty || record.totalQty || record.quantity || 0),
       originalUnitCost: Number(record.originalUnitCost || record.unitPrice || 0),
       effectiveUnitCost: Number(record.effectiveUnitCost || record.unitPrice || 0),
+      discountAmount: Number(record.discountAmount || 0),
+      discountedEffectiveUnitCost: Number(record.discountedEffectiveUnitCost || record.effectiveUnitCost || record.unitPrice || 0),
+      promoGroupId: record.promoGroupId || '',
+      promoGroupName: record.promoGroupName || '',
+      promoGroupRule: record.promoGroupRule || '',
       isFreeItem: record.isFreeItem ? 1 : 0,
+      isDiscountLine: record.isDiscountLine ? 1 : 0,
       freeReason: record.freeReason || '',
       invoiceDate: record.invoiceDate || today(),
       notes: record.notes || ''
     };
   }
   if (table === 'products') {
-    return { ...base, name: record.name || '', normalizedName: normalizeProductName(record.normalizedName || record.name || ''), category: record.category || '', notes: record.notes || '' };
+    return { ...base, name: record.name || '', normalizedName: normalizeProductNameAdvanced(record.normalizedName || record.name || ''), category: record.category || '', notes: record.notes || '' };
   }
   if (table === 'price_history') {
     return { ...base, productId: record.productId || '', invoiceItemId: record.invoiceItemId || '', supplierId: record.supplierId || '', price: Number(record.price || 0), quantity: Number(record.quantity || 0), unit: record.unit || '', invoiceDate: record.invoiceDate || today(), invoiceNo: record.invoiceNo || '' };
   }
-  if (table === 'product_aliases') {
+  if (table === 'invoice_discounts') {
     return {
       ...base,
-      keyword: normalizeProductName(record.keyword || record.rawName || ''),
+      invoiceId: record.invoiceId || '',
+      supplierId: record.supplierId || '',
+      discountName: record.discountName || '',
+      amount: Number(record.amount || 0),
+      discountType: record.discountType || 'unknown',
+      appliedToProductIds: Array.isArray(record.appliedToProductIds) ? record.appliedToProductIds.join(',') : (record.appliedToProductIds || '')
+    };
+  }
+  if (table === 'product_aliases') {
+    const aliasName = record.aliasName || record.rawName || record.keyword || '';
+    const normalizedAlias = normalizeProductNameAdvanced(record.normalizedAlias || aliasName);
+    return {
+      ...base,
+      keyword: normalizeProductNameAdvanced(record.keyword || aliasName),
+      aliasName,
+      normalizedAlias,
       standardName: record.standardName || '',
       category: record.category || '',
       productId: record.productId || '',
@@ -259,7 +310,9 @@ function prepareRecord(table, record, deviceId, companyId) {
       minPrice: Number(record.minPrice || 0),
       maxPrice: Number(record.maxPrice || 0),
       avgPrice: Number(record.avgPrice || 0),
-      occurrenceCount: Number(record.occurrenceCount || 0)
+      occurrenceCount: Number(record.occurrenceCount || 0),
+      confidence: Number(record.confidence || 0.85),
+      createdByUser: record.createdByUser ? 1 : 0
     };
   }
   if (table === 'product_learning_rules') {
@@ -346,10 +399,15 @@ async function prepareRecordWithReferences(table, record, deviceId, companyId, c
   if (table === 'invoice_items') {
     prepared.invoiceId = await resolveReference('invoices', prepared.invoiceId, deviceId, companyId, client);
     prepared.supplierId = await resolveReference('suppliers', prepared.supplierId, deviceId, companyId, client);
+    prepared.productId = await resolveReference('products', prepared.productId, deviceId, companyId, client);
   }
   if (table === 'price_history') {
     prepared.productId = await resolveReference('products', prepared.productId, deviceId, companyId, client);
     prepared.invoiceItemId = await resolveReference('invoice_items', prepared.invoiceItemId, deviceId, companyId, client);
+    prepared.supplierId = await resolveReference('suppliers', prepared.supplierId, deviceId, companyId, client);
+  }
+  if (table === 'invoice_discounts') {
+    prepared.invoiceId = await resolveReference('invoices', prepared.invoiceId, deviceId, companyId, client);
     prepared.supplierId = await resolveReference('suppliers', prepared.supplierId, deviceId, companyId, client);
   }
   if (table === 'product_aliases' || table === 'product_learning_rules') {
@@ -415,7 +473,18 @@ function itemNameParts(item = {}) {
 }
 
 function giftAccountingKey(item = {}) {
-  return normalizeProductName(item.standardName || item.productNameNormalized || item.normalizedName || item.productNameOriginal || item.name || item.rawName || '');
+  const candidate = promoGroupCandidate(item);
+  return candidate.key || normalizeProductNameAdvanced(item.standardName || item.productNameNormalized || item.normalizedName || item.productNameOriginal || item.name || item.rawName || '');
+}
+
+function splitInvoiceRows(items = []) {
+  const discountItems = [];
+  const productItems = [];
+  for (const item of items) {
+    if (detectDiscountLine(item)) discountItems.push(item);
+    else productItems.push(item);
+  }
+  return { productItems, discountItems };
 }
 
 function applyGiftAccounting(items = []) {
@@ -424,12 +493,20 @@ function applyGiftAccounting(items = []) {
     const unitPrice = Number(item.unitPrice ?? item.priceEach ?? item.price ?? 0);
     const totalPrice = Number(item.totalPrice ?? item.amount ?? 0);
     const isFreeItem = Boolean(item.isFreeItem) || unitPrice === 0 || totalPrice === 0;
+    const candidate = promoGroupCandidate(item);
     return {
       ...item,
       quantity,
       qty: quantity,
       unitPrice,
       totalPrice,
+      rawName: displayRawName(item),
+      productNameOriginal: displayStandardName(item) || displayRawName(item),
+      productNameNormalized: normalizeProductNameAdvanced(item.productNameNormalized || item.normalizedName || displayStandardName(item) || displayRawName(item)),
+      normalizedName: normalizeProductNameAdvanced(item.normalizedName || item.productNameNormalized || displayStandardName(item) || displayRawName(item)),
+      promoGroupId: item.promoGroupId || candidate.key || '',
+      promoGroupName: item.promoGroupName || candidate.name || '',
+      promoGroupRule: item.promoGroupRule || candidate.rule || '',
       isFreeItem,
       freeReason: item.freeReason || (isFreeItem ? (unitPrice === 0 ? 'priceEach = 0' : 'amount = 0') : '')
     };
@@ -458,8 +535,38 @@ function applyGiftAccounting(items = []) {
       chargedQty,
       freeQty,
       totalQty,
+      actualQty: totalQty,
       originalUnitCost: chargedQty > 0 ? invoiceAmount / chargedQty : 0,
-      effectiveUnitCost: totalQty > 0 ? invoiceAmount / totalQty : 0
+      effectiveUnitCost: totalQty > 0 ? invoiceAmount / totalQty : 0,
+      discountedEffectiveUnitCost: totalQty > 0 ? invoiceAmount / totalQty : 0
+    };
+  });
+}
+
+function applyDiscountAllocation(items = [], discountItems = []) {
+  if (!discountItems.length) return items;
+  const discounts = discountItems.map((discount) => ({
+    ...discount,
+    amount: Number(discount.totalPrice ?? discount.amount ?? 0)
+  }));
+  return items.map((item) => {
+    const itemId = item.id || item.serverId || item.localId || '';
+    const matching = discounts.filter((discount) => {
+      const info = discountTypeFor(discount, items);
+      const ids = String(info.appliedToProductIds || '').split(',').filter(Boolean);
+      if (ids.length) return ids.includes(itemId);
+      const name = normalizeProductNameAdvanced(discount.name || discount.productNameOriginal || discount.rawName || '');
+      const productName = normalizeProductNameAdvanced(item.productNameOriginal || item.productNameNormalized || item.rawName || '');
+      const token = name.split(/\s+/).find((part) => part && part !== 'discount' && part !== '折扣');
+      return token && productName.includes(token);
+    });
+    const discountAmount = matching.reduce((sum, discount) => sum + Number(discount.amount || 0), 0);
+    const actualQty = Number(item.actualQty || item.totalQty || item.quantity || 0);
+    const discountedTotal = Number(item.totalPrice || 0) + discountAmount;
+    return {
+      ...item,
+      discountAmount,
+      discountedEffectiveUnitCost: actualQty > 0 ? discountedTotal / actualQty : Number(item.effectiveUnitCost || item.unitPrice || 0)
     };
   });
 }
@@ -467,12 +574,12 @@ function applyGiftAccounting(items = []) {
 function summarizeGiftAccounting(items = []) {
   const groups = new Map();
   for (const item of items) {
-    const key = giftAccountingKey(item) || itemRawName(item) || item.id;
+    const key = item.promoGroupId || giftAccountingKey(item) || itemRawName(item) || item.id;
     if (groups.has(key)) continue;
     groups.set(key, {
       chargedQty: Number(item.chargedQty || 0),
       freeQty: Number(item.freeQty || 0),
-      totalQty: Number(item.totalQty || 0),
+      totalQty: Number(item.actualQty || item.totalQty || 0),
       invoiceAmount: Number(item.originalUnitCost || 0) * Number(item.chargedQty || 0)
     });
   }
@@ -491,7 +598,7 @@ function summarizeGiftAccounting(items = []) {
 
 async function findOrCreateProductForLearning(item, deviceId, companyId, client = null) {
   const parts = itemNameParts(item);
-  const normalizedName = normalizeProductName(parts.standardName || parts.rawName);
+  const normalizedName = normalizeProductNameAdvanced(parts.standardName || parts.rawName);
   if (!normalizedName) return null;
   const existing = await queryGet(`
     SELECT * FROM ${quoteTable('products')}
@@ -518,7 +625,7 @@ async function findOrCreateProductForLearning(item, deviceId, companyId, client 
 
 async function learnProductAlias({ item, itemRecord, invoice, supplier, product, deviceId, companyId, client }) {
   const parts = itemNameParts(item);
-  const keyword = normalizeProductName(parts.rawName || parts.standardName);
+  const keyword = normalizeProductNameAdvanced(parts.rawName || parts.standardName);
   if (!keyword || !product) return;
   const existing = await queryGet(`
     SELECT * FROM ${quoteTable('product_aliases')}
@@ -534,6 +641,8 @@ async function learnProductAlias({ item, itemRecord, invoice, supplier, product,
   const record = await prepareRecordWithReferences('product_aliases', {
     ...(existing || {}),
     keyword,
+    aliasName: parts.rawName || parts.standardName,
+    normalizedAlias: keyword,
     standardName: parts.standardName,
     category: item.category || existing?.category || '',
     productId: product.serverId || product.id,
@@ -548,6 +657,8 @@ async function learnProductAlias({ item, itemRecord, invoice, supplier, product,
     maxPrice: count > 0 ? Math.max(Number(existing.maxPrice || unitPrice), unitPrice) : unitPrice,
     avgPrice,
     occurrenceCount: count + 1,
+    confidence: Math.min(0.99, Number(existing?.confidence || 0.82) + 0.02),
+    createdByUser: item.createdByUser || false,
     updatedAt: nowIso()
   }, deviceId, companyId, client);
   await upsertRecord('product_aliases', record, client);
@@ -555,7 +666,7 @@ async function learnProductAlias({ item, itemRecord, invoice, supplier, product,
 
 async function learnProductRule({ item, supplier, product, deviceId, companyId, client }) {
   const parts = itemNameParts(item);
-  const rawKey = normalizeProductName(parts.rawName || parts.standardName);
+  const rawKey = normalizeProductNameAdvanced(parts.rawName || parts.standardName);
   if (!rawKey || !product) return;
   const existing = await queryGet(`
     SELECT * FROM ${quoteTable('product_learning_rules')}
@@ -590,7 +701,7 @@ async function learnProductRule({ item, supplier, product, deviceId, companyId, 
 }
 
 async function learnPrice({ itemRecord, invoice, supplier, product, deviceId, companyId, client }) {
-  const learnedPrice = Number(itemRecord.effectiveUnitCost || itemRecord.unitPrice || 0);
+  const learnedPrice = Number(itemRecord.discountedEffectiveUnitCost || itemRecord.effectiveUnitCost || itemRecord.unitPrice || 0);
   if (!product || !learnedPrice) return null;
   const productId = product.serverId || product.id;
   const history = await queryGet(`
@@ -628,13 +739,38 @@ async function learnPrice({ itemRecord, invoice, supplier, product, deviceId, co
     invoiceItemId: itemRecord.serverId || itemRecord.id,
     supplierId: supplier?.serverId || supplier?.id || '',
     price: unitPrice,
-    quantity: Number(itemRecord.totalQty || itemRecord.quantity || 0),
+    quantity: Number(itemRecord.actualQty || itemRecord.totalQty || itemRecord.quantity || 0),
     unit: itemRecord.unit || '',
     invoiceDate: invoice.invoiceDate,
     invoiceNo: invoice.invoiceNo || ''
   }, deviceId, companyId, client);
   await upsertRecord('price_history', priceRecord, client);
   return anomaly;
+}
+
+async function saveInvoiceDiscounts({ discountItems, productItemRecords, invoice, supplier, deviceId, companyId, client }) {
+  const saved = [];
+  for (const discount of discountItems) {
+    const discountName = displayRawName(discount) || discount.productNameOriginal || discount.name || 'Discount';
+    const amount = Number(discount.totalPrice ?? discount.amount ?? 0);
+    const info = discountTypeFor(discount, productItemRecords);
+    let appliedToProductIds = info.appliedToProductIds || '';
+    if (!appliedToProductIds && info.discountType !== 'invoice_level') {
+      appliedToProductIds = productItemRecords.map((item) => item.productId).filter(Boolean).join(',');
+    }
+    const record = await prepareRecordWithReferences('invoice_discounts', {
+      invoiceId: invoice.serverId || invoice.id,
+      supplierId: supplier?.serverId || supplier?.id || '',
+      discountName,
+      amount,
+      discountType: info.discountType || 'unknown',
+      appliedToProductIds,
+      updatedAt: nowIso()
+    }, deviceId, companyId, client);
+    await upsertRecord('invoice_discounts', record, client);
+    saved.push(record);
+  }
+  return saved;
 }
 
 function correctionEntries(before = {}, after = {}, prefix = '') {
@@ -668,8 +804,8 @@ async function learnCorrections({ beforeResult, finalPayload, invoice, itemRecor
 }
 
 function simpleSimilarity(a, b) {
-  const left = normalizeProductName(a);
-  const right = normalizeProductName(b);
+  const left = normalizeProductNameAdvanced(a);
+  const right = normalizeProductNameAdvanced(b);
   if (!left || !right) return 0;
   if (left === right) return 1;
   if (left.includes(right) || right.includes(left)) return 0.92;
@@ -702,7 +838,7 @@ async function enhanceRecognizedResultWithLearning(result, companyId) {
     let bestScore = 0;
     for (const candidate of candidates) {
       const score = Math.max(
-        simpleSimilarity(rawName, candidate.rawName || candidate.keyword),
+        simpleSimilarity(rawName, candidate.rawName || candidate.aliasName || candidate.normalizedAlias || candidate.keyword),
         simpleSimilarity(itemStandardName(item), candidate.standardName)
       );
       if (score > bestScore) {
@@ -720,9 +856,9 @@ async function enhanceRecognizedResultWithLearning(result, companyId) {
       nameEn: item.nameEn || best.nameEn || '',
       standardName: best.standardName || itemStandardName(item),
       name: best.standardName || itemStandardName(item),
-      normalizedName: normalizeProductName(best.standardName || itemStandardName(item)),
+      normalizedName: normalizeProductNameAdvanced(best.standardName || itemStandardName(item)),
       productNameOriginal: best.standardName || itemStandardName(item),
-      productNameNormalized: normalizeProductName(best.standardName || itemStandardName(item)),
+      productNameNormalized: normalizeProductNameAdvanced(best.standardName || itemStandardName(item)),
       barcode: item.barcode || best.barcode || '',
       spec: item.spec || best.spec || '',
       unit: item.unit || best.unit || '',
@@ -772,7 +908,8 @@ async function saveInvoicePayloadWithLearning(payload, user, options = {}) {
     ? await getByAnyId('suppliers', payload.supplierId, companyId)
     : await findOrCreateSupplier(payload.supplierName, deviceId, companyId);
   const now = nowIso();
-  const items = applyGiftAccounting(Array.isArray(payload.items) ? payload.items : []);
+  const { productItems, discountItems } = splitInvoiceRows(Array.isArray(payload.items) ? payload.items : []);
+  const items = applyDiscountAllocation(applyGiftAccounting(productItems), discountItems);
   const itemTotal = items.reduce((sum, item) => sum + Number(item.totalPrice || 0), 0);
   const totalAmount = Number(payload.totalAmount || 0) > 0 ? Number(payload.totalAmount) : itemTotal;
   const invoice = await prepareRecordWithReferences('invoices', {
@@ -791,18 +928,30 @@ async function saveInvoicePayloadWithLearning(payload, user, options = {}) {
       SET ${quoteIdentifier('deletedAt')} = ?, ${quoteIdentifier('updatedAt')} = ?
       WHERE ${quoteIdentifier('companyId')} = ? AND ${quoteIdentifier('invoiceId')} = ?
     `, [now, now, companyId, invoice.serverId], client);
+    await run(`
+      UPDATE ${quoteTable('invoice_discounts')}
+      SET ${quoteIdentifier('deletedAt')} = ?, ${quoteIdentifier('updatedAt')} = ?
+      WHERE ${quoteIdentifier('companyId')} = ? AND ${quoteIdentifier('invoiceId')} = ?
+    `, [now, now, companyId, invoice.serverId], client);
 
     for (const item of items.filter((entry) => (entry.productNameOriginal || entry.name || entry.standardName || '').trim())) {
       const standardName = item.standardName || item.productNameNormalized || item.productNameOriginal || item.name || '';
       const record = await prepareRecordWithReferences('invoice_items', {
         ...item,
+        rawName: displayRawName(item),
         productNameOriginal: standardName || item.productNameOriginal || item.name || '',
-        productNameNormalized: normalizeProductName(standardName || item.productNameNormalized || item.productNameOriginal || ''),
+        productNameNormalized: normalizeProductNameAdvanced(standardName || item.productNameNormalized || item.productNameOriginal || ''),
         chargedQty: item.chargedQty,
         freeQty: item.freeQty,
         totalQty: item.totalQty,
+        actualQty: item.actualQty,
         originalUnitCost: item.originalUnitCost,
         effectiveUnitCost: item.effectiveUnitCost,
+        discountAmount: item.discountAmount,
+        discountedEffectiveUnitCost: item.discountedEffectiveUnitCost,
+        promoGroupId: item.promoGroupId,
+        promoGroupName: item.promoGroupName,
+        promoGroupRule: item.promoGroupRule,
         isFreeItem: item.isFreeItem ? 1 : 0,
         freeReason: item.freeReason || '',
         invoiceId: invoice.serverId,
@@ -814,11 +963,16 @@ async function saveInvoicePayloadWithLearning(payload, user, options = {}) {
       itemRecords.push(record);
 
       const product = await findOrCreateProductForLearning({ ...item, productNameOriginal: record.productNameOriginal, productNameNormalized: record.productNameNormalized }, deviceId, companyId, client);
+      if (product) {
+        record.productId = product.serverId || product.id;
+        await upsertRecord('invoice_items', { ...record, productId: record.productId }, client);
+      }
       await learnProductAlias({ item, itemRecord: record, invoice, supplier, product, deviceId, companyId, client });
       await learnProductRule({ item: { ...item, unitPrice: record.unitPrice }, supplier, product, deviceId, companyId, client });
       const anomaly = await learnPrice({ itemRecord: record, invoice, supplier, product, deviceId, companyId, client });
       if (anomaly) priceAnomalies.push(anomaly);
     }
+    await saveInvoiceDiscounts({ discountItems, productItemRecords: itemRecords, invoice, supplier, deviceId, companyId, client });
 
     if (options.beforeResult) {
       await learnCorrections({
@@ -1096,6 +1250,8 @@ function emptyDuplicateCheck() {
     possibleSameInvoicePages: false,
     sameInvoiceGroupReason: '',
     sameSupplierBatch: false,
+    duplicateStatus: 'none',
+    possibleDuplicateReason: '',
     skippedSave: false
   };
 }
@@ -1150,14 +1306,28 @@ function itemComparisonName(item = {}) {
   return normalizeComparisonText(item.productNameNormalized || item.normalizedName || item.productNameOriginal || item.name || [item.nameCn, item.nameEn].filter(Boolean).join(' ')).replace(/\s+/g, ' ');
 }
 
-function invoiceComparisonFingerprint({ supplierName = '', invoiceNo = '', totalAmount = 0, items = [] }) {
+function daysBetweenDates(a, b) {
+  if (!a || !b) return Number.POSITIVE_INFINITY;
+  const left = new Date(`${String(a).slice(0, 10)}T00:00:00Z`).getTime();
+  const right = new Date(`${String(b).slice(0, 10)}T00:00:00Z`).getTime();
+  if (!Number.isFinite(left) || !Number.isFinite(right)) return Number.POSITIVE_INFINITY;
+  return Math.abs(left - right) / 86400000;
+}
+
+function invoiceComparisonFingerprint({ supplierId = '', supplierName = '', invoiceNo = '', invoiceDate = '', totalAmount = 0, items = [], batchId = '', scanBatchId = '', pageNumber = 0, createdAt = '' }) {
   return {
+    supplierId,
     supplierName,
     invoiceNo: normalizeComparisonText(invoiceNo),
+    invoiceDate,
     totalAmount: comparisonAmount(totalAmount),
     itemCount: items.length,
     itemNames: items.map(itemComparisonName).filter(Boolean).sort(),
-    totalQuantity: comparisonAmount(items.reduce((sum, item) => sum + Number(item.quantity ?? item.qty ?? 0), 0))
+    totalQuantity: comparisonAmount(items.reduce((sum, item) => sum + Number(item.quantity ?? item.qty ?? 0), 0)),
+    batchId,
+    scanBatchId,
+    pageNumber: Number(pageNumber || 0),
+    createdAt
   };
 }
 
@@ -1204,6 +1374,63 @@ function compareInvoiceForDuplicate(current, candidate, label) {
   return result;
 }
 
+function compareInvoiceForDuplicateV2(current, candidate, label) {
+  const result = emptyDuplicateCheck();
+  const sameSupplier = current.supplierId && candidate.supplierId
+    ? current.supplierId === candidate.supplierId
+    : supplierNamesNearlyEqual(current.supplierName, candidate.supplierName);
+  if (!sameSupplier) return result;
+
+  const sameInvoiceNo = Boolean(current.invoiceNo && current.invoiceNo === candidate.invoiceNo);
+  const sameAmount = amountsNearlyEqual(current.totalAmount, candidate.totalAmount);
+  const sameItems = invoiceItemsNearlyEqual(current, candidate);
+  const sameOrCloseDate = daysBetweenDates(current.invoiceDate, candidate.invoiceDate) <= 1;
+  const sameBatch = Boolean(current.batchId && candidate.batchId && current.batchId === candidate.batchId);
+  const differentPageNumber = Boolean(current.pageNumber && candidate.pageNumber && current.pageNumber !== candidate.pageNumber);
+
+  result.sameSupplierBatch = true;
+
+  if (!sameInvoiceNo) {
+    if (sameAmount && sameItems && sameOrCloseDate) {
+      result.duplicateStatus = 'possible';
+      result.possibleDuplicateReason = `${label}: supplier/date/amount/items are similar, but invoiceNo is different.`;
+    }
+    return result;
+  }
+
+  if (!sameOrCloseDate) {
+    result.duplicateStatus = 'none';
+    result.possibleDuplicateReason = `${label}: same supplier and invoiceNo, but invoiceDate differs by more than 1 day.`;
+    return result;
+  }
+
+  if (sameAmount && sameItems && differentPageNumber) {
+    result.sameInvoiceGroup = true;
+    result.possibleSameInvoicePages = true;
+    result.multiPageInvoice = true;
+    result.duplicateStatus = 'none';
+    result.sameInvoiceGroupReason = 'Same invoice number with a different page number, treated as multipage rather than duplicate.';
+    return result;
+  }
+
+  if (sameAmount && sameItems) {
+    result.isDuplicate = true;
+    result.duplicate = true;
+    result.duplicateStatus = 'confirmed';
+    result.duplicateReason = `${label}: same supplier, invoiceNo, close invoiceDate, totalAmount, and item details.`;
+    result.skippedSave = true;
+    return result;
+  }
+
+  result.duplicateStatus = 'possible';
+  result.sameInvoiceGroup = true;
+  result.possibleSameInvoicePages = sameBatch && (!sameAmount || !sameItems);
+  result.sameInvoiceGroupReason = sameAmount
+    ? '同供应商同发票号且日期接近，金额相同但商品明细不同，请人工确认。'
+    : '同供应商同发票号且日期接近，但金额不同，可能是多页/同批次发票，请人工确认。';
+  return result;
+}
+
 async function sha256File(filePath) {
   if (!filePath || !fs.existsSync(filePath)) return '';
   return new Promise((resolve, reject) => {
@@ -1217,10 +1444,16 @@ async function sha256File(filePath) {
 
 async function findRecognitionDuplicate(companyId, parsed, totalAmount, currentItems, excludeInvoiceId = '', batchId = '') {
   const current = invoiceComparisonFingerprint({
+    supplierId: parsed.supplierId || '',
     supplierName: parsed.supplierName || '',
     invoiceNo: parsed.invoiceNo || '',
+    invoiceDate: parsed.invoiceDate || '',
     totalAmount,
-    items: currentItems
+    items: currentItems,
+    batchId,
+    scanBatchId: batchId,
+    pageNumber: parsed.pageNumber || 0,
+    createdAt: parsed.createdAt || ''
   });
   if (!current.invoiceNo) return emptyDuplicateCheck();
 
@@ -1232,8 +1465,9 @@ async function findRecognitionDuplicate(companyId, parsed, totalAmount, currentI
       AND (suppliers.${quoteIdentifier('id')} = invoices.${quoteIdentifier('supplierId')} OR suppliers.${quoteIdentifier('serverId')} = invoices.${quoteIdentifier('supplierId')})
     WHERE invoices.${quoteIdentifier('companyId')} = ?
       AND invoices.${quoteIdentifier('deletedAt')} IS NULL
-      AND LOWER(invoices.${quoteIdentifier('invoiceNo')}) = ?
-  `, [companyId, current.invoiceNo]);
+    ORDER BY invoices.${quoteIdentifier('createdAt')} DESC
+    LIMIT 250
+  `, [companyId]);
 
   let groupInfo = emptyDuplicateCheck();
   for (const candidate of candidates) {
@@ -1247,19 +1481,26 @@ async function findRecognitionDuplicate(companyId, parsed, totalAmount, currentI
         AND ${quoteIdentifier('invoiceId')} IN (${candidateIdList.map(() => '?').join(',')})
     `, [companyId, ...candidateIdList]);
     const candidateFingerprint = invoiceComparisonFingerprint({
+      supplierId: candidate.supplierId || '',
       supplierName: candidate.supplierName || '',
       invoiceNo: candidate.invoiceNo || '',
+      invoiceDate: candidate.invoiceDate || '',
       totalAmount: candidate.totalAmount || items.reduce((sum, item) => sum + Number(item.totalPrice || 0), 0),
-      items
+      items,
+      batchId: candidate.batchId || '',
+      scanBatchId: candidate.scanBatchId || candidate.batchId || '',
+      pageNumber: candidate.pageNumber || 0,
+      createdAt: candidate.createdAt || ''
     });
-    const duplicateInfo = compareInvoiceForDuplicate(current, candidateFingerprint, '云端已有发票');
+    const duplicateInfo = compareInvoiceForDuplicateV2(current, candidateFingerprint, 'Cloud invoice');
     if (duplicateInfo.isDuplicate) return duplicateInfo;
-    if (duplicateInfo.sameInvoiceGroup && batchId && candidate.batchId === batchId) {
+    if (duplicateInfo.possibleSameInvoicePages && batchId && candidate.batchId === batchId) {
       return {
         ...duplicateInfo,
         sameInvoiceGroup: true,
         possibleSameInvoicePages: true,
         multiPageInvoice: true,
+        duplicateStatus: 'none',
         mergeInvoiceId: candidate.serverId || candidate.id,
         pageTotal: totalAmount,
         sameInvoiceGroupReason: '同批次同供应商同发票号，金额和商品不同，已自动判定为同一发票多页并合并。'
@@ -1272,7 +1513,8 @@ async function findRecognitionDuplicate(companyId, parsed, totalAmount, currentI
 
 async function saveRecognizedInvoiceFromTask(task, result, options = {}) {
   const parsed = result.parsed || {};
-  const items = applyGiftAccounting(Array.isArray(parsed.items) ? parsed.items : []);
+  const { productItems, discountItems } = splitInvoiceRows(Array.isArray(parsed.items) ? parsed.items : []);
+  const items = applyDiscountAllocation(applyGiftAccounting(productItems), discountItems);
   const deviceId = task.deviceId || 'recognition-task';
   const companyId = task.companyId;
   const now = nowIso();
@@ -1315,6 +1557,10 @@ async function saveRecognizedInvoiceFromTask(task, result, options = {}) {
     invoiceNo: parsed.invoiceNo || '',
     invoiceDate: parsed.invoiceDate || today(),
     batchId: task.batchId || existingInvoice?.batchId || '',
+    scanBatchId: task.batchId || existingInvoice?.scanBatchId || existingInvoice?.batchId || '',
+    duplicateStatus: duplicateCheck.duplicateStatus || (duplicateCheck.isDuplicate ? 'confirmed' : duplicateCheck.sameInvoiceGroup ? 'possible' : 'none'),
+    recognitionSource: result.recognitionSource || result.source || task.recognitionSource || '',
+    recognitionWarnings: parsed.warnings || duplicateCheck.sameInvoiceGroupReason || '',
     imagePath: existingInvoice?.imagePath || result.imagePath || task.imagePath || '',
     ocrText: [existingInvoice?.ocrText, result.ocrText].filter(Boolean).join('\n\n--- page ---\n\n'),
     totalAmount: invoiceTotal,
@@ -1331,7 +1577,13 @@ async function saveRecognizedInvoiceFromTask(task, result, options = {}) {
         SET ${quoteIdentifier('deletedAt')} = ?, ${quoteIdentifier('updatedAt')} = ?
         WHERE ${quoteIdentifier('companyId')} = ? AND ${quoteIdentifier('invoiceId')} = ?
       `, [now, now, companyId, invoice.serverId], client);
+      await run(`
+        UPDATE ${quoteTable('invoice_discounts')}
+        SET ${quoteIdentifier('deletedAt')} = ?, ${quoteIdentifier('updatedAt')} = ?
+        WHERE ${quoteIdentifier('companyId')} = ? AND ${quoteIdentifier('invoiceId')} = ?
+      `, [now, now, companyId, invoice.serverId], client);
     }
+    const itemRecords = [];
     for (const item of items.filter((entry) => (entry.productNameOriginal || entry.name || '').trim())) {
       const itemId = id();
       const itemRecord = await prepareRecordWithReferences('invoice_items', {
@@ -1348,8 +1600,14 @@ async function saveRecognizedInvoiceFromTask(task, result, options = {}) {
         chargedQty: item.chargedQty,
         freeQty: item.freeQty,
         totalQty: item.totalQty,
+        actualQty: item.actualQty,
         originalUnitCost: item.originalUnitCost,
         effectiveUnitCost: item.effectiveUnitCost,
+        discountAmount: item.discountAmount,
+        discountedEffectiveUnitCost: item.discountedEffectiveUnitCost,
+        promoGroupId: item.promoGroupId,
+        promoGroupName: item.promoGroupName,
+        promoGroupRule: item.promoGroupRule,
         isFreeItem: item.isFreeItem ? 1 : 0,
         freeReason: item.freeReason || '',
         notes: [item.notes, duplicateCheck.multiPageInvoice ? `pageTotal=${totalAmount.toFixed(2)}` : ''].filter(Boolean).join(' | '),
@@ -1359,12 +1617,18 @@ async function saveRecognizedInvoiceFromTask(task, result, options = {}) {
         updatedAt: now
       }, deviceId, companyId, client);
       await upsertRecord('invoice_items', itemRecord, client);
+      itemRecords.push(itemRecord);
       const product = await findOrCreateProductForLearning(item, deviceId, companyId, client);
+      if (product) {
+        itemRecord.productId = product.serverId || product.id;
+        await upsertRecord('invoice_items', { ...itemRecord, productId: itemRecord.productId }, client);
+      }
       await learnProductAlias({ item, itemRecord, invoice, supplier, product, deviceId, companyId, client });
       await learnProductRule({ item, supplier, product, deviceId, companyId, client });
       const anomaly = await learnPrice({ itemRecord, invoice, supplier, product, deviceId, companyId, client });
       if (anomaly) duplicateCheck.priceAnomalies.push(anomaly);
     }
+    await saveInvoiceDiscounts({ discountItems, productItemRecords: itemRecords, invoice, supplier, deviceId, companyId, client });
   });
 
   return { invoiceId: invoice.serverId || invoice.id, duplicateCheck, imageHash };
@@ -1515,6 +1779,67 @@ app.put('/api/suppliers/:id/template', requireAuth, asyncHandler(async (req, res
   res.json(record);
 }));
 
+async function supplierInvoiceHistoryRows(companyId, supplierId, filters = {}) {
+  const supplier = await getByAnyId('suppliers', supplierId, companyId);
+  const resolvedSupplierId = supplier?.serverId || supplier?.id || supplierId;
+  const rows = await queryAll(`
+    SELECT invoices.*, suppliers.${quoteIdentifier('name')} AS "supplierName"
+    FROM ${quoteTable('invoices')} invoices
+    LEFT JOIN ${quoteTable('suppliers')} suppliers
+      ON suppliers.${quoteIdentifier('companyId')} = invoices.${quoteIdentifier('companyId')}
+      AND (suppliers.${quoteIdentifier('id')} = invoices.${quoteIdentifier('supplierId')} OR suppliers.${quoteIdentifier('serverId')} = invoices.${quoteIdentifier('supplierId')})
+    WHERE invoices.${quoteIdentifier('companyId')} = ?
+      AND invoices.${quoteIdentifier('deletedAt')} IS NULL
+      AND (invoices.${quoteIdentifier('supplierId')} = ? OR invoices.${quoteIdentifier('supplierId')} = ?)
+    ORDER BY invoices.${quoteIdentifier('invoiceDate')} DESC, invoices.${quoteIdentifier('createdAt')} DESC
+  `, [companyId, supplierId, resolvedSupplierId]);
+  const withDetails = [];
+  for (const invoice of rows) {
+    const invoiceIds = [invoice.id, invoice.serverId, invoice.localId].filter(Boolean);
+    const placeholders = invoiceIds.map(() => '?').join(', ');
+    const items = await queryAll(`
+      SELECT * FROM ${quoteTable('invoice_items')}
+      WHERE ${quoteIdentifier('companyId')} = ? AND ${quoteIdentifier('invoiceId')} IN (${placeholders}) AND ${quoteIdentifier('deletedAt')} IS NULL
+    `, [companyId, ...invoiceIds]);
+    const discounts = await queryAll(`
+      SELECT * FROM ${quoteTable('invoice_discounts')}
+      WHERE ${quoteIdentifier('companyId')} = ? AND ${quoteIdentifier('invoiceId')} IN (${placeholders}) AND ${quoteIdentifier('deletedAt')} IS NULL
+    `, [companyId, ...invoiceIds]);
+    withDetails.push({
+      ...invoice,
+      itemCount: items.length,
+      hasGifts: items.some((item) => Number(item.isFreeItem || 0) || Number(item.freeQty || 0) > 0) ? 1 : 0,
+      hasDiscounts: discounts.length ? 1 : 0,
+      hasWarnings: invoice.recognitionWarnings || invoice.duplicateStatus === 'possible' ? 1 : 0,
+      isMultipage: invoice.status === 'recognized-multipage' || (invoice.ocrText || '').includes('--- page ---') ? 1 : 0,
+      discounts
+    });
+  }
+  return withDetails.filter((invoice) => {
+    if (filters.dateFrom && String(invoice.invoiceDate || '') < filters.dateFrom) return false;
+    if (filters.dateTo && String(invoice.invoiceDate || '') > filters.dateTo) return false;
+    if (filters.invoiceNo && !String(invoice.invoiceNo || '').toLowerCase().includes(String(filters.invoiceNo).toLowerCase())) return false;
+    if (filters.totalAmount && Math.abs(Number(invoice.totalAmount || 0) - Number(filters.totalAmount)) >= 0.01) return false;
+    if (filters.hasGifts === 'true' && !invoice.hasGifts) return false;
+    if (filters.hasWarnings === 'true' && !invoice.hasWarnings) return false;
+    if (filters.isMultipage === 'true' && !invoice.isMultipage) return false;
+    return true;
+  });
+}
+
+app.get('/api/suppliers/:id/invoices', requireAuth, asyncHandler(async (req, res) => {
+  res.json(await supplierInvoiceHistoryRows(req.user.companyId, req.params.id, req.query));
+}));
+
+app.get('/api/suppliers/:id/invoices.csv', requireAuth, asyncHandler(async (req, res) => {
+  const rows = await supplierInvoiceHistoryRows(req.user.companyId, req.params.id, req.query);
+  const header = ['id', 'supplierName', 'invoiceNo', 'invoiceDate', 'totalAmount', 'itemCount', 'hasGifts', 'hasDiscounts', 'hasWarnings', 'isMultipage', 'duplicateStatus', 'recognitionSource'];
+  const csv = [rowToCsv(header), ...rows.map((row) => rowToCsv(header.map((key) => row[key])))].join('\n');
+  res.header('Content-Type', 'text/csv; charset=utf-8');
+  res.attachment(`SupplierInvoiceHistory-${today()}.csv`);
+  res.send(`\uFEFF${csv}`);
+}));
+
 app.get('/api/invoices', requireAuth, asyncHandler(async (req, res) => {
   res.json(await invoiceWithSupplierRows(req.user.companyId));
 }));
@@ -1548,7 +1873,8 @@ app.post('/api/invoices', requireAuth, asyncHandler(async (req, res) => {
     ? await getByAnyId('suppliers', req.body.supplierId, req.user.companyId)
     : await findOrCreateSupplier(req.body.supplierName, deviceId, req.user.companyId);
   const now = nowIso();
-  const items = Array.isArray(req.body.items) ? req.body.items : [];
+  const { productItems, discountItems } = splitInvoiceRows(Array.isArray(req.body.items) ? req.body.items : []);
+  const items = applyDiscountAllocation(applyGiftAccounting(productItems), discountItems);
   const itemTotal = items.reduce((sum, item) => sum + Number(item.totalPrice || 0), 0);
   const totalAmount = Number(req.body.totalAmount || 0) > 0 ? Number(req.body.totalAmount) : itemTotal;
   const invoice = await prepareRecordWithReferences('invoices', { ...req.body, supplierId: supplier?.serverId || supplier?.id || '', totalAmount, updatedAt: now }, deviceId, req.user.companyId);
@@ -1560,10 +1886,18 @@ app.post('/api/invoices', requireAuth, asyncHandler(async (req, res) => {
       SET ${quoteIdentifier('deletedAt')} = ?, ${quoteIdentifier('updatedAt')} = ?
       WHERE ${quoteIdentifier('companyId')} = ? AND ${quoteIdentifier('invoiceId')} = ?
     `, [now, now, req.user.companyId, invoice.serverId], client);
+    await run(`
+      UPDATE ${quoteTable('invoice_discounts')}
+      SET ${quoteIdentifier('deletedAt')} = ?, ${quoteIdentifier('updatedAt')} = ?
+      WHERE ${quoteIdentifier('companyId')} = ? AND ${quoteIdentifier('invoiceId')} = ?
+    `, [now, now, req.user.companyId, invoice.serverId], client);
+    const itemRecords = [];
     for (const item of items.filter((entry) => (entry.productNameOriginal || '').trim())) {
       const record = await prepareRecordWithReferences('invoice_items', { ...item, invoiceId: invoice.serverId, supplierId: invoice.supplierId, invoiceDate: invoice.invoiceDate, updatedAt: now }, deviceId, req.user.companyId, client);
       await upsertRecord('invoice_items', record, client);
+      itemRecords.push(record);
     }
+    await saveInvoiceDiscounts({ discountItems, productItemRecords: itemRecords, invoice, supplier, deviceId, companyId: req.user.companyId, client });
   });
   res.json({ ...invoice, supplierName: supplier?.name || '未命名供应商' });
 }));
@@ -1588,7 +1922,12 @@ app.get('/api/invoices/:id', requireAuth, asyncHandler(async (req, res) => {
     WHERE ${quoteIdentifier('companyId')} = ? AND ${quoteIdentifier('invoiceId')} IN (${placeholders}) AND ${quoteIdentifier('deletedAt')} IS NULL
     ORDER BY ${quoteIdentifier('createdAt')} ASC
   `, [req.user.companyId, ...invoiceIds]);
-  res.json({ invoice, items });
+  const discounts = await queryAll(`
+    SELECT * FROM ${quoteTable('invoice_discounts')}
+    WHERE ${quoteIdentifier('companyId')} = ? AND ${quoteIdentifier('invoiceId')} IN (${placeholders}) AND ${quoteIdentifier('deletedAt')} IS NULL
+    ORDER BY ${quoteIdentifier('createdAt')} ASC
+  `, [req.user.companyId, ...invoiceIds]);
+  res.json({ invoice, items, discounts });
 }));
 
 app.delete('/api/invoices/:id', requireAuth, asyncHandler(async (req, res) => {
@@ -1603,42 +1942,70 @@ app.delete('/api/invoices/:id', requireAuth, asyncHandler(async (req, res) => {
     SET ${quoteIdentifier('deletedAt')} = ?, ${quoteIdentifier('updatedAt')} = ?
     WHERE ${quoteIdentifier('companyId')} = ? AND ${quoteIdentifier('invoiceId')} = ?
   `, [deletedAt, deletedAt, req.user.companyId, req.params.id]);
+  await run(`
+    UPDATE ${quoteTable('invoice_discounts')}
+    SET ${quoteIdentifier('deletedAt')} = ?, ${quoteIdentifier('updatedAt')} = ?
+    WHERE ${quoteIdentifier('companyId')} = ? AND ${quoteIdentifier('invoiceId')} = ?
+  `, [deletedAt, deletedAt, req.user.companyId, req.params.id]);
   res.json({ ok: true });
 }));
 
 app.get('/api/products/search', requireAuth, asyncHandler(async (req, res) => {
-  const q = String(req.query.q || '').trim().toLowerCase();
+  const q = normalizeProductNameAdvanced(String(req.query.q || '').trim());
   if (!q) return res.json([]);
-  const like = `%${q}%`;
-  const summaries = await queryAll(`
-    SELECT
-      CASE WHEN ${quoteIdentifier('productNameNormalized')} IS NULL OR ${quoteIdentifier('productNameNormalized')} = '' THEN ${quoteIdentifier('productNameOriginal')} ELSE ${quoteIdentifier('productNameNormalized')} END AS "standardName",
-      MIN(CASE WHEN ${quoteIdentifier('effectiveUnitCost')} > 0 THEN ${quoteIdentifier('effectiveUnitCost')} ELSE ${quoteIdentifier('unitPrice')} END) AS "minPrice",
-      MAX(CASE WHEN ${quoteIdentifier('effectiveUnitCost')} > 0 THEN ${quoteIdentifier('effectiveUnitCost')} ELSE ${quoteIdentifier('unitPrice')} END) AS "maxPrice",
-      AVG(CASE WHEN ${quoteIdentifier('effectiveUnitCost')} > 0 THEN ${quoteIdentifier('effectiveUnitCost')} ELSE ${quoteIdentifier('unitPrice')} END) AS "averagePrice",
-      MAX(${quoteIdentifier('invoiceDate')}) AS "recentPurchaseDate",
-      COUNT(*) AS "recordCount"
-    FROM ${quoteTable('invoice_items')}
+  const aliases = await queryAll(`
+    SELECT * FROM ${quoteTable('product_aliases')}
     WHERE ${quoteIdentifier('companyId')} = ? AND ${quoteIdentifier('deletedAt')} IS NULL
-      AND (LOWER(${quoteIdentifier('productNameOriginal')}) LIKE ? OR LOWER(${quoteIdentifier('productNameNormalized')}) LIKE ?)
-    GROUP BY "standardName"
-    ORDER BY "recentPurchaseDate" DESC
-  `, [req.user.companyId, like, like]);
-
-  for (const row of summaries) {
-    const recent = await queryGet(`
-      SELECT CASE WHEN ${quoteIdentifier('effectiveUnitCost')} > 0 THEN ${quoteIdentifier('effectiveUnitCost')} ELSE ${quoteIdentifier('unitPrice')} END AS ${quoteIdentifier('unitPrice')} FROM ${quoteTable('invoice_items')}
-      WHERE ${quoteIdentifier('companyId')} = ? AND ${quoteIdentifier('deletedAt')} IS NULL
-        AND (${quoteIdentifier('productNameNormalized')} = ? OR ${quoteIdentifier('productNameOriginal')} = ?)
-      ORDER BY ${quoteIdentifier('invoiceDate')} DESC, ${quoteIdentifier('createdAt')} DESC LIMIT 1
-    `, [req.user.companyId, row.standardName, row.standardName]);
-    row.recentPrice = recent?.unitPrice || 0;
+  `, [req.user.companyId]);
+  const aliasProductIds = new Set(aliases
+    .filter((alias) => `${normalizeProductNameAdvanced(alias.aliasName || alias.rawName || alias.keyword)} ${normalizeProductNameAdvanced(alias.normalizedAlias || '')} ${normalizeProductNameAdvanced(alias.standardName || '')}`.includes(q))
+    .map((alias) => alias.productId)
+    .filter(Boolean));
+  const rows = await queryAll(`
+    SELECT * FROM ${quoteTable('invoice_items')}
+    WHERE ${quoteIdentifier('companyId')} = ?
+      AND ${quoteIdentifier('deletedAt')} IS NULL
+      AND COALESCE(${quoteIdentifier('isDiscountLine')}, 0) = 0
+  `, [req.user.companyId]);
+  const matched = rows.filter((row) => {
+    const haystack = `${normalizeProductNameAdvanced(row.rawName || row.productNameOriginal || '')} ${normalizeProductNameAdvanced(row.normalizedName || row.productNameNormalized || '')}`;
+    return haystack.includes(q) || aliasProductIds.has(row.productId);
+  });
+  const groups = new Map();
+  for (const row of matched) {
+    const key = row.productId || row.productNameNormalized || normalizeProductNameAdvanced(row.productNameOriginal || row.rawName || '');
+    const group = groups.get(key) || [];
+    group.push(row);
+    groups.set(key, group);
   }
+  const summaries = [...groups.entries()].map(([key, records]) => {
+    const sorted = [...records].sort((a, b) => `${b.invoiceDate || ''}${b.createdAt || ''}`.localeCompare(`${a.invoiceDate || ''}${a.createdAt || ''}`));
+    const prices = records.map((record) => Number(record.discountedEffectiveUnitCost || record.effectiveUnitCost || record.unitPrice || 0));
+    return {
+      productId: records[0]?.productId || '',
+      standardName: records[0]?.productNameNormalized || records[0]?.normalizedName || key,
+      recentPrice: prices.length ? Number(sorted[0]?.discountedEffectiveUnitCost || sorted[0]?.effectiveUnitCost || sorted[0]?.unitPrice || 0) : 0,
+      minPrice: prices.length ? Math.min(...prices) : 0,
+      maxPrice: prices.length ? Math.max(...prices) : 0,
+      averagePrice: prices.length ? prices.reduce((sum, price) => sum + price, 0) / prices.length : 0,
+      recentPurchaseDate: sorted[0]?.invoiceDate || '',
+      recordCount: records.length
+    };
+  }).sort((a, b) => (b.recentPurchaseDate || '').localeCompare(a.recentPurchaseDate || ''));
   res.json(summaries);
 }));
 
 app.get('/api/products/:name', requireAuth, asyncHandler(async (req, res) => {
   const name = decodeURIComponent(req.params.name);
+  const q = normalizeProductNameAdvanced(name);
+  const aliases = await queryAll(`
+    SELECT * FROM ${quoteTable('product_aliases')}
+    WHERE ${quoteIdentifier('companyId')} = ? AND ${quoteIdentifier('deletedAt')} IS NULL
+  `, [req.user.companyId]);
+  const aliasProductIds = new Set(aliases
+    .filter((alias) => `${normalizeProductNameAdvanced(alias.aliasName || alias.rawName || alias.keyword)} ${normalizeProductNameAdvanced(alias.normalizedAlias || '')} ${normalizeProductNameAdvanced(alias.standardName || '')}`.includes(q) || normalizeProductNameAdvanced(alias.productId || '') === q)
+    .map((alias) => alias.productId)
+    .filter(Boolean));
   const rows = await queryAll(`
     SELECT invoice_items.*, suppliers.${quoteIdentifier('name')} AS "supplierName", invoices.${quoteIdentifier('invoiceNo')} AS "invoiceNo"
     FROM ${quoteTable('invoice_items')} invoice_items
@@ -1650,10 +2017,13 @@ app.get('/api/products/:name', requireAuth, asyncHandler(async (req, res) => {
       AND (invoices.${quoteIdentifier('id')} = invoice_items.${quoteIdentifier('invoiceId')} OR invoices.${quoteIdentifier('serverId')} = invoice_items.${quoteIdentifier('invoiceId')})
     WHERE invoice_items.${quoteIdentifier('companyId')} = ?
       AND invoice_items.${quoteIdentifier('deletedAt')} IS NULL
-      AND (invoice_items.${quoteIdentifier('productNameNormalized')} = ? OR invoice_items.${quoteIdentifier('productNameOriginal')} = ? OR LOWER(invoice_items.${quoteIdentifier('productNameOriginal')}) LIKE ?)
+      AND COALESCE(invoice_items.${quoteIdentifier('isDiscountLine')}, 0) = 0
     ORDER BY invoice_items.${quoteIdentifier('invoiceDate')} DESC, invoice_items.${quoteIdentifier('createdAt')} DESC
-  `, [req.user.companyId, name, name, `%${name.toLowerCase()}%`]);
-  res.json(rows);
+  `, [req.user.companyId]);
+  res.json(rows.filter((row) => {
+    const haystack = `${normalizeProductNameAdvanced(row.rawName || row.productNameOriginal || '')} ${normalizeProductNameAdvanced(row.normalizedName || row.productNameNormalized || '')}`;
+    return haystack.includes(q) || row.productId === name || aliasProductIds.has(row.productId);
+  }));
 }));
 
 app.post('/api/invoice-recognition/tasks', requireAuth, upload.single('image'), asyncHandler(async (req, res) => {
