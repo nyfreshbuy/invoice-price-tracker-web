@@ -2,6 +2,7 @@ import { useEffect, useMemo, useRef, useState } from 'react';
 import { Link, NavLink, Route, Routes, useNavigate, useParams } from 'react-router-dom';
 import {
   Building2,
+  BarChart3,
   Camera,
   ChevronRight,
   FileText,
@@ -12,6 +13,7 @@ import {
   Save,
   Search,
   Settings,
+  ShoppingCart,
   Trash2,
   Upload
 } from 'lucide-react';
@@ -52,6 +54,7 @@ const emptyItem = () => ({
 
 const emptySupplier = {
   name: '',
+  contactName: '',
   phone: '',
   email: '',
   address: '',
@@ -120,7 +123,7 @@ export default function App() {
       <SyncBar state={syncState} session={authSession} onSyncNow={handleSyncNow} onLogout={handleLogout} />
       <main className="main">
         <Routes>
-          <Route path="/" element={<HomePage />} />
+          <Route path="/" element={<HomeDashboardPage />} />
           <Route path="/invoices" element={<InvoiceListPage />} />
           <Route path="/invoices/new" element={<InvoiceFormPage />} />
           <Route path="/invoices/batch" element={<BatchImportPage />} />
@@ -128,8 +131,12 @@ export default function App() {
           <Route path="/invoices/:id" element={<InvoiceDetailPageWithGifts />} />
           <Route path="/products" element={<ProductSearchPage />} />
           <Route path="/products/:name" element={<ProductDetailPage />} />
+          <Route path="/supplier-center" element={<SupplierCenterPage />} />
+          <Route path="/suppliers/:id" element={<SupplierDetailPage />} />
+          <Route path="/suppliers/:id/products" element={<SupplierProductsPage />} />
           <Route path="/suppliers" element={<SupplierPage />} />
           <Route path="/suppliers/:id/invoices" element={<SupplierInvoiceHistoryPage />} />
+          <Route path="/analytics" element={<PurchaseAnalysisPage />} />
           <Route path="/settings" element={<SettingsPage />} />
         </Routes>
       </main>
@@ -870,7 +877,7 @@ function InvoiceDetailPage() {
         <Info label="总金额" value={money(invoice.totalAmount)} />
         <Info label="同步状态" value={statusText(invoice.syncStatus)} />
       </Section>
-      {invoice.imagePath && <Section title="发票图片"><img className="invoice-image" src={invoice.imagePath} alt="发票" /></Section>}
+      {invoice.imagePath && <Section title="查看原图"><img className="invoice-image" src={invoice.imagePath} alt="发票原图" /></Section>}
       <Section title="商品明细">
         {items.map((item) => (
           <div className="detail-item" key={item.id}>
@@ -880,7 +887,42 @@ function InvoiceDetailPage() {
           </div>
         ))}
       </Section>
-      <Section title="OCR 原文"><pre className="ocr-text">{invoice.ocrText || '无 OCR 内容'}</pre></Section>
+      <Section title="查看OCR原文"><pre className="ocr-text">{invoice.ocrText || '无 OCR 内容'}</pre></Section>
+    </Page>
+  );
+}
+
+function HomeDashboardPage() {
+  const [dashboard, setDashboard] = useState(null);
+  useLocalReload(() => localDb.getDashboardMetrics().then(setDashboard));
+
+  return (
+    <Page title="InvoicePriceTracker" subtitle="采购数据库、供应商数据库、历史价格数据库">
+      <Section title="采购仪表盘">
+        <div className="metric-grid">
+          <Metric label="总采购金额" value={money(dashboard?.totalPurchaseAmount)} />
+          <Metric label="本月采购金额" value={money(dashboard?.monthPurchaseAmount)} />
+          <Metric label="本月发票数量" value={dashboard?.monthInvoiceCount ?? 0} />
+          <Metric label="本月新增供应商" value={dashboard?.monthNewSupplierCount ?? 0} />
+          <Metric label="赠品总价值" value={money(dashboard?.giftValueTotal)} />
+          <Metric label="折扣总金额" value={money(dashboard?.discountTotal)} />
+          <Metric label="异常发票数量" value={dashboard?.abnormalInvoiceCount ?? 0} />
+          <Metric label="待确认发票数量" value={dashboard?.pendingInvoiceCount ?? 0} />
+        </div>
+      </Section>
+      <Section title="采购中心">
+        <ActionLink to="/invoices/new" icon={<Camera />} title="发票扫描" subtitle="拍照或相册上传，后台识别并保存" />
+        <ActionLink to="/invoices" icon={<FileText />} title="发票列表" subtitle="按日期查看所有历史发票" />
+        <ActionLink to="/supplier-center" icon={<Building2 />} title="供应商查询" subtitle="搜索供应商、电话、联系人、发票号和商品名" />
+        <ActionLink to="/products" icon={<PackageSearch />} title="商品价格查询" subtitle="查看商品历史价格和供应商对比" />
+        <ActionLink to="/analytics" icon={<BarChart3 />} title="采购分析" subtitle="排名、月度采购、最低价和价格趋势" />
+      </Section>
+      <Section title="识别与管理">
+        <ActionLink to="/invoices/batch" icon={<Upload />} title="批量导入发票" subtitle="多张图片队列识别" />
+        <ActionLink to="/recognition-tasks" icon={<RefreshCw />} title="识别记录/任务列表" subtitle="查看后台 AI 识别状态和历史结果" />
+        <ActionLink to="/suppliers" icon={<Building2 />} title="供应商管理" subtitle="维护供应商和模板" />
+        <ActionLink to="/settings" icon={<Settings />} title="设置/导出" subtitle="查看本地统计、导出云端 CSV/Excel" />
+      </Section>
     </Page>
   );
 }
@@ -889,8 +931,25 @@ function InvoiceDetailPageWithGifts() {
   const { id } = useParams();
   const navigate = useNavigate();
   const [detail, setDetail] = useState(null);
+  const [recognitionTask, setRecognitionTask] = useState(null);
 
   useLocalReload(() => localDb.getInvoice(id).then(setDetail), [id]);
+
+  useEffect(() => {
+    let cancelled = false;
+    api.getRecognitionTasks()
+      .then((tasks) => {
+        if (cancelled) return;
+        const task = tasks.find((entry) => entry.invoiceId === id || entry.result?.invoiceId === id);
+        setRecognitionTask(task || null);
+      })
+      .catch(() => {
+        if (!cancelled) setRecognitionTask(null);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [id]);
 
   async function remove() {
     if (!confirm('确认删除这张发票？')) return;
@@ -904,6 +963,7 @@ function InvoiceDetailPageWithGifts() {
   const { invoice, items, discounts = [] } = detail;
   const giftSummary = summarizeGiftAccounting(items);
   const promoGroups = summarizePromoGroups(items);
+  const finalSavedResult = { invoice, items, discounts };
   return (
     <Page title="发票详情" action={<button className="danger-button" onClick={remove}><Trash2 size={16} />删除</button>}>
       <Section title="发票信息">
@@ -952,7 +1012,7 @@ function InvoiceDetailPageWithGifts() {
           ))}
         </Section>
       )}
-      {invoice.imagePath && <Section title="发票图片"><img className="invoice-image" src={invoice.imagePath} alt="发票" /></Section>}
+      {invoice.imagePath && <Section title="查看原图"><img className="invoice-image" src={invoice.imagePath} alt="发票原图" /></Section>}
       <Section title="商品明细">
         {items.map((item) => (
           <div className="detail-item" key={item.id}>
@@ -965,7 +1025,13 @@ function InvoiceDetailPageWithGifts() {
           </div>
         ))}
       </Section>
-      <Section title="OCR 原文"><pre className="ocr-text">{invoice.ocrText || '无 OCR 内容'}</pre></Section>
+      <Section title="查看OCR原文"><pre className="ocr-text">{invoice.ocrText || '无 OCR 内容'}</pre></Section>
+      <Section title="查看AI识别JSON">
+        <pre className="ocr-text">{recognitionTask?.result ? JSON.stringify(recognitionTask.result, null, 2) : '未找到关联 AI 识别 JSON'}</pre>
+      </Section>
+      <Section title="查看最终保存结果">
+        <pre className="ocr-text">{JSON.stringify(finalSavedResult, null, 2)}</pre>
+      </Section>
     </Page>
   );
 }
@@ -1008,11 +1074,25 @@ function ProductDetailPage() {
   const { name } = useParams();
   const decoded = decodeURIComponent(name);
   const [records, setRecords] = useState([]);
+  const [supplierCompare, setSupplierCompare] = useState([]);
 
-  useLocalReload(() => localDb.getProduct(decoded).then(setRecords), [decoded]);
+  useLocalReload(async () => {
+    setRecords(await localDb.getProduct(decoded));
+    setSupplierCompare(await localDb.compareProductSuppliers(decoded));
+  }, [decoded]);
 
   return (
     <Page title="商品详情" subtitle={decoded}>
+      <Section title="供应商价格对比">
+        {supplierCompare.length === 0 && <EmptyState text="暂无供应商价格记录" />}
+        {supplierCompare.map((row) => (
+          <div className="detail-item" key={row.supplierId}>
+            <div className="split"><strong>{row.supplierName}</strong><strong>{money(row.minPrice)}</strong></div>
+            <p>最近价格 {money(row.recentPrice)} · 最低价格 {money(row.minPrice)} · 最近采购 {row.recentPurchaseDate || '-'}</p>
+            <p>采购记录 {row.recordCount} 条</p>
+          </div>
+        ))}
+      </Section>
       <Section title="采购记录">
         {records.length === 0 && <EmptyState text="暂无采购记录" />}
         {records.map((record) => (
@@ -1024,6 +1104,167 @@ function ProductDetailPage() {
             <p>数量 {record.quantity} {record.unit} · 总价 {money(record.totalPrice)} · 赠品数量 {numberText(record.freeQty || 0)} · 折扣 {money(record.discountAmount || 0)} · 是否赠品 {Number(record.isFreeItem || 0) ? '是' : '否'} · 发票号 {record.invoiceNo || '-'}</p>
             <p>分摊组：{record.promoGroupName || '-'} · {record.promoGroupRule || '-'}</p>
             {record.invoiceRecordId && <Link className="secondary-button" to={`/invoices/${encodeURIComponent(record.invoiceRecordId)}`}>查看发票/图片</Link>}
+          </div>
+        ))}
+      </Section>
+    </Page>
+  );
+}
+
+function SupplierCenterPage() {
+  const [q, setQ] = useState('');
+  const [suppliers, setSuppliers] = useState([]);
+
+  const load = () => localDb.getSupplierCenter(q).then(setSuppliers);
+  useLocalReload(load, [q]);
+
+  return (
+    <Page title="供应商查询中心" subtitle="按供应商、电话、联系人、发票号、商品名称搜索">
+      <form className="search-bar" onSubmit={(event) => event.preventDefault()}>
+        <input placeholder="输入供应商/电话/联系人/发票号/商品名" value={q} onChange={(event) => setQ(event.target.value)} />
+        <button type="button"><Search size={18} />搜索</button>
+      </form>
+      <div className="card-list">
+        {suppliers.length === 0 && <EmptyState text="暂无供应商采购数据" />}
+        {suppliers.map((supplier) => (
+          <Link className="row-card" to={`/suppliers/${encodeURIComponent(supplier.id)}`} key={supplier.id}>
+            <div>
+              <h3>{supplier.name || '未命名供应商'}</h3>
+              <p>累计采购 {money(supplier.totalPurchaseAmount)} · 发票 {supplier.invoiceCount} 张 · SKU {supplier.skuCount}</p>
+              <p>最近采购 {supplier.recentPurchaseDate || '-'} · 最近金额 {money(supplier.recentPurchaseAmount)}</p>
+              <p>赠品数量 {numberText(supplier.freeQtyTotal)} · 折扣 {money(supplier.discountTotal)} · 异常 {supplier.abnormalInvoiceCount}</p>
+            </div>
+            <ChevronRight />
+          </Link>
+        ))}
+      </div>
+    </Page>
+  );
+}
+
+function SupplierDetailPage() {
+  const { id } = useParams();
+  const [detail, setDetail] = useState(null);
+
+  useLocalReload(() => localDb.getSupplierDetail(id).then(setDetail), [id]);
+
+  if (!detail) return <Page title="供应商详情"><EmptyState text="未找到供应商" /></Page>;
+  const { supplier, stats } = detail;
+  return (
+    <Page title="供应商详情" subtitle={supplier.name || '未命名供应商'}>
+      <Section title="基本信息">
+        <Info label="供应商名称" value={supplier.name || '-'} />
+        <Info label="联系人" value={supplier.contactName || '-'} />
+        <Info label="电话" value={supplier.phone || '-'} />
+        <Info label="地址" value={supplier.address || '-'} />
+        <Info label="备注" value={supplier.notes || '-'} />
+      </Section>
+      <Section title="统计信息">
+        <Info label="总采购金额" value={money(stats.totalPurchaseAmount)} />
+        <Info label="总采购数量" value={numberText(stats.totalPurchaseQty)} />
+        <Info label="总发票数量" value={stats.invoiceCount} />
+        <Info label="平均订单金额" value={money(stats.averageOrderAmount)} />
+        <Info label="最近采购日期" value={stats.recentPurchaseDate || '-'} />
+        <Info label="最近采购金额" value={money(stats.recentPurchaseAmount)} />
+      </Section>
+      <Section title="供应商采购管理">
+        <ActionLink to={`/suppliers/${encodeURIComponent(id)}/invoices`} icon={<FileText />} title="历史发票" subtitle="筛选并查看该供应商所有发票" />
+        <ActionLink to={`/suppliers/${encodeURIComponent(id)}/products`} icon={<ShoppingCart />} title="采购商品" subtitle="查看该供应商商品价格、次数、数量" />
+      </Section>
+    </Page>
+  );
+}
+
+function SupplierProductsPage() {
+  const { id } = useParams();
+  const [sortBy, setSortBy] = useState('recent');
+  const [rows, setRows] = useState([]);
+
+  useLocalReload(() => localDb.getSupplierProducts(id, sortBy).then(setRows), [id, sortBy]);
+
+  return (
+    <Page title="供应商采购商品">
+      <Section title="排序">
+        <div className="segmented-control">
+          {[
+            ['recent', '最近采购'],
+            ['minPrice', '最低价'],
+            ['maxPrice', '最高价'],
+            ['count', '采购次数'],
+            ['quantity', '采购数量']
+          ].map(([value, label]) => (
+            <button key={value} className={sortBy === value ? 'active' : ''} onClick={() => setSortBy(value)}>{label}</button>
+          ))}
+        </div>
+      </Section>
+      <Section title="采购商品">
+        {rows.length === 0 && <EmptyState text="暂无采购商品" />}
+        {rows.map((row) => (
+          <div className="detail-item" key={row.productKey}>
+            <div className="split"><strong>{row.productName}</strong><strong>{money(row.recentPrice)}</strong></div>
+            <p>最低 {money(row.minPrice)} · 最高 {money(row.maxPrice)} · 平均 {money(row.averagePrice)}</p>
+            <p>采购次数 {row.purchaseCount} · 总数量 {numberText(row.totalQty)} · 最近采购 {row.recentPurchaseDate || '-'}</p>
+          </div>
+        ))}
+      </Section>
+    </Page>
+  );
+}
+
+function PurchaseAnalysisPage() {
+  const [analytics, setAnalytics] = useState({ supplierRanking: [], productRanking: [], monthly: [], lowestPrices: [] });
+
+  useLocalReload(() => localDb.getPurchaseAnalytics().then(setAnalytics));
+
+  const priceTrendRows = analytics.lowestPrices.slice(0, 8);
+
+  return (
+    <Page title="采购分析" subtitle="从本地 IndexedDB 汇总采购金额、商品数量、月度趋势和历史最低价">
+      <Section title="供应商采购排名">
+        {analytics.supplierRanking.length === 0 && <EmptyState text="暂无供应商采购数据" />}
+        {analytics.supplierRanking.slice(0, 20).map((row) => (
+          <div className="detail-item" key={row.supplierName}>
+            <div className="split"><strong>{row.supplierName}</strong><strong>{money(row.amount)}</strong></div>
+            <p>采购次数 {row.count} · 平均订单金额 {money(row.averageOrderAmount)}</p>
+          </div>
+        ))}
+      </Section>
+      <Section title="商品采购排名">
+        {analytics.productRanking.length === 0 && <EmptyState text="暂无商品采购数据" />}
+        {analytics.productRanking.slice(0, 20).map((row) => (
+          <div className="detail-item" key={row.productName}>
+            <div className="split"><strong>{row.productName}</strong><strong>{money(row.amount)}</strong></div>
+            <p>采购数量 {numberText(row.quantity)}</p>
+          </div>
+        ))}
+      </Section>
+      <Section title="月度采购分析">
+        {analytics.monthly.length === 0 && <EmptyState text="暂无月度数据" />}
+        {analytics.monthly.map((row) => (
+          <div className="detail-item" key={row.month}>
+            <div className="split"><strong>{row.month}</strong><strong>{money(row.amount)}</strong></div>
+            <p>采购数量 {numberText(row.quantity)}</p>
+          </div>
+        ))}
+      </Section>
+      <Section title="价格趋势图">
+        {priceTrendRows.length === 0 && <EmptyState text="暂无价格趋势数据" />}
+        <div className="trend-list">
+          {priceTrendRows.map((row) => (
+            <div className="trend-row" key={`${row.productName}-${row.invoiceDate}`}>
+              <span>{row.productName}</span>
+              <strong>{money(row.price)}</strong>
+            </div>
+          ))}
+        </div>
+      </Section>
+      <Section title="最低采购价分析">
+        {analytics.lowestPrices.length === 0 && <EmptyState text="暂无最低价数据" />}
+        {analytics.lowestPrices.slice(0, 30).map((row) => (
+          <div className="detail-item" key={`${row.productName}-${row.invoiceId}`}>
+            <div className="split"><strong>{row.productName}</strong><strong>{money(row.price)}</strong></div>
+            <p>{row.supplierName} · {row.invoiceDate || '-'} · 发票 {row.invoiceNo || '-'}</p>
+            {row.invoiceId && <Link className="secondary-button" to={`/invoices/${encodeURIComponent(row.invoiceId)}`}>查看发票</Link>}
           </div>
         ))}
       </Section>
@@ -1064,6 +1305,7 @@ function SupplierPage() {
               <p>{supplier.phone || '无电话'} · {supplier.email || '无邮箱'} · {statusText(supplier.syncStatus)}</p>
             </div>
             <div className="row-actions">
+              <Link to={`/suppliers/${encodeURIComponent(supplier.id)}`}>详情</Link>
               <Link to={`/suppliers/${encodeURIComponent(supplier.id)}/invoices`}>历史发票</Link>
               <button onClick={() => setTemplateSupplier(supplier)}>模板</button>
               <button onClick={() => setEditing(supplier)}>编辑</button>
@@ -1080,7 +1322,7 @@ function SupplierPage() {
 
 function SupplierInvoiceHistoryPage() {
   const { id } = useParams();
-  const [filters, setFilters] = useState({ dateFrom: '', dateTo: '', invoiceNo: '', totalAmount: '', hasGifts: false, hasWarnings: false, isMultipage: false });
+  const [filters, setFilters] = useState({ dateFrom: '', dateTo: '', invoiceNo: '', totalAmount: '', amountMin: '', amountMax: '', hasGifts: false, hasDiscounts: false, hasWarnings: false, isMultipage: false });
   const [rows, setRows] = useState([]);
   const [supplier, setSupplier] = useState(null);
 
@@ -1114,9 +1356,12 @@ function SupplierInvoiceHistoryPage() {
           <label className="field"><span>结束日期</span><input type="date" value={filters.dateTo} onChange={(event) => updateFilter('dateTo', event.target.value)} /></label>
           <label className="field"><span>发票号</span><input value={filters.invoiceNo} onChange={(event) => updateFilter('invoiceNo', event.target.value)} /></label>
           <label className="field"><span>总金额</span><input type="number" value={filters.totalAmount} onChange={(event) => updateFilter('totalAmount', event.target.value)} /></label>
+          <label className="field"><span>最低金额</span><input type="number" value={filters.amountMin} onChange={(event) => updateFilter('amountMin', event.target.value)} /></label>
+          <label className="field"><span>最高金额</span><input type="number" value={filters.amountMax} onChange={(event) => updateFilter('amountMax', event.target.value)} /></label>
         </div>
         <div className="row-actions">
           <label><input type="checkbox" checked={filters.hasGifts} onChange={(event) => updateFilter('hasGifts', event.target.checked)} /> 有赠品</label>
+          <label><input type="checkbox" checked={filters.hasDiscounts} onChange={(event) => updateFilter('hasDiscounts', event.target.checked)} /> 有折扣</label>
           <label><input type="checkbox" checked={filters.hasWarnings} onChange={(event) => updateFilter('hasWarnings', event.target.checked)} /> 有异常</label>
           <label><input type="checkbox" checked={filters.isMultipage} onChange={(event) => updateFilter('isMultipage', event.target.checked)} /> 多页发票</label>
           <a className="secondary-button" href={api.supplierInvoicesExportUrl(id, filters)}>导出 CSV</a>
@@ -1180,9 +1425,9 @@ function SupplierDialog({ supplier, onClose, onSave }) {
   const [form, setForm] = useState(supplier);
   return (
     <Dialog title="编辑供应商" onClose={onClose}>
-      {['name', 'phone', 'email', 'address', 'notes'].map((field) => (
+      {['name', 'contactName', 'phone', 'email', 'address', 'notes'].map((field) => (
         <label className="field" key={field}>
-          <span>{({ name: '名称', phone: '电话', email: '邮箱', address: '地址', notes: '备注' })[field]}</span>
+          <span>{({ name: '名称', contactName: '联系人', phone: '电话', email: '邮箱', address: '地址', notes: '备注' })[field]}</span>
           <input value={form[field] || ''} onChange={(event) => setForm({ ...form, [field]: event.target.value })} />
         </label>
       ))}
@@ -1259,6 +1504,10 @@ function Info({ label, value }) {
   return <div className="info-row"><span>{label}</span><strong>{value}</strong></div>;
 }
 
+function Metric({ label, value }) {
+  return <div className="metric-card"><span>{label}</span><strong>{value}</strong></div>;
+}
+
 function ConfidenceSummary({ parsed = {} }) {
   const fields = [
     ['供应商', parsed.supplierConfidence],
@@ -1295,8 +1544,9 @@ function BottomNav() {
   const items = [
     ['/', Home, '首页'],
     ['/invoices', FileText, '发票'],
+    ['/supplier-center', Building2, '采购'],
     ['/products', Search, '查询'],
-    ['/suppliers', Building2, '供应商'],
+    ['/analytics', BarChart3, '分析'],
     ['/settings', Settings, '设置']
   ];
   return (

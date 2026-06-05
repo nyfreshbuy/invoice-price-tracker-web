@@ -217,7 +217,7 @@ function prepareRecord(table, record, deviceId, companyId) {
     return { ...base, batchName: record.batchName || '', supplierCount: Number(record.supplierCount || 0), invoiceCount: Number(record.invoiceCount || 0), totalAmount: Number(record.totalAmount || 0) };
   }
   if (table === 'suppliers') {
-    return { ...base, name: record.name || '', phone: record.phone || '', email: record.email || '', address: record.address || '', notes: record.notes || '' };
+    return { ...base, name: record.name || '', contactName: record.contactName || '', phone: record.phone || '', email: record.email || '', address: record.address || '', notes: record.notes || '' };
   }
   if (table === 'invoices') {
     return {
@@ -1874,7 +1874,10 @@ async function supplierInvoiceHistoryRows(companyId, supplierId, filters = {}) {
     if (filters.dateTo && String(invoice.invoiceDate || '') > filters.dateTo) return false;
     if (filters.invoiceNo && !String(invoice.invoiceNo || '').toLowerCase().includes(String(filters.invoiceNo).toLowerCase())) return false;
     if (filters.totalAmount && Math.abs(Number(invoice.totalAmount || 0) - Number(filters.totalAmount)) >= 0.01) return false;
+    if (filters.amountMin && Number(invoice.totalAmount || 0) < Number(filters.amountMin)) return false;
+    if (filters.amountMax && Number(invoice.totalAmount || 0) > Number(filters.amountMax)) return false;
     if (filters.hasGifts === 'true' && !invoice.hasGifts) return false;
+    if (filters.hasDiscounts === 'true' && !invoice.hasDiscounts) return false;
     if (filters.hasWarnings === 'true' && !invoice.hasWarnings) return false;
     if (filters.isMultipage === 'true' && !invoice.isMultipage) return false;
     return true;

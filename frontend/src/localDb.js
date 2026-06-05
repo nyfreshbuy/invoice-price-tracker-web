@@ -223,6 +223,27 @@ function active(record) {
   return !record.deletedAt && belongsToCurrentCompany(record);
 }
 
+function moneyNumber(value) {
+  const number = Number(value || 0);
+  return Number.isFinite(number) ? number : 0;
+}
+
+function idsFor(record, fallback = '') {
+  return [fallback, record?.id, record?.localId, record?.serverId].filter(Boolean);
+}
+
+function priceForItem(item) {
+  return moneyNumber(item.discountedEffectiveUnitCost || item.effectiveUnitCost || item.unitPrice || 0);
+}
+
+function invoiceMonth(value = '') {
+  return String(value || '').slice(0, 7) || '未 dated';
+}
+
+function currentMonth() {
+  return new Date().toISOString().slice(0, 7);
+}
+
 function syncFields(record, status = 'pending') {
   const timestamp = nowIso();
   const generatedId = record.id || record.localId || generateId();
@@ -570,11 +591,222 @@ export const localDb = {
       if (filters.dateTo && String(invoice.invoiceDate || '') > filters.dateTo) return false;
       if (filters.invoiceNo && !String(invoice.invoiceNo || '').toLowerCase().includes(String(filters.invoiceNo).toLowerCase())) return false;
       if (filters.totalAmount && Math.abs(Number(invoice.totalAmount || 0) - Number(filters.totalAmount)) >= 0.01) return false;
+      if (filters.amountMin && moneyNumber(invoice.totalAmount) < Number(filters.amountMin)) return false;
+      if (filters.amountMax && moneyNumber(invoice.totalAmount) > Number(filters.amountMax)) return false;
       if (filters.hasGifts && !invoice.hasGifts) return false;
+      if (filters.hasDiscounts && !invoice.hasDiscounts) return false;
       if (filters.hasWarnings && !invoice.hasWarnings) return false;
       if (filters.isMultipage && !invoice.isMultipage) return false;
       return true;
     }).sort((a, b) => `${b.invoiceDate || ''}${b.createdAt || ''}`.localeCompare(`${a.invoiceDate || ''}${a.createdAt || ''}`));
+  },
+
+  async getSupplierCenter(query = '') {
+    const q = normalizeProductName(query);
+    const suppliers = (await all('suppliers')).filter(active);
+    const invoices = (await all('invoices')).filter(active);
+    const items = (await all('invoice_items')).filter((item) => active(item) && !Number(item.candidateOnly || 0) && !Number(item.isDiscountLine || 0));
+    const discounts = (await all('invoice_discounts')).filter(active);
+    return suppliers.map((supplier) => {
+      const supplierIds = idsFor(supplier);
+      const supplierInvoices = invoices.filter((invoice) => supplierIds.includes(invoice.supplierId));
+      const invoiceIds = new Set(supplierInvoices.flatMap((invoice) => idsFor(invoice)));
+      const supplierItems = items.filter((item) => supplierIds.includes(item.supplierId) || invoiceIds.has(item.invoiceId));
+      const supplierDiscounts = discounts.filter((discount) => supplierIds.includes(discount.supplierId) || invoiceIds.has(discount.invoiceId));
+      const sortedInvoices = [...supplierInvoices].sort((a, b) => `${b.invoiceDate || ''}${b.createdAt || ''}`.localeCompare(`${a.invoiceDate || ''}${a.createdAt || ''}`));
+      const skuSet = new Set(supplierItems.map((item) => item.productId || item.productNameNormalized || normalizeProductName(item.productNameOriginal || '')).filter(Boolean));
+      const searchText = normalizeProductName([
+        supplier.name,
+        supplier.contactName,
+        supplier.phone,
+        supplier.email,
+        supplier.address,
+        supplier.notes,
+        ...supplierInvoices.map((invoice) => invoice.invoiceNo),
+        ...supplierItems.map((item) => `${item.rawName || ''} ${item.productNameOriginal || ''} ${item.productNameNormalized || ''}`)
+      ].join(' '));
+      return {
+        ...supplier,
+        totalPurchaseAmount: supplierInvoices.reduce((sum, invoice) => sum + moneyNumber(invoice.totalAmount), 0),
+        invoiceCount: supplierInvoices.length,
+        recentPurchaseDate: sortedInvoices[0]?.invoiceDate || '',
+        recentPurchaseAmount: moneyNumber(sortedInvoices[0]?.totalAmount || 0),
+        skuCount: skuSet.size,
+        freeQtyTotal: supplierItems.reduce((sum, item) => sum + moneyNumber(item.freeQty), 0),
+        discountTotal: supplierDiscounts.reduce((sum, discount) => sum + moneyNumber(discount.amount), 0),
+        abnormalInvoiceCount: supplierInvoices.filter((invoice) => invoice.duplicateStatus === 'possible' || invoice.recognitionWarnings).length,
+        totalPurchaseQty: supplierItems.reduce((sum, item) => sum + moneyNumber(item.actualQty || item.totalQty || item.quantity), 0),
+        searchText
+      };
+    }).filter((supplier) => !q || supplier.searchText.includes(q)).sort((a, b) => b.totalPurchaseAmount - a.totalPurchaseAmount);
+  },
+
+  async getSupplierDetail(supplierId) {
+    const suppliers = await localDb.getSupplierCenter('');
+    const supplier = suppliers.find((entry) => idsFor(entry).includes(supplierId));
+    if (!supplier) return null;
+    const invoices = await localDb.getSupplierInvoices(supplierId);
+    return {
+      supplier,
+      invoices,
+      stats: {
+        totalPurchaseAmount: supplier.totalPurchaseAmount,
+        totalPurchaseQty: supplier.totalPurchaseQty,
+        invoiceCount: supplier.invoiceCount,
+        averageOrderAmount: supplier.invoiceCount ? supplier.totalPurchaseAmount / supplier.invoiceCount : 0,
+        recentPurchaseDate: supplier.recentPurchaseDate,
+        recentPurchaseAmount: supplier.recentPurchaseAmount,
+        recentPriceChange: ''
+      }
+    };
+  },
+
+  async getSupplierProducts(supplierId, sortBy = 'recent') {
+    const suppliers = await all('suppliers');
+    const supplier = resolveByAnyId(suppliers, supplierId);
+    const supplierIds = idsFor(supplier, supplierId);
+    const invoices = (await all('invoices')).filter(active);
+    const invoiceById = new Map(invoices.flatMap((invoice) => idsFor(invoice).map((idValue) => [idValue, invoice])));
+    const records = (await all('invoice_items')).filter((item) => active(item) && !Number(item.isDiscountLine || 0) && !Number(item.candidateOnly || 0) && supplierIds.includes(item.supplierId));
+    const groups = new Map();
+    for (const item of records) {
+      const key = item.productId || item.productNameNormalized || normalizeProductName(item.productNameOriginal || item.rawName || '');
+      const group = groups.get(key) || [];
+      group.push(item);
+      groups.set(key, group);
+    }
+    const rows = [...groups.entries()].map(([key, group]) => {
+      const sorted = [...group].sort((a, b) => `${b.invoiceDate || ''}${b.createdAt || ''}`.localeCompare(`${a.invoiceDate || ''}${a.createdAt || ''}`));
+      const prices = group.map(priceForItem).filter((price) => price > 0);
+      return {
+        productKey: key,
+        productName: sorted[0]?.productNameNormalized || sorted[0]?.productNameOriginal || key,
+        recentPrice: priceForItem(sorted[0]),
+        minPrice: prices.length ? Math.min(...prices) : 0,
+        maxPrice: prices.length ? Math.max(...prices) : 0,
+        averagePrice: prices.length ? prices.reduce((sum, price) => sum + price, 0) / prices.length : 0,
+        purchaseCount: group.length,
+        totalQty: group.reduce((sum, item) => sum + moneyNumber(item.actualQty || item.totalQty || item.quantity), 0),
+        recentPurchaseDate: sorted[0]?.invoiceDate || '',
+        invoiceNo: invoiceById.get(sorted[0]?.invoiceId)?.invoiceNo || ''
+      };
+    });
+    const sorters = {
+      minPrice: (a, b) => a.minPrice - b.minPrice,
+      maxPrice: (a, b) => b.maxPrice - a.maxPrice,
+      recent: (a, b) => (b.recentPurchaseDate || '').localeCompare(a.recentPurchaseDate || ''),
+      count: (a, b) => b.purchaseCount - a.purchaseCount,
+      quantity: (a, b) => b.totalQty - a.totalQty
+    };
+    return rows.sort(sorters[sortBy] || sorters.recent);
+  },
+
+  async getDashboardMetrics() {
+    const suppliers = (await all('suppliers')).filter(active);
+    const invoices = (await all('invoices')).filter(active);
+    const items = (await all('invoice_items')).filter((item) => active(item) && !Number(item.candidateOnly || 0) && !Number(item.isDiscountLine || 0));
+    const discounts = (await all('invoice_discounts')).filter(active);
+    const month = currentMonth();
+    const monthInvoices = invoices.filter((invoice) => String(invoice.invoiceDate || invoice.createdAt || '').startsWith(month));
+    const monthSupplierIds = new Set(monthInvoices.map((invoice) => invoice.supplierId).filter(Boolean));
+    return {
+      totalPurchaseAmount: invoices.reduce((sum, invoice) => sum + moneyNumber(invoice.totalAmount), 0),
+      monthPurchaseAmount: monthInvoices.reduce((sum, invoice) => sum + moneyNumber(invoice.totalAmount), 0),
+      monthInvoiceCount: monthInvoices.length,
+      monthNewSupplierCount: suppliers.filter((supplier) => monthSupplierIds.has(supplier.id) || monthSupplierIds.has(supplier.serverId) || String(supplier.createdAt || '').startsWith(month)).length,
+      giftValueTotal: items.reduce((sum, item) => sum + moneyNumber(item.freeQty) * moneyNumber(item.effectiveUnitCost || item.unitPrice), 0),
+      discountTotal: discounts.reduce((sum, discount) => sum + moneyNumber(discount.amount), 0),
+      abnormalInvoiceCount: invoices.filter((invoice) => invoice.duplicateStatus === 'possible' || invoice.recognitionWarnings).length,
+      pendingInvoiceCount: invoices.filter((invoice) => ['pending', 'review', 'needs_review'].includes(invoice.status) || invoice.syncStatus === 'pending').length
+    };
+  },
+
+  async getPurchaseAnalytics() {
+    const suppliers = (await all('suppliers')).filter(active);
+    const supplierById = new Map(suppliers.flatMap((supplier) => idsFor(supplier).map((idValue) => [idValue, supplier])));
+    const invoices = (await all('invoices')).filter(active);
+    const items = (await all('invoice_items')).filter((item) => active(item) && !Number(item.candidateOnly || 0) && !Number(item.isDiscountLine || 0));
+    const supplierGroups = new Map();
+    for (const invoice of invoices) {
+      const key = invoice.supplierId || 'unknown';
+      const group = supplierGroups.get(key) || { supplier: supplierById.get(key), amount: 0, count: 0 };
+      group.amount += moneyNumber(invoice.totalAmount);
+      group.count += 1;
+      supplierGroups.set(key, group);
+    }
+    const productGroups = new Map();
+    for (const item of items) {
+      const key = item.productId || item.productNameNormalized || normalizeProductName(item.productNameOriginal || '');
+      const group = productGroups.get(key) || { productName: item.productNameNormalized || item.productNameOriginal || key, quantity: 0, amount: 0 };
+      group.quantity += moneyNumber(item.actualQty || item.totalQty || item.quantity);
+      group.amount += moneyNumber(item.totalPrice);
+      productGroups.set(key, group);
+    }
+    const monthGroups = new Map();
+    for (const invoice of invoices) {
+      const month = invoiceMonth(invoice.invoiceDate || invoice.createdAt);
+      const group = monthGroups.get(month) || { month, amount: 0, quantity: 0 };
+      group.amount += moneyNumber(invoice.totalAmount);
+      monthGroups.set(month, group);
+    }
+    for (const item of items) {
+      const month = invoiceMonth(item.invoiceDate || item.createdAt);
+      const group = monthGroups.get(month) || { month, amount: 0, quantity: 0 };
+      group.quantity += moneyNumber(item.actualQty || item.totalQty || item.quantity);
+      monthGroups.set(month, group);
+    }
+    const lowestByProduct = new Map();
+    for (const item of items) {
+      const key = item.productId || item.productNameNormalized || normalizeProductName(item.productNameOriginal || '');
+      const price = priceForItem(item);
+      if (!price) continue;
+      const current = lowestByProduct.get(key);
+      if (!current || price < current.price) {
+        const invoice = invoices.find((entry) => idsFor(entry).includes(item.invoiceId));
+        lowestByProduct.set(key, {
+          productName: item.productNameNormalized || item.productNameOriginal || key,
+          price,
+          supplierName: supplierById.get(item.supplierId)?.name || '未命名供应商',
+          invoiceId: invoice?.id || '',
+          invoiceNo: invoice?.invoiceNo || '',
+          invoiceDate: item.invoiceDate || ''
+        });
+      }
+    }
+    return {
+      supplierRanking: [...supplierGroups.values()].map((group) => ({
+        supplierName: group.supplier?.name || '未命名供应商',
+        amount: group.amount,
+        count: group.count,
+        averageOrderAmount: group.count ? group.amount / group.count : 0
+      })).sort((a, b) => b.amount - a.amount),
+      productRanking: [...productGroups.values()].sort((a, b) => b.amount - a.amount),
+      monthly: [...monthGroups.values()].sort((a, b) => a.month.localeCompare(b.month)),
+      lowestPrices: [...lowestByProduct.values()].sort((a, b) => a.price - b.price)
+    };
+  },
+
+  async compareProductSuppliers(name) {
+    const records = await localDb.getProduct(name);
+    const groups = new Map();
+    for (const record of records) {
+      const key = record.supplierId || record.supplierName || 'unknown';
+      const group = groups.get(key) || [];
+      group.push(record);
+      groups.set(key, group);
+    }
+    return [...groups.entries()].map(([key, group]) => {
+      const sorted = [...group].sort((a, b) => `${b.invoiceDate || ''}${b.createdAt || ''}`.localeCompare(`${a.invoiceDate || ''}${a.createdAt || ''}`));
+      const prices = group.map(priceForItem).filter((price) => price > 0);
+      return {
+        supplierId: key,
+        supplierName: sorted[0]?.supplierName || '未命名供应商',
+        recentPrice: priceForItem(sorted[0]),
+        minPrice: prices.length ? Math.min(...prices) : 0,
+        recentPurchaseDate: sorted[0]?.invoiceDate || '',
+        recordCount: group.length
+      };
+    }).sort((a, b) => a.minPrice - b.minPrice);
   },
 
   async getStats() {
