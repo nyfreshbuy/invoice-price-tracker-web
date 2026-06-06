@@ -576,6 +576,7 @@ function InvoiceFormPage() {
   const albumInputRef = useRef(null);
   const [suppliers, setSuppliers] = useState([]);
   const [form, setForm] = useState({
+    id: generateId(),
     supplierName: '',
     invoiceNo: '',
     invoiceDate: today(),
@@ -585,6 +586,7 @@ function InvoiceFormPage() {
     invoiceLayoutType: 'normal_invoice',
     totalAmount: 0,
     ocrText: '',
+    imageId: '',
     imagePath: '',
     items: [emptyItem()]
   });
@@ -675,6 +677,27 @@ function InvoiceFormPage() {
 
     if (imagePreviewUrl) URL.revokeObjectURL(imagePreviewUrl);
     setImagePreviewUrl(URL.createObjectURL(file));
+    const invoiceId = form.id || generateId();
+    try {
+      const image = await localDb.saveInvoiceImage({ invoiceId, file, source: 'IndexedDB' });
+      setForm((current) => ({
+        ...current,
+        id: current.id || invoiceId,
+        imageId: image.id,
+        imagePath: `indexeddb:${image.id}`
+      }));
+      console.log('Invoice image saved to IndexedDB', {
+        imageId: image.id,
+        invoiceId,
+        size: image.size,
+        mimeType: image.mimeType
+      });
+    } catch (error) {
+      console.error('Invoice image save failed', error);
+      setMessage(error.message || '图片保存失败，请重新上传。');
+      setOcrStatus('图片保存失败');
+      return;
+    }
 
     if (!navigator.onLine) {
       setOcrStatus('识别失败');
@@ -709,6 +732,12 @@ function InvoiceFormPage() {
     setSaving(true);
     setMessage('');
     try {
+      if (form.imagePath || form.imageId) {
+        const imageCheck = await localDb.verifyInvoiceImage(form);
+        if (!imageCheck.ok && String(form.imagePath || '').startsWith('indexeddb:')) {
+          throw new Error(imageCheck.message || '图片保存失败，请重新上传。');
+        }
+      }
       if (navigator.onLine) {
         const result = await api.confirmAndLearnInvoice({
           finalInvoice: form,
@@ -716,6 +745,14 @@ function InvoiceFormPage() {
           invoiceTemplateId: recognitionTask?.result?.templateId || '',
           sampleImageHash: recognitionTask?.result?.sampleImageHash || ''
         });
+        if (String(form.imagePath || '').startsWith('indexeddb:') || form.imageId) {
+          const image = await localDb.getInvoiceImage(form);
+          if (image?.imageBlob) {
+            const imageData = new FormData();
+            imageData.append('image', image.imageBlob, image.fileName || 'invoice.jpg');
+            await api.uploadInvoiceImage(result.invoiceId || form.id, imageData);
+          }
+        }
         if (result.priceAnomalies?.length) {
           setMessage(`已保存并学习，但发现 ${result.priceAnomalies.length} 个价格异常，请检查。`);
         }
@@ -933,7 +970,8 @@ function InvoiceDetailPageWithGifts() {
   const [detail, setDetail] = useState(null);
   const [recognitionTask, setRecognitionTask] = useState(null);
 
-  useLocalReload(() => localDb.getInvoice(id).then(setDetail), [id]);
+  const loadDetail = () => localDb.getInvoice(id).then(setDetail);
+  useLocalReload(loadDetail, [id]);
 
   useEffect(() => {
     let cancelled = false;
@@ -961,6 +999,11 @@ function InvoiceDetailPageWithGifts() {
   if (!detail) return <Page title="发票详情"><EmptyState text="未找到发票" /></Page>;
 
   const { invoice, items, discounts = [] } = detail;
+  console.log('Invoice image fields', {
+    imageUrl: invoice.imageUrl || '',
+    imagePath: invoice.imagePath || '',
+    imageId: invoice.imageId || ''
+  });
   const giftSummary = summarizeGiftAccounting(items);
   const promoGroups = summarizePromoGroups(items);
   const finalSavedResult = { invoice, items, discounts };
@@ -1012,7 +1055,9 @@ function InvoiceDetailPageWithGifts() {
           ))}
         </Section>
       )}
-      {invoice.imagePath && <Section title="查看原图"><img className="invoice-image" src={invoice.imagePath} alt="发票原图" /></Section>}
+      <Section title="查看原图">
+        <InvoiceImageViewer invoice={invoice} onUpdated={loadDetail} />
+      </Section>
       <Section title="商品明细">
         {items.map((item) => (
           <div className="detail-item" key={item.id}>
@@ -1497,6 +1542,164 @@ function ActionLink({ to, icon, title, subtitle }) {
       <span><strong>{title}</strong><small>{subtitle}</small></span>
       <ChevronRight />
     </Link>
+  );
+}
+
+function InvoiceImageViewer({ invoice, onUpdated }) {
+  const fileInputRef = useRef(null);
+  const [imageUrl, setImageUrl] = useState('');
+  const [diagnostic, setDiagnostic] = useState({
+    source: 'Unknown',
+    size: 0,
+    status: '检查中',
+    message: ''
+  });
+  const [uploading, setUploading] = useState(false);
+
+  useEffect(() => {
+    let objectUrl = '';
+    let cancelled = false;
+
+    async function resolveImage() {
+      const imagePath = invoice?.imagePath || '';
+      const rawImageUrl = invoice?.imageUrl || '';
+      const imageId = invoice?.imageId || '';
+      if (!imagePath && !rawImageUrl && !imageId) {
+        setImageUrl('');
+        setDiagnostic({ source: 'Unknown', size: 0, status: '缺失', message: '图片不存在' });
+        return;
+      }
+
+      if (String(imagePath).startsWith('blob:')) {
+        setImageUrl('');
+        setDiagnostic({ source: 'Local', size: 0, status: '缺失', message: 'Blob URL 已失效，请重新上传图片。' });
+        return;
+      }
+
+      if (String(imagePath).startsWith('indexeddb:') || imageId) {
+        const image = await localDb.getInvoiceImage(invoice);
+        if (cancelled) return;
+        if (!image?.imageBlob) {
+          setImageUrl('');
+          setDiagnostic({ source: 'IndexedDB', size: 0, status: '缺失', message: '图片不存在' });
+          return;
+        }
+        objectUrl = URL.createObjectURL(image.imageBlob);
+        setImageUrl(objectUrl);
+        setDiagnostic({
+          source: 'IndexedDB',
+          size: image.size || image.imageBlob.size || 0,
+          status: '正常',
+          message: ''
+        });
+        return;
+      }
+
+      const resolvedUrl = api.fileUrl(imagePath || rawImageUrl || '');
+      setImageUrl(resolvedUrl);
+      setDiagnostic({
+        source: /^https?:\/\//.test(resolvedUrl) || String(imagePath).startsWith('/uploads') ? 'Server' : 'Local',
+        size: 0,
+        status: '加载中',
+        message: ''
+      });
+    }
+
+    resolveImage().catch((error) => {
+      if (!cancelled) {
+        console.error('Invoice image resolve failed', error);
+        setImageUrl('');
+        setDiagnostic({ source: 'Unknown', size: 0, status: '损坏', message: error.message || '图片读取失败' });
+      }
+    });
+
+    return () => {
+      cancelled = true;
+      if (objectUrl) URL.revokeObjectURL(objectUrl);
+    };
+  }, [invoice]);
+
+  async function rebindImage(file) {
+    if (!file) return;
+    setUploading(true);
+    try {
+      if (navigator.onLine) {
+        const data = new FormData();
+        data.append('image', file);
+        const result = await api.uploadInvoiceImage(invoice.id, data);
+        await localDb.updateInvoiceImageFields(invoice.id, {
+          imagePath: result.imagePath,
+          imageId: '',
+          imageUrl: ''
+        });
+        await syncNow();
+      } else {
+        const image = await localDb.saveInvoiceImage({ invoiceId: invoice.id, file, source: 'IndexedDB' });
+        await localDb.updateInvoiceImageFields(invoice.id, {
+          imagePath: `indexeddb:${image.id}`,
+          imageId: image.id,
+          imageUrl: ''
+        });
+      }
+      await onUpdated?.();
+    } catch (error) {
+      console.error('Invoice image rebind failed', error);
+      setDiagnostic((current) => ({
+        ...current,
+        status: '缺失',
+        message: error.message || '图片保存失败，请重新上传。'
+      }));
+    } finally {
+      setUploading(false);
+    }
+  }
+
+  return (
+    <div>
+      {imageUrl ? (
+        <img
+          className="invoice-image"
+          src={imageUrl}
+          alt="发票原图"
+          onLoad={() => setDiagnostic((current) => ({ ...current, status: '正常', message: '' }))}
+          onError={() => {
+            console.error('Invoice image load failed', imageUrl);
+            setImageUrl('');
+            setDiagnostic((current) => ({
+              ...current,
+              status: current.source === 'Server' ? '缺失' : '损坏',
+              message: current.source === 'Server' ? '图片已丢失' : '图片损坏'
+            }));
+          }}
+        />
+      ) : (
+        <EmptyState text={diagnostic.message || '图片不存在'} />
+      )}
+      <div className="image-diagnostics">
+        <Info label="invoice.imageUrl" value={invoice.imageUrl || '-'} />
+        <Info label="invoice.imagePath" value={invoice.imagePath || '-'} />
+        <Info label="invoice.imageId" value={invoice.imageId || '-'} />
+        <Info label="图片来源" value={diagnostic.source} />
+        <Info label="图片大小" value={diagnostic.size ? formatBytes(diagnostic.size) : '-'} />
+        <Info label="图片状态" value={diagnostic.status} />
+        {diagnostic.message && <p className="error">{diagnostic.message}</p>}
+      </div>
+      <div className="row-actions">
+        <button className="secondary-button" disabled={uploading} onClick={() => fileInputRef.current?.click()}>
+          {uploading ? '上传中...' : '重新上传图片'}
+        </button>
+        <input
+          ref={fileInputRef}
+          className="hidden-file-input"
+          type="file"
+          accept="image/*"
+          onChange={(event) => {
+            rebindImage(event.target.files?.[0]);
+            event.target.value = '';
+          }}
+        />
+      </div>
+    </div>
   );
 }
 
@@ -2016,6 +2219,14 @@ function money(value) {
 function numberText(value) {
   const number = Number(value || 0);
   return Number.isInteger(number) ? String(number) : number.toFixed(2);
+}
+
+function formatBytes(value) {
+  const bytes = Number(value || 0);
+  if (!bytes) return '0 B';
+  if (bytes < 1024) return `${bytes} B`;
+  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
+  return `${(bytes / 1024 / 1024).toFixed(2)} MB`;
 }
 
 function summarizeGiftAccounting(items = []) {

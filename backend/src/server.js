@@ -2006,6 +2006,35 @@ app.get('/api/invoices/:id', requireAuth, asyncHandler(async (req, res) => {
   res.json({ invoice, items, discounts });
 }));
 
+app.post('/api/invoices/:id/image', requireAuth, upload.single('image'), asyncHandler(async (req, res) => {
+  if (!req.file) {
+    res.status(400).json({ error: 'No invoice image uploaded' });
+    return;
+  }
+  const imagePath = `/uploads/${req.file.filename}`;
+  const updatedAt = nowIso();
+  const result = await run(`
+    UPDATE ${quoteTable('invoices')}
+    SET ${quoteIdentifier('imagePath')} = ?,
+        ${quoteIdentifier('updatedAt')} = ?
+    WHERE ${quoteIdentifier('companyId')} = ?
+      AND (${quoteIdentifier('id')} = ? OR ${quoteIdentifier('serverId')} = ? OR ${quoteIdentifier('localId')} = ?)
+      AND ${quoteIdentifier('deletedAt')} IS NULL
+  `, [imagePath, updatedAt, req.user.companyId, req.params.id, req.params.id, req.params.id]);
+  const changedRows = result?.changes ?? result?.rowCount ?? 0;
+  if (changedRows === 0) {
+    res.status(404).json({ error: 'Invoice not found' });
+    return;
+  }
+  res.json({
+    success: true,
+    imagePath,
+    imageSize: req.file.size || 0,
+    imageMimeType: req.file.mimetype || '',
+    originalName: req.file.originalname || ''
+  });
+}));
+
 app.delete('/api/invoices/:id', requireAuth, asyncHandler(async (req, res) => {
   const deletedAt = nowIso();
   await run(`

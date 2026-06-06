@@ -1,9 +1,10 @@
 import { getCompanyId as getAuthCompanyId } from './api.js';
 
 const DB_NAME = 'InvoicePriceTrackerLocal';
-const DB_VERSION = 5;
+const DB_VERSION = 6;
 
 export const syncTables = ['purchase_batches', 'suppliers', 'invoices', 'invoice_items', 'products', 'price_history', 'invoice_discounts', 'supplier_templates', 'product_aliases', 'product_learning_rules', 'recognition_corrections', 'price_anomalies'];
+const localOnlyTables = ['invoice_images', 'meta'];
 
 let dbPromise;
 
@@ -158,7 +159,7 @@ function openDb() {
     const request = indexedDB.open(DB_NAME, DB_VERSION);
     request.onupgradeneeded = () => {
       const db = request.result;
-      for (const table of [...syncTables, 'meta']) {
+      for (const table of [...syncTables, ...localOnlyTables]) {
         if (!db.objectStoreNames.contains(table)) {
           db.createObjectStore(table, { keyPath: 'id' });
         }
@@ -388,6 +389,68 @@ export const localDb = {
     return (await all('purchase_batches')).filter(active).sort((a, b) => (b.createdAt || '').localeCompare(a.createdAt || ''));
   },
 
+  async saveInvoiceImage({ id: imageId, invoiceId, file, source = 'IndexedDB' }) {
+    if (!file) throw new Error('图片保存失败，请重新上传。');
+    const idValue = imageId || generateId();
+    const record = {
+      id: idValue,
+      companyId: getCurrentCompanyId(),
+      invoiceId,
+      imageBlob: file,
+      mimeType: file.type || 'image/jpeg',
+      fileName: file.name || '',
+      size: file.size || file.byteLength || 0,
+      source,
+      createdAt: nowIso(),
+      updatedAt: nowIso()
+    };
+    await put('invoice_images', record);
+    const saved = await get('invoice_images', idValue);
+    if (!saved?.imageBlob) throw new Error('图片保存失败，请重新上传。');
+    return record;
+  },
+
+  async getInvoiceImage(invoice) {
+    const imageId = invoice?.imageId || String(invoice?.imagePath || '').replace(/^indexeddb:/, '');
+    const imageIds = [imageId].filter(Boolean);
+    if (invoice?.id) {
+      const images = await all('invoice_images');
+      const invoiceIds = idsFor(invoice);
+      const byInvoice = images
+        .filter((image) => belongsToCurrentCompany(image) && invoiceIds.includes(image.invoiceId))
+        .sort((a, b) => (b.updatedAt || '').localeCompare(a.updatedAt || ''))[0];
+      if (byInvoice?.imageBlob) return byInvoice;
+    }
+    for (const idValue of imageIds) {
+      const image = await get('invoice_images', idValue);
+      if (image?.imageBlob && belongsToCurrentCompany(image)) return image;
+    }
+    return null;
+  },
+
+  async verifyInvoiceImage(invoice) {
+    const imagePath = String(invoice?.imagePath || '');
+    if (!imagePath && !invoice?.imageId) return { ok: false, status: 'missing', message: '图片不存在' };
+    if (imagePath.startsWith('indexeddb:') || invoice?.imageId) {
+      const image = await localDb.getInvoiceImage(invoice);
+      return image?.imageBlob
+        ? { ok: true, status: 'normal', image }
+        : { ok: false, status: 'missing', message: '图片不存在' };
+    }
+    if (imagePath.startsWith('blob:')) {
+      return { ok: false, status: 'missing', message: 'Blob URL 已失效，请重新上传图片。' };
+    }
+    return { ok: true, status: 'server' };
+  },
+
+  async updateInvoiceImageFields(invoiceId, fields) {
+    const detail = await localDb.getInvoice(invoiceId);
+    if (!detail) throw new Error('Invoice not found');
+    const updated = syncFields({ ...detail.invoice, ...fields });
+    await put('invoices', updated);
+    return updated;
+  },
+
   async createInvoice(payload) {
     const supplier = payload.supplierId ? resolveByAnyId(await all('suppliers'), payload.supplierId) : await findOrCreateSupplier(payload.supplierName);
     const invoiceId = payload.id || generateId();
@@ -406,6 +469,8 @@ export const localDb = {
       pageCount: Number(payload.pageCount || 0),
       invoiceGroupKey: payload.invoiceGroupKey || [payload.supplierName || supplier?.name || '', payload.invoiceNo || '', Number(totalAmount || 0).toFixed(2)].join('|').toLowerCase(),
       invoiceLayoutType: payload.invoiceLayoutType || 'normal_invoice',
+      imageId: payload.imageId || '',
+      imageUrl: payload.imageUrl || '',
       imagePath: payload.imagePath || '',
       ocrText: payload.ocrText || '',
       totalAmount,

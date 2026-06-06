@@ -83,6 +83,7 @@ export const api = {
   getInvoice: (id) => request(`/api/invoices/${id}`),
   createInvoice: (payload) => request('/api/invoices', { method: 'POST', body: JSON.stringify(payload) }),
   confirmAndLearnInvoice: (payload) => request('/api/learning/confirm-invoice', { method: 'POST', body: JSON.stringify(payload) }),
+  uploadInvoiceImage: (id, formData) => request(`/api/invoices/${encodeURIComponent(id)}/image`, { method: 'POST', body: formData }),
   deleteInvoice: (id) => request(`/api/invoices/${id}`, { method: 'DELETE' }),
 
   getSuppliers: () => request('/api/suppliers'),
