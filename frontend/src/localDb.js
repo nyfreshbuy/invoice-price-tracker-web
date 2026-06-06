@@ -1,7 +1,7 @@
 import { getCompanyId as getAuthCompanyId } from './api.js';
 
 const DB_NAME = 'InvoicePriceTrackerLocal';
-const DB_VERSION = 6;
+const DB_VERSION = 7;
 
 export const syncTables = ['purchase_batches', 'suppliers', 'invoices', 'invoice_items', 'products', 'price_history', 'invoice_discounts', 'supplier_templates', 'product_aliases', 'product_learning_rules', 'recognition_corrections', 'price_anomalies'];
 const localOnlyTables = ['invoice_images', 'meta'];
@@ -50,6 +50,51 @@ export function normalizeProductName(value = '') {
     .split(/\s+/)
     .filter(Boolean)
     .join(' ');
+}
+
+const supplierTraditionalMap = {
+  '閩': '闽',
+  '國': '国',
+  '際': '际',
+  '貿': '贸',
+  '進': '进',
+  '東': '东',
+  '華': '华',
+  '聯': '联',
+  '業': '业'
+};
+
+export function normalizeSupplierName(value = '') {
+  const simplified = String(value || '')
+    .replace(/[\uFF01-\uFF5E]/g, (char) => String.fromCharCode(char.charCodeAt(0) - 0xFEE0))
+    .replace(/\u3000/g, ' ')
+    .replace(/[閩國際貿進東華聯業]/g, (char) => supplierTraditionalMap[char] || char)
+    .toUpperCase()
+    .replace(/\b(INC|INCORPORATED|CO|COMPANY|LTD|LIMITED|LLC|CORP|CORPORATION|INTERNATIONAL|TRADING|IMPORT|EXPORT)\b/g, ' ')
+    .replace(/(股份有限公司|有限责任公司|有限公司|公司|股份|国际|贸易|进出口|商行|企业)$/g, '');
+  return simplified.replace(/[^\u3400-\u9fffA-Z0-9]+/g, '');
+}
+
+function supplierAliasesFromName(value = '') {
+  const raw = String(value || '').trim();
+  const normalized = normalizeSupplierName(raw);
+  const english = raw.match(/[A-Za-z][A-Za-z0-9&.,'\-\s]+/g)?.join(' ').trim().toUpperCase() || '';
+  const chinese = raw.match(/[\u3400-\u9fff]+/g)?.join('').trim() || '';
+  return [...new Set([raw, normalized, english, chinese].filter(Boolean))];
+}
+
+function parseJsonList(value) {
+  if (Array.isArray(value)) return value;
+  try {
+    const parsed = JSON.parse(value || '[]');
+    return Array.isArray(parsed) ? parsed : [];
+  } catch {
+    return String(value || '').split('|').map((entry) => entry.trim()).filter(Boolean);
+  }
+}
+
+function mergeJsonLists(...values) {
+  return [...new Set(values.flatMap(parseJsonList).map((entry) => String(entry || '').trim()).filter(Boolean))];
 }
 
 export function today() {
@@ -268,7 +313,14 @@ function resolveByAnyId(records, id) {
 
 async function findSupplierByName(name) {
   const suppliers = await localDb.getSuppliers();
-  return suppliers.find((supplier) => supplier.name === name);
+  const normalizedName = normalizeSupplierName(name);
+  return suppliers.find((supplier) => {
+    const aliases = mergeJsonLists(supplier.aliases, supplier.name, supplier.displayName);
+    return supplier.name === name
+      || supplier.displayName === name
+      || supplier.normalizedName === normalizedName
+      || aliases.some((alias) => normalizeSupplierName(alias) === normalizedName || alias === name);
+  });
 }
 
 async function findOrCreateSupplier(name) {
@@ -351,11 +403,38 @@ export const localDb = {
   },
 
   async getSuppliers() {
-    return (await all('suppliers')).filter(active).sort((a, b) => (a.name || '').localeCompare(b.name || ''));
+    return (await all('suppliers'))
+      .filter((supplier) => active(supplier) && supplier.status !== 'merged')
+      .sort((a, b) => (a.displayName || a.name || '').localeCompare(b.displayName || b.name || ''));
   },
 
   async saveSupplier(supplier) {
-    return put('suppliers', syncFields(supplier));
+    const displayName = supplier.displayName || supplier.name || '';
+    const normalizedName = normalizeSupplierName(displayName);
+    const existing = (await localDb.getSuppliers()).find((entry) => {
+      if (supplier.id && idsFor(entry).includes(supplier.id)) return false;
+      const aliases = mergeJsonLists(entry.aliases, entry.name, entry.displayName);
+      return entry.normalizedName === normalizedName || aliases.some((alias) => normalizeSupplierName(alias) === normalizedName);
+    });
+    if (existing) {
+      return put('suppliers', syncFields({
+        ...existing,
+        ...supplier,
+        id: existing.id,
+        displayName: existing.displayName || displayName,
+        normalizedName: existing.normalizedName || normalizedName,
+        aliases: JSON.stringify(mergeJsonLists(existing.aliases, supplier.aliases, supplierAliasesFromName(displayName)))
+      }));
+    }
+    return put('suppliers', syncFields({
+      ...supplier,
+      name: displayName,
+      displayName,
+      normalizedName,
+      aliases: JSON.stringify(mergeJsonLists(supplier.aliases, supplierAliasesFromName(displayName))),
+      templateIds: supplier.templateIds || '[]',
+      status: supplier.status || 'active'
+    }));
   },
 
   async deleteSupplier(supplier) {
@@ -366,12 +445,18 @@ export const localDb = {
 
   async getTemplate(supplierId) {
     const templates = await all('supplier_templates');
-    return templates.filter(active).find((template) => template.supplierId === supplierId || template.supplierId === resolveByAnyId(templates, supplierId)?.serverId) || null;
+    return templates.filter(active).filter((template) => template.supplierId === supplierId || template.supplierId === resolveByAnyId(templates, supplierId)?.serverId)
+      .sort((a, b) => (b.updatedAt || '').localeCompare(a.updatedAt || ''))[0] || null;
   },
 
   async saveTemplate(supplierId, template) {
     const existing = await localDb.getTemplate(supplierId);
-    return put('supplier_templates', syncFields({ ...(existing || {}), ...template, supplierId }));
+    const saved = await put('supplier_templates', syncFields({ ...(existing || {}), ...template, supplierId }));
+    const templates = (await all('supplier_templates')).filter((entry) => active(entry) && entry.supplierId === supplierId && entry.id !== saved.id);
+    if (templates.length) {
+      await putMany('supplier_templates', templates.map((entry) => syncFields({ ...entry, deletedAt: nowIso() }, 'deleted')));
+    }
+    return saved;
   },
 
   async createPurchaseBatch(payload) {
@@ -473,7 +558,11 @@ export const localDb = {
       imageUrl: payload.imageUrl || '',
       imagePath: payload.imagePath || '',
       ocrText: payload.ocrText || '',
+      subtotal: Number(payload.subtotal || totalAmount || 0),
+      tax: Number(payload.tax || 0),
       totalAmount,
+      isMultiPage: payload.isMultiPage ? 1 : 0,
+      mergedInvoiceIds: payload.mergedInvoiceIds || '[]',
       status: 'saved'
     });
     await put('invoices', invoice);
@@ -539,7 +628,7 @@ export const localDb = {
   async getInvoices() {
     const suppliers = await all('suppliers');
     const invoiceItems = (await all('invoice_items')).filter(active);
-    return (await all('invoices')).filter(active).map((invoice) => {
+    return (await all('invoices')).filter((invoice) => active(invoice) && !['merged', 'hidden'].includes(invoice.status)).map((invoice) => {
       const supplier = resolveByAnyId(suppliers, invoice.supplierId);
       const invoiceIds = [invoice.id, invoice.localId, invoice.serverId].filter(Boolean);
       const items = invoiceItems.filter((item) => invoiceIds.includes(item.invoiceId));
@@ -564,7 +653,50 @@ export const localDb = {
     const invoiceIds = [invoice.id, invoice.localId, invoice.serverId].filter(Boolean);
     const items = (await all('invoice_items')).filter((item) => active(item) && invoiceIds.includes(item.invoiceId));
     const discounts = (await all('invoice_discounts')).filter((discount) => active(discount) && invoiceIds.includes(discount.invoiceId));
-    return { invoice: { ...invoice, supplierName: supplier?.name || '未命名供应商' }, items, discounts };
+    const mergedIds = parseJsonList(invoice.mergedInvoiceIds);
+    const mergedInvoices = invoices.filter((entry) => mergedIds.some((idValue) => idsFor(entry).includes(idValue)));
+    return { invoice: { ...invoice, supplierName: supplier?.name || '未命名供应商' }, items, discounts, mergedInvoices };
+  },
+
+  async getMergeCandidates(invoiceId) {
+    const invoices = await localDb.getInvoices();
+    const master = invoices.find((invoice) => idsFor(invoice).includes(invoiceId));
+    if (!master) return [];
+    const masterIds = idsFor(master);
+    return invoices.filter((invoice) => {
+      if (idsFor(invoice).some((idValue) => masterIds.includes(idValue))) return false;
+      if (master.batchId && invoice.batchId === master.batchId) return true;
+      if (master.scanBatchId && invoice.scanBatchId === master.scanBatchId) return true;
+      return master.supplierId && invoice.supplierId === master.supplierId && master.invoiceNo && invoice.invoiceNo === master.invoiceNo;
+    }).map((invoice) => ({
+      ...invoice,
+      possibleSameInvoice: Boolean(
+        (master.batchId && invoice.batchId === master.batchId)
+        || (master.supplierId === invoice.supplierId && master.invoiceNo && invoice.invoiceNo === master.invoiceNo)
+      )
+    }));
+  },
+
+  async mergeSuppliers(sourceSupplierId, targetSupplierId) {
+    const suppliers = await all('suppliers');
+    const source = resolveByAnyId(suppliers, sourceSupplierId);
+    const target = resolveByAnyId(suppliers, targetSupplierId);
+    if (!source || !target) throw new Error('Supplier not found');
+    const sourceIds = idsFor(source);
+    const targetId = target.serverId || target.id;
+    const tablesWithSupplier = ['invoices', 'invoice_items', 'invoice_discounts', 'price_history', 'product_aliases', 'product_learning_rules', 'recognition_corrections', 'price_anomalies', 'supplier_templates'];
+    for (const table of tablesWithSupplier) {
+      const rows = await all(table);
+      await putMany(table, rows
+        .filter((row) => sourceIds.includes(row.supplierId))
+        .map((row) => syncFields({ ...row, supplierId: targetId })));
+    }
+    await put('suppliers', syncFields({
+      ...target,
+      aliases: JSON.stringify(mergeJsonLists(target.aliases, source.aliases, supplierAliasesFromName(source.displayName || source.name || ''))),
+      templateIds: JSON.stringify(mergeJsonLists(target.templateIds, source.templateIds))
+    }));
+    await put('suppliers', syncFields({ ...source, status: 'merged', suspectedDuplicateOf: targetId, deletedAt: nowIso() }, 'deleted'));
   },
 
   async deleteInvoice(id) {
@@ -668,7 +800,8 @@ export const localDb = {
 
   async getSupplierCenter(query = '') {
     const q = normalizeProductName(query);
-    const suppliers = (await all('suppliers')).filter(active);
+    const supplierQ = normalizeSupplierName(query);
+    const suppliers = (await all('suppliers')).filter((supplier) => active(supplier) && supplier.status !== 'merged');
     const invoices = (await all('invoices')).filter(active);
     const items = (await all('invoice_items')).filter((item) => active(item) && !Number(item.candidateOnly || 0) && !Number(item.isDiscountLine || 0));
     const discounts = (await all('invoice_discounts')).filter(active);
@@ -682,6 +815,9 @@ export const localDb = {
       const skuSet = new Set(supplierItems.map((item) => item.productId || item.productNameNormalized || normalizeProductName(item.productNameOriginal || '')).filter(Boolean));
       const searchText = normalizeProductName([
         supplier.name,
+        supplier.displayName,
+        supplier.normalizedName,
+        ...mergeJsonLists(supplier.aliases),
         supplier.contactName,
         supplier.phone,
         supplier.email,
@@ -689,6 +825,12 @@ export const localDb = {
         supplier.notes,
         ...supplierInvoices.map((invoice) => invoice.invoiceNo),
         ...supplierItems.map((item) => `${item.rawName || ''} ${item.productNameOriginal || ''} ${item.productNameNormalized || ''}`)
+      ].join(' '));
+      const supplierSearchText = normalizeSupplierName([
+        supplier.name,
+        supplier.displayName,
+        supplier.normalizedName,
+        ...mergeJsonLists(supplier.aliases)
       ].join(' '));
       return {
         ...supplier,
@@ -701,9 +843,10 @@ export const localDb = {
         discountTotal: supplierDiscounts.reduce((sum, discount) => sum + moneyNumber(discount.amount), 0),
         abnormalInvoiceCount: supplierInvoices.filter((invoice) => invoice.duplicateStatus === 'possible' || invoice.recognitionWarnings).length,
         totalPurchaseQty: supplierItems.reduce((sum, item) => sum + moneyNumber(item.actualQty || item.totalQty || item.quantity), 0),
-        searchText
+        searchText,
+        supplierSearchText
       };
-    }).filter((supplier) => !q || supplier.searchText.includes(q)).sort((a, b) => b.totalPurchaseAmount - a.totalPurchaseAmount);
+    }).filter((supplier) => !q || supplier.searchText.includes(q) || supplier.supplierSearchText.includes(supplierQ)).sort((a, b) => b.totalPurchaseAmount - a.totalPurchaseAmount);
   },
 
   async getSupplierDetail(supplierId) {

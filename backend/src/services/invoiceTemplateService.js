@@ -2,6 +2,7 @@ import crypto from 'node:crypto';
 import { nowIso, queryAll, queryGet, quoteIdentifier, quoteTable, run, upsertRecord } from '../db.js';
 import { createInvoiceTemplate, parseInvoiceTemplate } from '../models/InvoiceTemplate.js';
 import { applyHandwrittenCatalogRules, buildInvoiceGroupKey } from './handwrittenInvoiceService.js';
+import { normalizeSupplierName } from './supplierNormalizationService.js';
 
 export function hashImageFile(buffer) {
   return crypto.createHash('sha256').update(buffer).digest('hex');
@@ -108,13 +109,14 @@ export async function findTemplateByOcrText(ocrText, companyId = 'default') {
     ORDER BY ${quoteIdentifier('successCount')} DESC, ${quoteIdentifier('updatedAt')} DESC
   `, [companyId]);
   const lowerText = String(ocrText || '').toLowerCase();
+  const normalizedText = normalizeSupplierName(ocrText);
   for (const row of templates) {
     const template = parseInvoiceTemplate(row);
     const keywords = template.supplierKeywords || [];
-    if (keywords.length > 0 && keywords.some((keyword) => lowerText.includes(String(keyword).toLowerCase()))) {
+    if (keywords.length > 0 && keywords.some((keyword) => lowerText.includes(String(keyword).toLowerCase()) || normalizedText.includes(normalizeSupplierName(keyword)))) {
       return template;
     }
-    if (template.supplierName && lowerText.includes(template.supplierName.toLowerCase())) {
+    if (template.supplierName && (lowerText.includes(template.supplierName.toLowerCase()) || normalizedText.includes(normalizeSupplierName(template.supplierName)))) {
       return template;
     }
   }
@@ -123,6 +125,7 @@ export async function findTemplateByOcrText(ocrText, companyId = 'default') {
 
 export async function findTemplateBySupplierHint(hint, companyId = 'default') {
   const text = String(hint || '').toLowerCase();
+  const normalizedHint = normalizeSupplierName(hint);
   if (!text) return null;
   const templates = await queryAll(`
     SELECT * FROM ${quoteTable('invoice_templates')}
@@ -134,7 +137,7 @@ export async function findTemplateBySupplierHint(hint, companyId = 'default') {
     const candidates = [template.supplierName, ...(template.supplierKeywords || [])]
       .map((value) => String(value || '').trim().toLowerCase())
       .filter(Boolean);
-    if (candidates.some((candidate) => text.includes(candidate) || candidate.includes(text))) return template;
+    if (candidates.some((candidate) => text.includes(candidate) || candidate.includes(text) || normalizeSupplierName(candidate) === normalizedHint)) return template;
   }
   return null;
 }
@@ -186,11 +189,13 @@ export async function saveOrUpdateTemplateFromResult(result, sampleImageHash, co
   const supplierName = normalized.supplierName || candidate.supplierKeywords?.[0] || '';
   if (!supplierName && !candidate.supplierKeywords?.length) return null;
 
-  const existing = await queryGet(`
+  const templates = await queryAll(`
     SELECT * FROM ${quoteTable('invoice_templates')}
-    WHERE ${quoteIdentifier('companyId')} = ? AND ${quoteIdentifier('supplierName')} = ?
-    ORDER BY ${quoteIdentifier('updatedAt')} DESC LIMIT 1
-  `, [companyId, supplierName]);
+    WHERE ${quoteIdentifier('companyId')} = ?
+    ORDER BY ${quoteIdentifier('successCount')} DESC, ${quoteIdentifier('updatedAt')} DESC
+  `, [companyId]);
+  const normalizedSupplier = normalizeSupplierName(supplierName);
+  const existing = templates.find((row) => normalizeSupplierName(row.supplierName || '') === normalizedSupplier);
 
   const now = nowIso();
   const template = createInvoiceTemplate({

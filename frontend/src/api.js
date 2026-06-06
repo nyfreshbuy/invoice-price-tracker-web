@@ -84,11 +84,13 @@ export const api = {
   createInvoice: (payload) => request('/api/invoices', { method: 'POST', body: JSON.stringify(payload) }),
   confirmAndLearnInvoice: (payload) => request('/api/learning/confirm-invoice', { method: 'POST', body: JSON.stringify(payload) }),
   uploadInvoiceImage: (id, formData) => request(`/api/invoices/${encodeURIComponent(id)}/image`, { method: 'POST', body: formData }),
+  mergeInvoice: (id, mergeIds) => request(`/api/invoices/${encodeURIComponent(id)}/merge`, { method: 'POST', body: JSON.stringify({ mergeIds }) }),
   deleteInvoice: (id) => request(`/api/invoices/${id}`, { method: 'DELETE' }),
 
   getSuppliers: () => request('/api/suppliers'),
   createSupplier: (payload) => request('/api/suppliers', { method: 'POST', body: JSON.stringify(payload) }),
   updateSupplier: (id, payload) => request(`/api/suppliers/${id}`, { method: 'PUT', body: JSON.stringify(payload) }),
+  mergeSupplier: (id, targetSupplierId) => request(`/api/suppliers/${id}/merge`, { method: 'POST', body: JSON.stringify({ targetSupplierId }) }),
   deleteSupplier: (id) => request(`/api/suppliers/${id}`, { method: 'DELETE' }),
   getTemplate: (supplierId) => request(`/api/suppliers/${supplierId}/template`),
   saveTemplate: (supplierId, payload) => request(`/api/suppliers/${supplierId}/template`, { method: 'PUT', body: JSON.stringify(payload) }),

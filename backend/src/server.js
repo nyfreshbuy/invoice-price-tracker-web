@@ -36,6 +36,14 @@ import {
   normalizeProductNameAdvanced,
   promoGroupCandidate
 } from './services/productNormalizationService.js';
+import {
+  displaySupplierName,
+  isSupplierDuplicateCandidate,
+  mergeAliases,
+  normalizeSupplierName,
+  parseAliases,
+  supplierAliasesFromName
+} from './services/supplierNormalizationService.js';
 import { buildInvoiceGroupKey } from './services/handwrittenInvoiceService.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
@@ -217,7 +225,25 @@ function prepareRecord(table, record, deviceId, companyId) {
     return { ...base, batchName: record.batchName || '', supplierCount: Number(record.supplierCount || 0), invoiceCount: Number(record.invoiceCount || 0), totalAmount: Number(record.totalAmount || 0) };
   }
   if (table === 'suppliers') {
-    return { ...base, name: record.name || '', contactName: record.contactName || '', phone: record.phone || '', email: record.email || '', address: record.address || '', notes: record.notes || '' };
+    const rawName = record.displayName || record.name || '';
+    const normalizedName = record.normalizedName || normalizeSupplierName(rawName);
+    const aliases = mergeAliases(record.aliases, supplierAliasesFromName(rawName), supplierAliasesFromName(record.name || ''), supplierAliasesFromName(record.displayName || ''));
+    const displayName = displaySupplierName(record, rawName);
+    return {
+      ...base,
+      name: displayName || rawName,
+      displayName: displayName || rawName,
+      normalizedName,
+      aliases: JSON.stringify(aliases),
+      contactName: record.contactName || '',
+      phone: record.phone || '',
+      email: record.email || '',
+      address: record.address || '',
+      notes: record.notes || '',
+      templateIds: Array.isArray(record.templateIds) ? JSON.stringify(record.templateIds) : (record.templateIds || '[]'),
+      suspectedDuplicateOf: record.suspectedDuplicateOf || '',
+      status: record.status || 'active'
+    };
   }
   if (table === 'invoices') {
     return {
@@ -235,9 +261,13 @@ function prepareRecord(table, record, deviceId, companyId) {
         totalAmount: record.totalAmount || 0
       }),
       isMergedInvoice: record.isMergedInvoice ? 1 : 0,
+      isMultiPage: record.isMultiPage || record.isMergedInvoice ? 1 : 0,
+      mergedInvoiceIds: Array.isArray(record.mergedInvoiceIds) ? JSON.stringify(record.mergedInvoiceIds) : (record.mergedInvoiceIds || '[]'),
       invoiceLayoutType: record.invoiceLayoutType || 'normal_invoice',
       imagePath: record.imagePath || '',
       ocrText: record.ocrText || '',
+      subtotal: Number(record.subtotal || record.totalAmount || 0),
+      tax: Number(record.tax || 0),
       totalAmount: Number(record.totalAmount || 0),
       duplicateStatus: record.duplicateStatus || 'none',
       recognitionSource: record.recognitionSource || '',
@@ -462,6 +492,72 @@ async function findOrCreateSupplier(name, deviceId, companyId, client = null) {
     localId: serverId,
     serverId,
     name: supplierName,
+    createdAt: now,
+    updatedAt: now
+  }, deviceId, companyId);
+  await upsertRecord('suppliers', supplier, client);
+  return supplier;
+}
+
+async function findOrCreateSupplierV2(name, deviceId, companyId, client = null) {
+  const supplierName = (name || '').trim() || '未命名供应商';
+  const normalizedName = normalizeSupplierName(supplierName);
+  const existing = await queryGet(`
+    SELECT * FROM ${quoteTable('suppliers')}
+    WHERE ${quoteIdentifier('companyId')} = ?
+      AND ${quoteIdentifier('deletedAt')} IS NULL
+      AND COALESCE(${quoteIdentifier('status')}, 'active') != 'merged'
+      AND (
+        ${quoteIdentifier('name')} = ?
+        OR ${quoteIdentifier('displayName')} = ?
+        OR ${quoteIdentifier('normalizedName')} = ?
+        OR ${quoteIdentifier('aliases')} LIKE ?
+      )
+    LIMIT 1
+  `, [companyId, supplierName, supplierName, normalizedName, `%${supplierName}%`], client);
+  if (existing) {
+    const updated = prepareRecord('suppliers', {
+      ...existing,
+      displayName: displaySupplierName(existing, supplierName),
+      aliases: mergeAliases(existing.aliases, supplierAliasesFromName(supplierName)),
+      updatedAt: nowIso()
+    }, deviceId, companyId);
+    await upsertRecord('suppliers', updated, client);
+    return updated;
+  }
+
+  const candidates = await queryAll(`
+    SELECT * FROM ${quoteTable('suppliers')}
+    WHERE ${quoteIdentifier('companyId')} = ?
+      AND ${quoteIdentifier('deletedAt')} IS NULL
+      AND COALESCE(${quoteIdentifier('status')}, 'active') != 'merged'
+  `, [companyId], client);
+  const duplicate = candidates.find((candidate) => isSupplierDuplicateCandidate(candidate, {
+    name: supplierName,
+    displayName: supplierName,
+    normalizedName
+  }));
+  if (duplicate) {
+    const updated = prepareRecord('suppliers', {
+      ...duplicate,
+      displayName: displaySupplierName(duplicate, supplierName),
+      aliases: mergeAliases(duplicate.aliases, supplierAliasesFromName(supplierName)),
+      updatedAt: nowIso()
+    }, deviceId, companyId);
+    await upsertRecord('suppliers', updated, client);
+    return updated;
+  }
+
+  const now = nowIso();
+  const serverId = id();
+  const supplier = prepareRecord('suppliers', {
+    id: serverId,
+    localId: serverId,
+    serverId,
+    name: supplierName,
+    displayName: supplierName,
+    normalizedName,
+    aliases: supplierAliasesFromName(supplierName),
     createdAt: now,
     updatedAt: now
   }, deviceId, companyId);
@@ -932,7 +1028,7 @@ async function saveInvoicePayloadWithLearning(payload, user, options = {}) {
   const companyId = user.companyId;
   const supplier = payload.supplierId
     ? await getByAnyId('suppliers', payload.supplierId, companyId)
-    : await findOrCreateSupplier(payload.supplierName, deviceId, companyId);
+    : await findOrCreateSupplierV2(payload.supplierName, deviceId, companyId);
   const now = nowIso();
   const { productItems, discountItems } = splitInvoiceRows(Array.isArray(payload.items) ? payload.items : []);
   const items = applyDiscountAllocation(applyGiftAccounting(productItems), discountItems);
@@ -1095,7 +1191,9 @@ async function invoiceWithSupplierRows(companyId) {
     LEFT JOIN ${quoteTable('suppliers')} suppliers
       ON suppliers.${quoteIdentifier('companyId')} = invoices.${quoteIdentifier('companyId')}
       AND (suppliers.${quoteIdentifier('id')} = invoices.${quoteIdentifier('supplierId')} OR suppliers.${quoteIdentifier('serverId')} = invoices.${quoteIdentifier('supplierId')})
-    WHERE invoices.${quoteIdentifier('companyId')} = ? AND invoices.${quoteIdentifier('deletedAt')} IS NULL
+    WHERE invoices.${quoteIdentifier('companyId')} = ?
+      AND invoices.${quoteIdentifier('deletedAt')} IS NULL
+      AND COALESCE(invoices.${quoteIdentifier('status')}, 'saved') NOT IN ('merged', 'hidden')
     ORDER BY invoices.${quoteIdentifier('invoiceDate')} DESC, invoices.${quoteIdentifier('createdAt')} DESC
   `, [companyId]);
 }
@@ -1576,7 +1674,7 @@ async function saveRecognizedInvoiceFromTask(task, result, options = {}) {
     duplicateCheck.forcedSave = true;
     duplicateCheck.skippedSave = false;
   }
-  const supplier = await findOrCreateSupplier(parsed.supplierName, deviceId, companyId);
+  const supplier = await findOrCreateSupplierV2(parsed.supplierName, deviceId, companyId);
   const mergeInvoiceId = !options.independent && duplicateCheck.multiPageInvoice ? duplicateCheck.mergeInvoiceId : '';
   const existingInvoice = mergeInvoiceId ? await queryGet(`
     SELECT * FROM ${quoteTable('invoices')}
@@ -1779,14 +1877,15 @@ app.get('/api/sync/pull', requireAuth, asyncHandler(async (req, res) => {
 app.get('/api/suppliers', requireAuth, asyncHandler(async (req, res) => {
   res.json(await queryAll(`
     SELECT * FROM ${quoteTable('suppliers')}
-    WHERE ${quoteIdentifier('companyId')} = ? AND ${quoteIdentifier('deletedAt')} IS NULL
+    WHERE ${quoteIdentifier('companyId')} = ?
+      AND ${quoteIdentifier('deletedAt')} IS NULL
+      AND COALESCE(${quoteIdentifier('status')}, 'active') != 'merged'
     ORDER BY ${quoteIdentifier('name')} ASC
   `, [req.user.companyId]));
 }));
 
 app.post('/api/suppliers', requireAuth, asyncHandler(async (req, res) => {
-  const record = prepareRecord('suppliers', req.body, req.body.deviceId || 'legacy-api', req.user.companyId);
-  await upsertRecord('suppliers', record);
+  const record = await findOrCreateSupplierV2(req.body.displayName || req.body.name, req.body.deviceId || 'legacy-api', req.user.companyId);
   res.json(record);
 }));
 
@@ -1813,6 +1912,69 @@ app.delete('/api/suppliers/:id', requireAuth, asyncHandler(async (req, res) => {
   res.json({ ok: true });
 }));
 
+app.post('/api/suppliers/:id/merge', requireAuth, asyncHandler(async (req, res) => {
+  const source = await getByAnyId('suppliers', req.params.id, req.user.companyId);
+  const target = await getByAnyId('suppliers', req.body.targetSupplierId, req.user.companyId);
+  if (!source || !target) return res.status(404).json({ error: 'Supplier not found' });
+  if ((source.serverId || source.id) === (target.serverId || target.id)) return res.status(400).json({ error: '不能合并到同一个供应商' });
+
+  const timestamp = nowIso();
+  const sourceIds = [source.id, source.serverId, source.localId].filter(Boolean);
+  const targetId = target.serverId || target.id;
+  const sourcePlaceholders = sourceIds.map(() => '?').join(', ');
+  const aliases = mergeAliases(target.aliases, source.aliases, supplierAliasesFromName(source.displayName || source.name || ''), supplierAliasesFromName(target.displayName || target.name || ''));
+  const templateIds = mergeAliases(target.templateIds, source.templateIds);
+  const updatedTarget = prepareRecord('suppliers', {
+    ...target,
+    displayName: displaySupplierName(target, source.displayName || source.name || ''),
+    aliases,
+    templateIds,
+    updatedAt: timestamp
+  }, req.body.deviceId || 'merge-api', req.user.companyId);
+
+  await withTransaction(async (client) => {
+    await upsertRecord('suppliers', updatedTarget, client);
+    for (const table of ['invoices', 'invoice_items', 'invoice_discounts', 'price_history', 'product_aliases', 'product_learning_rules', 'recognition_corrections', 'price_anomalies', 'supplier_templates']) {
+      await run(`
+        UPDATE ${quoteTable(table)}
+        SET ${quoteIdentifier('supplierId')} = ?, ${quoteIdentifier('updatedAt')} = ?
+        WHERE ${quoteIdentifier('companyId')} = ? AND ${quoteIdentifier('supplierId')} IN (${sourcePlaceholders})
+      `, [targetId, timestamp, req.user.companyId, ...sourceIds], client);
+    }
+    await run(`
+      UPDATE ${quoteTable('suppliers')}
+      SET ${quoteIdentifier('status')} = 'merged',
+          ${quoteIdentifier('suspectedDuplicateOf')} = ?,
+          ${quoteIdentifier('deletedAt')} = ?,
+          ${quoteIdentifier('updatedAt')} = ?
+      WHERE ${quoteIdentifier('companyId')} = ? AND ${quoteIdentifier('id')} IN (${sourcePlaceholders})
+    `, [targetId, timestamp, timestamp, req.user.companyId, ...sourceIds], client);
+
+    const templates = await queryAll(`
+      SELECT * FROM ${quoteTable('supplier_templates')}
+      WHERE ${quoteIdentifier('companyId')} = ? AND ${quoteIdentifier('supplierId')} = ? AND ${quoteIdentifier('deletedAt')} IS NULL
+      ORDER BY ${quoteIdentifier('updatedAt')} DESC
+    `, [req.user.companyId, targetId], client);
+    const [mainTemplate, ...duplicates] = templates;
+    for (const duplicate of duplicates) {
+      await run(`
+        UPDATE ${quoteTable('supplier_templates')}
+        SET ${quoteIdentifier('deletedAt')} = ?, ${quoteIdentifier('updatedAt')} = ?
+        WHERE ${quoteIdentifier('companyId')} = ? AND ${quoteIdentifier('id')} = ?
+      `, [timestamp, timestamp, req.user.companyId, duplicate.id], client);
+    }
+    if (mainTemplate) {
+      await run(`
+        UPDATE ${quoteTable('suppliers')}
+        SET ${quoteIdentifier('templateIds')} = ?, ${quoteIdentifier('updatedAt')} = ?
+        WHERE ${quoteIdentifier('companyId')} = ? AND ${quoteIdentifier('id')} = ?
+      `, [JSON.stringify([mainTemplate.id]), timestamp, req.user.companyId, targetId], client);
+    }
+  });
+
+  res.json({ success: true, sourceSupplierId: source.serverId || source.id, targetSupplierId: targetId });
+}));
+
 app.get('/api/suppliers/:id/template', requireAuth, asyncHandler(async (req, res) => {
   const template = await queryGet(`
     SELECT * FROM ${quoteTable('supplier_templates')}
@@ -1829,7 +1991,17 @@ app.put('/api/suppliers/:id/template', requireAuth, asyncHandler(async (req, res
     ORDER BY ${quoteIdentifier('updatedAt')} DESC LIMIT 1
   `, [req.user.companyId, req.params.id]);
   const record = await prepareRecordWithReferences('supplier_templates', { ...req.body, id: existing?.id, serverId: existing?.serverId || existing?.id, supplierId: req.params.id, updatedAt: nowIso() }, req.body.deviceId || 'legacy-api', req.user.companyId);
-  await upsertRecord('supplier_templates', record);
+  await withTransaction(async (client) => {
+    await upsertRecord('supplier_templates', record, client);
+    await run(`
+      UPDATE ${quoteTable('supplier_templates')}
+      SET ${quoteIdentifier('deletedAt')} = ?, ${quoteIdentifier('updatedAt')} = ?
+      WHERE ${quoteIdentifier('companyId')} = ?
+        AND ${quoteIdentifier('supplierId')} = ?
+        AND ${quoteIdentifier('id')} != ?
+        AND ${quoteIdentifier('deletedAt')} IS NULL
+    `, [nowIso(), nowIso(), req.user.companyId, req.params.id, record.id], client);
+  });
   res.json(record);
 }));
 
@@ -1941,7 +2113,7 @@ app.post('/api/invoices', requireAuth, asyncHandler(async (req, res) => {
   const deviceId = req.body.deviceId || 'legacy-api';
   const supplier = req.body.supplierId
     ? await getByAnyId('suppliers', req.body.supplierId, req.user.companyId)
-    : await findOrCreateSupplier(req.body.supplierName, deviceId, req.user.companyId);
+    : await findOrCreateSupplierV2(req.body.supplierName, deviceId, req.user.companyId);
   const now = nowIso();
   const { productItems, discountItems } = splitInvoiceRows(Array.isArray(req.body.items) ? req.body.items : []);
   const items = applyDiscountAllocation(applyGiftAccounting(productItems), discountItems);
@@ -2032,6 +2204,107 @@ app.post('/api/invoices/:id/image', requireAuth, upload.single('image'), asyncHa
     imageSize: req.file.size || 0,
     imageMimeType: req.file.mimetype || '',
     originalName: req.file.originalname || ''
+  });
+}));
+
+app.post('/api/invoices/:id/merge', requireAuth, asyncHandler(async (req, res) => {
+  const mergeIds = Array.isArray(req.body.mergeIds) ? req.body.mergeIds.filter(Boolean) : [];
+  if (mergeIds.length === 0) return res.status(400).json({ error: '请选择要合并的发票' });
+
+  const master = await queryGet(`
+    SELECT * FROM ${quoteTable('invoices')}
+    WHERE ${quoteIdentifier('companyId')} = ?
+      AND (${quoteIdentifier('id')} = ? OR ${quoteIdentifier('serverId')} = ? OR ${quoteIdentifier('localId')} = ?)
+      AND ${quoteIdentifier('deletedAt')} IS NULL
+    LIMIT 1
+  `, [req.user.companyId, req.params.id, req.params.id, req.params.id]);
+  if (!master) return res.status(404).json({ error: 'Invoice not found' });
+
+  const mergeRows = [];
+  for (const mergeId of mergeIds) {
+    const row = await queryGet(`
+      SELECT * FROM ${quoteTable('invoices')}
+      WHERE ${quoteIdentifier('companyId')} = ?
+        AND (${quoteIdentifier('id')} = ? OR ${quoteIdentifier('serverId')} = ? OR ${quoteIdentifier('localId')} = ?)
+        AND ${quoteIdentifier('deletedAt')} IS NULL
+      LIMIT 1
+    `, [req.user.companyId, mergeId, mergeId, mergeId]);
+    if (row && row.id !== master.id) mergeRows.push(row);
+  }
+  if (mergeRows.length === 0) return res.status(400).json({ error: '当前批次没有可合并的发票' });
+
+  const allInvoices = [master, ...mergeRows];
+  const allIds = [...new Set(allInvoices.flatMap((invoice) => [invoice.id, invoice.serverId, invoice.localId].filter(Boolean)))];
+  const childIds = [...new Set(mergeRows.flatMap((invoice) => [invoice.id, invoice.serverId, invoice.localId].filter(Boolean)))];
+  const childPlaceholders = childIds.map(() => '?').join(', ');
+  const mergedInvoiceIds = [...new Set([
+    ...parseAliases(master.mergedInvoiceIds),
+    ...mergeRows.map((invoice) => invoice.serverId || invoice.id)
+  ])];
+  const totalAmount = allInvoices.reduce((sum, invoice) => sum + Number(invoice.totalAmount || 0), 0);
+  const subtotal = allInvoices.reduce((sum, invoice) => sum + Number(invoice.subtotal || invoice.totalAmount || 0), 0);
+  const tax = allInvoices.reduce((sum, invoice) => sum + Number(invoice.tax || 0), 0);
+  const supplierConflict = new Set(allInvoices.map((invoice) => invoice.supplierId || '')).size > 1;
+  const invoiceNoConflict = new Set(allInvoices.map((invoice) => invoice.invoiceNo || '')).size > 1;
+  const amountConflict = new Set(allInvoices.map((invoice) => Number(invoice.totalAmount || 0).toFixed(2))).size > 1;
+  const warnings = [
+    supplierConflict ? '供应商不同' : '',
+    invoiceNoConflict ? '发票号不同' : '',
+    amountConflict ? '金额不同' : ''
+  ].filter(Boolean);
+  const timestamp = nowIso();
+
+  await withTransaction(async (client) => {
+    await run(`
+      UPDATE ${quoteTable('invoice_items')}
+      SET ${quoteIdentifier('invoiceId')} = ?, ${quoteIdentifier('updatedAt')} = ?
+      WHERE ${quoteIdentifier('companyId')} = ? AND ${quoteIdentifier('invoiceId')} IN (${childPlaceholders})
+    `, [master.serverId || master.id, timestamp, req.user.companyId, ...childIds], client);
+    await run(`
+      UPDATE ${quoteTable('invoice_discounts')}
+      SET ${quoteIdentifier('invoiceId')} = ?, ${quoteIdentifier('updatedAt')} = ?
+      WHERE ${quoteIdentifier('companyId')} = ? AND ${quoteIdentifier('invoiceId')} IN (${childPlaceholders})
+    `, [master.serverId || master.id, timestamp, req.user.companyId, ...childIds], client);
+    await run(`
+      UPDATE ${quoteTable('invoices')}
+      SET ${quoteIdentifier('status')} = 'merged',
+          ${quoteIdentifier('updatedAt')} = ?
+      WHERE ${quoteIdentifier('companyId')} = ? AND ${quoteIdentifier('id')} IN (${childPlaceholders})
+    `, [timestamp, req.user.companyId, ...childIds], client);
+    await run(`
+      UPDATE ${quoteTable('invoices')}
+      SET ${quoteIdentifier('pageCount')} = ?,
+          ${quoteIdentifier('isMergedInvoice')} = 1,
+          ${quoteIdentifier('isMultiPage')} = 1,
+          ${quoteIdentifier('mergedInvoiceIds')} = ?,
+          ${quoteIdentifier('subtotal')} = ?,
+          ${quoteIdentifier('tax')} = ?,
+          ${quoteIdentifier('totalAmount')} = ?,
+          ${quoteIdentifier('recognitionWarnings')} = ?,
+          ${quoteIdentifier('status')} = 'saved',
+          ${quoteIdentifier('updatedAt')} = ?
+      WHERE ${quoteIdentifier('companyId')} = ? AND ${quoteIdentifier('id')} = ?
+    `, [
+      allInvoices.length,
+      JSON.stringify(mergedInvoiceIds),
+      subtotal,
+      tax,
+      totalAmount,
+      warnings.length ? `人工合并提示：${warnings.join('、')}` : (master.recognitionWarnings || ''),
+      timestamp,
+      req.user.companyId,
+      master.id
+    ], client);
+  });
+
+  res.json({
+    success: true,
+    invoiceId: master.serverId || master.id,
+    mergedInvoiceIds,
+    pageCount: allInvoices.length,
+    totalAmount,
+    warnings,
+    message: '合并成功'
   });
 }));
 

@@ -54,6 +54,9 @@ const emptyItem = () => ({
 
 const emptySupplier = {
   name: '',
+  displayName: '',
+  normalizedName: '',
+  aliases: '[]',
   contactName: '',
   phone: '',
   email: '',
@@ -229,24 +232,122 @@ function HomePage() {
 
 function InvoiceListPage() {
   const [items, setItems] = useState([]);
-  useLocalReload(() => localDb.getInvoices().then(setItems));
+  const [mergeInvoice, setMergeInvoice] = useState(null);
+  const [message, setMessage] = useState('');
+  const load = () => localDb.getInvoices().then(setItems);
+  useLocalReload(load);
 
   return (
     <Page title="发票列表" action={<div className="row-actions"><Link className="icon-button" to="/invoices/batch"><Upload size={18} />批量</Link><Link className="icon-button" to="/invoices/new"><Plus size={18} />新增</Link></div>}>
       {items.length === 0 && <EmptyState text="暂无发票" />}
+      {message && <p className={message.includes('失败') || message.includes('没有') ? 'error' : 'success-text'}>{message}</p>}
       <div className="card-list">
         {items.map((invoice) => (
-          <Link className="row-card" to={`/invoices/${invoice.id}`} key={invoice.id}>
+          <div className="row-card" key={invoice.id}>
             <div>
               <h3>{invoice.supplierName || '未命名供应商'}</h3>
               <p>日期 {invoice.invoiceDate || '-'} · 金额 {money(invoice.totalAmount)}</p>
               <p>{statusText(invoice.syncStatus)}{invoice.invoiceNo ? ` · 发票号 ${invoice.invoiceNo}` : ''}</p>
             </div>
-            <ChevronRight />
-          </Link>
+            <div className="row-actions">
+              <button type="button" onClick={() => setMergeInvoice(invoice)}>合并</button>
+              <Link to={`/invoices/${invoice.id}`}>详情</Link>
+            </div>
+          </div>
         ))}
       </div>
+      {mergeInvoice && (
+        <MergeInvoiceDialog
+          invoice={mergeInvoice}
+          onClose={() => setMergeInvoice(null)}
+          onMerged={(text) => {
+            setMergeInvoice(null);
+            setMessage(text);
+            load();
+          }}
+        />
+      )}
     </Page>
+  );
+}
+
+function MergeInvoiceDialog({ invoice, onClose, onMerged }) {
+  const navigate = useNavigate();
+  const [candidates, setCandidates] = useState([]);
+  const [selectedIds, setSelectedIds] = useState([]);
+  const [message, setMessage] = useState('');
+  const [loading, setLoading] = useState(false);
+
+  useEffect(() => {
+    let cancelled = false;
+    localDb.getMergeCandidates(invoice.id).then((rows) => {
+      if (cancelled) return;
+      setCandidates(rows);
+      setSelectedIds(rows.filter((row) => row.possibleSameInvoice).map((row) => row.id));
+      if (rows.length === 0) setMessage('当前批次没有可合并的发票');
+    }).catch((error) => setMessage(error.message || '读取可合并发票失败'));
+    return () => {
+      cancelled = true;
+    };
+  }, [invoice.id]);
+
+  function toggle(idValue) {
+    setSelectedIds((current) => current.includes(idValue)
+      ? current.filter((entry) => entry !== idValue)
+      : [...current, idValue]);
+  }
+
+  async function confirmMerge() {
+    if (selectedIds.length === 0) {
+      setMessage('请选择要合并的发票');
+      return;
+    }
+    const selectedRows = candidates.filter((row) => selectedIds.includes(row.id));
+    const hasConflict = selectedRows.some((row) => row.supplierId !== invoice.supplierId || row.invoiceNo !== invoice.invoiceNo || Number(row.totalAmount || 0) !== Number(invoice.totalAmount || 0));
+    if (hasConflict && !confirm('这些发票可能不是同一张，是否继续合并？')) return;
+    setLoading(true);
+    setMessage('合并中...');
+    try {
+      const result = await api.mergeInvoice(invoice.id, selectedIds);
+      await syncNow();
+      onMerged?.(result.message || '合并成功');
+      navigate(`/invoices/${encodeURIComponent(result.invoiceId || invoice.id)}`);
+    } catch (error) {
+      setMessage(error.message || '合并失败');
+    } finally {
+      setLoading(false);
+    }
+  }
+
+  return (
+    <Dialog title="合并多页发票" onClose={onClose}>
+      <Section title="主发票">
+        <div className="detail-item">
+          <strong>{invoice.supplierName || '未命名供应商'}</strong>
+          <p>发票号 {invoice.invoiceNo || '-'} · 金额 {money(invoice.totalAmount)} · 批次 {invoice.batchId || invoice.scanBatchId || '-'}</p>
+          <p>创建时间 {invoice.createdAt || '-'} · 来源 {sourceLabel(invoice.recognitionSource)}</p>
+        </div>
+      </Section>
+      <Section title="选择要合并的发票/图片">
+        {message && <p className={message.includes('失败') || message.includes('没有') ? 'error' : 'hint'}>{message}</p>}
+        {candidates.length === 0 && <EmptyState text="当前批次没有可合并的发票" />}
+        {candidates.map((candidate) => (
+          <label className="merge-candidate" key={candidate.id}>
+            <input type="checkbox" checked={selectedIds.includes(candidate.id)} onChange={() => toggle(candidate.id)} />
+            {candidate.imagePath && !String(candidate.imagePath).startsWith('indexeddb:') && <img src={api.fileUrl(candidate.imagePath)} alt="发票缩略图" />}
+            <span>
+              <strong>{candidate.supplierName || '未命名供应商'}</strong>
+              <small>发票号 {candidate.invoiceNo || '-'} · 金额 {money(candidate.totalAmount)} · 创建 {candidate.createdAt || '-'}</small>
+              <small>来源 {sourceLabel(candidate.recognitionSource)} · {candidate.possibleSameInvoice ? '疑似同一张发票' : '需人工确认'}</small>
+            </span>
+          </label>
+        ))}
+      </Section>
+      <div className="dialog-actions">
+        <button className="secondary-button" disabled={loading} onClick={onClose}>取消</button>
+        <button className="primary-button" disabled={loading || candidates.length === 0} onClick={confirmMerge}>{loading ? '合并中...' : '确认合并'}</button>
+      </div>
+    </Dialog>
   );
 }
 
@@ -998,7 +1099,7 @@ function InvoiceDetailPageWithGifts() {
 
   if (!detail) return <Page title="发票详情"><EmptyState text="未找到发票" /></Page>;
 
-  const { invoice, items, discounts = [] } = detail;
+  const { invoice, items, discounts = [], mergedInvoices = [] } = detail;
   console.log('Invoice image fields', {
     imageUrl: invoice.imageUrl || '',
     imagePath: invoice.imagePath || '',
@@ -1006,7 +1107,7 @@ function InvoiceDetailPageWithGifts() {
   });
   const giftSummary = summarizeGiftAccounting(items);
   const promoGroups = summarizePromoGroups(items);
-  const finalSavedResult = { invoice, items, discounts };
+  const finalSavedResult = { invoice, items, discounts, mergedInvoices };
   return (
     <Page title="发票详情" action={<button className="danger-button" onClick={remove}><Trash2 size={16} />删除</button>}>
       <Section title="发票信息">
@@ -1058,6 +1159,16 @@ function InvoiceDetailPageWithGifts() {
       <Section title="查看原图">
         <InvoiceImageViewer invoice={invoice} onUpdated={loadDetail} />
       </Section>
+      {mergedInvoices.length > 0 && (
+        <Section title="合并页面原图">
+          {mergedInvoices.map((mergedInvoice, index) => (
+            <div className="detail-item" key={mergedInvoice.id}>
+              <strong>页面 {index + 2} · {mergedInvoice.invoiceNo || '-'}</strong>
+              <InvoiceImageViewer invoice={mergedInvoice} onUpdated={loadDetail} />
+            </div>
+          ))}
+        </Section>
+      )}
       <Section title="商品明细">
         {items.map((item) => (
           <div className="detail-item" key={item.id}>
@@ -1174,7 +1285,7 @@ function SupplierCenterPage() {
         {suppliers.map((supplier) => (
           <Link className="row-card" to={`/suppliers/${encodeURIComponent(supplier.id)}`} key={supplier.id}>
             <div>
-              <h3>{supplier.name || '未命名供应商'}</h3>
+              <h3>{supplier.displayName || supplier.name || '未命名供应商'}</h3>
               <p>累计采购 {money(supplier.totalPurchaseAmount)} · 发票 {supplier.invoiceCount} 张 · SKU {supplier.skuCount}</p>
               <p>最近采购 {supplier.recentPurchaseDate || '-'} · 最近金额 {money(supplier.recentPurchaseAmount)}</p>
               <p>赠品数量 {numberText(supplier.freeQtyTotal)} · 折扣 {money(supplier.discountTotal)} · 异常 {supplier.abnormalInvoiceCount}</p>
@@ -1321,6 +1432,8 @@ function SupplierPage() {
   const [suppliers, setSuppliers] = useState([]);
   const [editing, setEditing] = useState(null);
   const [templateSupplier, setTemplateSupplier] = useState(null);
+  const [mergeSupplier, setMergeSupplier] = useState(null);
+  const [message, setMessage] = useState('');
 
   const load = () => localDb.getSuppliers().then(setSuppliers);
   useLocalReload(load);
@@ -1346,12 +1459,13 @@ function SupplierPage() {
         {suppliers.map((supplier) => (
           <div className="row-card" key={supplier.id}>
             <div>
-              <h3>{supplier.name || '未命名供应商'}</h3>
+              <h3>{supplier.displayName || supplier.name || '未命名供应商'}</h3>
               <p>{supplier.phone || '无电话'} · {supplier.email || '无邮箱'} · {statusText(supplier.syncStatus)}</p>
             </div>
             <div className="row-actions">
               <Link to={`/suppliers/${encodeURIComponent(supplier.id)}`}>详情</Link>
               <Link to={`/suppliers/${encodeURIComponent(supplier.id)}/invoices`}>历史发票</Link>
+              <button onClick={() => setMergeSupplier(supplier)}>合并</button>
               <button onClick={() => setTemplateSupplier(supplier)}>模板</button>
               <button onClick={() => setEditing(supplier)}>编辑</button>
               <button className="text-danger" onClick={() => deleteSupplier(supplier)}>删除</button>
@@ -1361,7 +1475,63 @@ function SupplierPage() {
       </div>
       {editing && <SupplierDialog supplier={editing} onClose={() => setEditing(null)} onSave={saveSupplier} />}
       {templateSupplier && <TemplateDialog supplier={templateSupplier} onClose={() => setTemplateSupplier(null)} />}
+      {mergeSupplier && <MergeSupplierDialog supplier={mergeSupplier} suppliers={suppliers} onClose={() => setMergeSupplier(null)} onMerged={() => { setMergeSupplier(null); load(); }} />}
     </Page>
+  );
+}
+
+function MergeSupplierDialog({ supplier, suppliers, onClose, onMerged }) {
+  const [targetId, setTargetId] = useState('');
+  const [message, setMessage] = useState('');
+  const [loading, setLoading] = useState(false);
+  const candidates = suppliers.filter((entry) => entry.id !== supplier.id);
+
+  async function merge() {
+    if (!targetId) {
+      setMessage('请选择目标供应商');
+      return;
+    }
+    setLoading(true);
+    setMessage('合并中...');
+    try {
+      if (navigator.onLine) {
+        await api.mergeSupplier(supplier.id, targetId);
+      } else {
+        await localDb.mergeSuppliers(supplier.id, targetId);
+      }
+      await syncNow();
+      setMessage('合并成功');
+      onMerged?.();
+    } catch (error) {
+      setMessage(error.message || '合并失败');
+    } finally {
+      setLoading(false);
+    }
+  }
+
+  return (
+    <Dialog title="合并供应商" onClose={onClose}>
+      <Section title="源供应商">
+        <Info label="名称" value={supplier.displayName || supplier.name || '-'} />
+        <Info label="标准名" value={supplier.normalizedName || '-'} />
+      </Section>
+      <Section title="目标供应商">
+        <label className="field">
+          <span>合并到</span>
+          <select value={targetId} onChange={(event) => setTargetId(event.target.value)}>
+            <option value="">请选择目标供应商</option>
+            {candidates.map((candidate) => (
+              <option key={candidate.id} value={candidate.id}>{candidate.displayName || candidate.name}</option>
+            ))}
+          </select>
+        </label>
+        {message && <p className={message.includes('失败') ? 'error' : 'hint'}>{message}</p>}
+      </Section>
+      <div className="dialog-actions">
+        <button className="secondary-button" disabled={loading} onClick={onClose}>取消</button>
+        <button className="primary-button" disabled={loading || !targetId} onClick={merge}>{loading ? '合并中...' : '确认合并'}</button>
+      </div>
+    </Dialog>
   );
 }
 
@@ -1470,9 +1640,9 @@ function SupplierDialog({ supplier, onClose, onSave }) {
   const [form, setForm] = useState(supplier);
   return (
     <Dialog title="编辑供应商" onClose={onClose}>
-      {['name', 'contactName', 'phone', 'email', 'address', 'notes'].map((field) => (
+      {['name', 'displayName', 'normalizedName', 'aliases', 'contactName', 'phone', 'email', 'address', 'notes'].map((field) => (
         <label className="field" key={field}>
-          <span>{({ name: '名称', contactName: '联系人', phone: '电话', email: '邮箱', address: '地址', notes: '备注' })[field]}</span>
+          <span>{({ name: '名称', displayName: '显示名称', normalizedName: '标准化名称', aliases: '别名', contactName: '联系人', phone: '电话', email: '邮箱', address: '地址', notes: '备注' })[field]}</span>
           <input value={form[field] || ''} onChange={(event) => setForm({ ...form, [field]: event.target.value })} />
         </label>
       ))}
