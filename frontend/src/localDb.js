@@ -107,7 +107,10 @@ export function nowIso() {
 
 function giftAccountingKey(item = {}) {
   const candidate = promoGroupCandidate(item);
-  return candidate.key || normalizeProductName(item.standardName || item.productNameNormalized || item.normalizedName || item.productNameOriginal || item.name || '');
+  const manual = Number(item.participatesInGiftAllocation || 0) || String(item.promoGroupRule || '').includes('manual');
+  return manual && item.promoGroupId
+    ? item.promoGroupId
+    : candidate.key || normalizeProductName(item.standardName || item.productNameNormalized || item.normalizedName || item.productNameOriginal || item.name || '');
 }
 
 function displayItemName(item = {}) {
@@ -119,13 +122,14 @@ function promoGroupCandidate(item = {}) {
   const normalized = normalizeProductName(source).toUpperCase();
   const tokens = normalized.split(/[^A-Z0-9\u4e00-\u9fff]+/).filter(Boolean);
   const brand = tokens.find((token) => !/^\d/.test(token) && !['PET', 'CAN', 'BTL', 'BOTTLE', 'CASE', 'CS', 'PK', 'PACK'].includes(token)) || '';
+  const normalizedProductName = normalizeProductName(item.standardName || item.productNameNormalized || item.normalizedName || displayItemName(item));
   const specs = [];
   const packageMatch = source.match(/\b(PET|CAN|BTL|BOTTLE|JAR|BAG|BOX|TIN)\b/);
   if (packageMatch) specs.push(packageMatch[1]);
   const sizeMatch = source.match(/\b\d+\/\d+(?:\.\d+)?(?:FZ|OZ|ML|G|KG|LB|L)\b/) || source.match(/\b\d+X\d+(?:\.\d+)?(?:FZ|OZ|ML|G|KG|LB|L|CT|PC|PCS|PK)\b/) || source.match(/\b\d+(?:\.\d+)?(?:FZ|OZ|ML|G|KG|LB|L)\b/);
   if (sizeMatch) specs.push(sizeMatch[0]);
-  if (!brand || specs.length === 0) return { key: '', name: '需要人工确认分摊组', rule: 'uncertain: missing brand or package/spec' };
-  return { key: `${brand}|${specs.join('|')}`, name: `${brand} ${specs.join(' ')}`, rule: 'same brand + same spec/package' };
+  if (!brand || !normalizedProductName || specs.length === 0) return { key: '', name: '需要人工确认分摊组', rule: 'uncertain: missing brand, product name, or package/spec' };
+  return { key: `${brand}|${normalizedProductName}|${specs.join('|')}`, name: `${brand} ${specs.join(' ')}`, rule: 'same brand + same normalized product + same spec/package' };
 }
 
 function isDiscountLine(item = {}) {
@@ -181,19 +185,25 @@ export function applyGiftAccounting(items = []) {
   return normalized.map((item) => {
     const key = giftAccountingKey(item) || item.productNameOriginal || item.id;
     const group = groups.get(key) || { chargedQty: item.quantity, freeQty: 0, invoiceAmount: item.totalPrice };
+    const quantity = Number(item.quantity || 0);
+    const unitPrice = Number(item.unitPrice || 0);
     const chargedQty = Number(group.chargedQty || 0);
     const freeQty = Number(group.freeQty || 0);
     const totalQty = chargedQty + freeQty;
     const invoiceAmount = Number(group.invoiceAmount || 0);
+    const hasFreeShare = freeQty > 0 && chargedQty > 0;
+    const noDiscount = Number(item.discountAmount || 0) === 0;
+    const originalCost = hasFreeShare ? (invoiceAmount / chargedQty) : unitPrice;
+    const effectiveCost = hasFreeShare ? (invoiceAmount / totalQty) : unitPrice;
     return {
       ...item,
-      chargedQty,
-      freeQty,
-      totalQty,
-      actualQty: totalQty,
-      originalUnitCost: chargedQty > 0 ? invoiceAmount / chargedQty : 0,
-      effectiveUnitCost: totalQty > 0 ? invoiceAmount / totalQty : 0,
-      discountedEffectiveUnitCost: totalQty > 0 ? invoiceAmount / totalQty : 0
+      chargedQty: hasFreeShare ? chargedQty : (item.isFreeItem ? 0 : quantity),
+      freeQty: hasFreeShare ? freeQty : (item.isFreeItem ? quantity : 0),
+      totalQty: hasFreeShare ? totalQty : quantity,
+      actualQty: hasFreeShare ? totalQty : quantity,
+      originalUnitCost: originalCost,
+      effectiveUnitCost: effectiveCost,
+      discountedEffectiveUnitCost: noDiscount ? effectiveCost : Number(item.discountedEffectiveUnitCost || effectiveCost)
     };
   });
 }
@@ -300,6 +310,23 @@ function belongsToCurrentCompany(record) {
 
 function active(record) {
   return !record.deletedAt && belongsToCurrentCompany(record);
+}
+
+function pendingReviewInvoice(invoice = {}) {
+  return String(invoice.status || '').toUpperCase() === 'PENDING_REVIEW'
+    || invoice.duplicateStatus === 'possible'
+    || Boolean(invoice.recognitionWarnings)
+    || Number(invoice.totalDifference || 0) > 0.05;
+}
+
+function approvedForStats(invoice = {}) {
+  if (!active(invoice) || ['merged', 'hidden'].includes(invoice.status)) return false;
+  if (String(invoice.status || '').toUpperCase() === 'APPROVED') return true;
+  return !pendingReviewInvoice(invoice);
+}
+
+function invoiceIdSet(invoices = []) {
+  return new Set(invoices.flatMap((invoice) => idsFor(invoice)));
 }
 
 function moneyNumber(value) {
@@ -569,6 +596,39 @@ export const localDb = {
     return updated;
   },
 
+  async updateInvoiceFields(invoiceId, fields) {
+    const detail = await localDb.getInvoice(invoiceId);
+    if (!detail) throw new Error('Invoice not found');
+    const before = detail.invoice;
+    const supplier = fields.supplierName ? await findOrCreateSupplier(fields.supplierName) : null;
+    const calculatedTotal = Number(before.calculatedTotal || detail.items.reduce((sum, item) => sum + Number(item.totalPrice || 0), 0));
+    const updated = syncFields({
+      ...before,
+      ...fields,
+      supplierId: supplier?.id || before.supplierId || '',
+      totalAmount: Number(fields.totalAmount ?? before.totalAmount ?? 0),
+      subtotal: Number(fields.subtotal ?? before.subtotal ?? fields.totalAmount ?? before.totalAmount ?? 0),
+      tax: Number(fields.tax ?? before.tax ?? 0),
+      calculatedTotal,
+      totalDifference: Math.abs(calculatedTotal - Number(fields.totalAmount ?? before.totalAmount ?? 0)),
+      status: 'APPROVED'
+    });
+    await put('invoices', updated);
+    const corrections = Object.entries(fields)
+      .filter(([fieldName, afterValue]) => String(before[fieldName] ?? '') !== String(afterValue ?? ''))
+      .map(([fieldName, afterValue]) => syncFields({
+        fieldName: `invoices.${fieldName}`,
+        beforeValue: String(before[fieldName] ?? ''),
+        afterValue: String(afterValue ?? ''),
+        supplierId: updated.supplierId || '',
+        invoiceTemplateId: '',
+        invoiceId: updated.id,
+        invoiceItemId: ''
+      }));
+    if (corrections.length) await putMany('recognition_corrections', corrections);
+    return localDb.getInvoice(invoiceId);
+  },
+
   async createInvoice(payload) {
     const supplier = payload.supplierId ? resolveByAnyId(await all('suppliers'), payload.supplierId) : await findOrCreateSupplier(payload.supplierName);
     const invoiceId = payload.id || generateId();
@@ -598,7 +658,7 @@ export const localDb = {
       totalDifference: Math.abs(itemTotal - totalAmount),
       isMultiPage: payload.isMultiPage ? 1 : 0,
       mergedInvoiceIds: payload.mergedInvoiceIds || '[]',
-      status: 'saved'
+      status: 'APPROVED'
     });
     await put('invoices', invoice);
 
@@ -802,7 +862,8 @@ export const localDb = {
     await put('invoices', syncFields({
       ...invoice,
       calculatedTotal,
-      totalDifference: Math.abs(calculatedTotal - Number(invoice.totalAmount || 0))
+      totalDifference: Math.abs(calculatedTotal - Number(invoice.totalAmount || 0)),
+      status: 'APPROVED'
     }));
 
     const correctionFields = ['nameCn', 'nameEn', 'spec', 'productNameOriginal', 'productNameNormalized', 'quantity', 'unit', 'unitPrice', 'totalPrice', 'isFreeItem', 'promoGroupId', 'promoGroupName', 'chargedQty', 'freeQty', 'actualQty', 'effectiveUnitCost'];
@@ -878,6 +939,7 @@ export const localDb = {
   async searchProducts(query) {
     const q = normalizeProductName(query);
     if (!q) return [];
+    const approvedInvoiceIds = invoiceIdSet((await all('invoices')).filter(approvedForStats));
     const aliases = (await all('product_aliases')).filter(active);
     const aliasProductIds = new Set(aliases
       .filter((alias) => `${normalizeProductName(alias.aliasName || alias.rawName || alias.keyword || '')} ${normalizeProductName(alias.normalizedAlias || '')} ${normalizeProductName(alias.standardName || '')}`.includes(q))
@@ -885,6 +947,7 @@ export const localDb = {
       .filter(Boolean));
     const items = (await all('invoice_items')).filter((item) => {
       if (!active(item) || Number(item.isDiscountLine || 0) || Number(item.candidateOnly || 0)) return false;
+      if (!approvedInvoiceIds.has(item.invoiceId)) return false;
       const haystack = `${normalizeProductName(item.rawName || item.productNameOriginal || '')} ${normalizeProductName(item.normalizedName || item.productNameNormalized || '')}`;
       return haystack.includes(q) || aliasProductIds.has(item.productId);
     });
@@ -913,7 +976,8 @@ export const localDb = {
 
   async getProduct(name) {
     const suppliers = await all('suppliers');
-    const invoices = await all('invoices');
+    const invoices = (await all('invoices')).filter(approvedForStats);
+    const approvedInvoiceIds = invoiceIdSet(invoices);
     const q = normalizeProductName(name);
     const aliases = (await all('product_aliases')).filter(active);
     const aliasProductIds = new Set(aliases
@@ -922,6 +986,7 @@ export const localDb = {
       .filter(Boolean));
     return (await all('invoice_items')).filter((item) => {
       if (!active(item) || Number(item.isDiscountLine || 0) || Number(item.candidateOnly || 0)) return false;
+      if (!approvedInvoiceIds.has(item.invoiceId)) return false;
       const haystack = `${normalizeProductName(item.rawName || item.productNameOriginal || '')} ${normalizeProductName(item.normalizedName || item.productNameNormalized || '')}`;
       return haystack.includes(q) || item.productId === name || aliasProductIds.has(item.productId);
     }).map((item) => {
@@ -969,9 +1034,11 @@ export const localDb = {
     const q = normalizeProductName(query);
     const supplierQ = normalizeSupplierName(query);
     const suppliers = (await all('suppliers')).filter((supplier) => active(supplier) && supplier.status !== 'merged');
-    const invoices = (await all('invoices')).filter(active);
-    const items = (await all('invoice_items')).filter((item) => active(item) && !Number(item.candidateOnly || 0) && !Number(item.isDiscountLine || 0));
-    const discounts = (await all('invoice_discounts')).filter(active);
+    const allInvoices = (await all('invoices')).filter(active);
+    const invoices = allInvoices.filter(approvedForStats);
+    const approvedInvoiceIds = invoiceIdSet(invoices);
+    const items = (await all('invoice_items')).filter((item) => active(item) && approvedInvoiceIds.has(item.invoiceId) && !Number(item.candidateOnly || 0) && !Number(item.isDiscountLine || 0));
+    const discounts = (await all('invoice_discounts')).filter((discount) => active(discount) && approvedInvoiceIds.has(discount.invoiceId));
     return suppliers.map((supplier) => {
       const supplierIds = idsFor(supplier);
       const supplierInvoices = invoices.filter((invoice) => supplierIds.includes(invoice.supplierId));
@@ -1008,7 +1075,7 @@ export const localDb = {
         skuCount: skuSet.size,
         freeQtyTotal: supplierItems.reduce((sum, item) => sum + moneyNumber(item.freeQty), 0),
         discountTotal: supplierDiscounts.reduce((sum, discount) => sum + moneyNumber(discount.amount), 0),
-        abnormalInvoiceCount: supplierInvoices.filter((invoice) => invoice.duplicateStatus === 'possible' || invoice.recognitionWarnings).length,
+        abnormalInvoiceCount: allInvoices.filter((invoice) => supplierIds.includes(invoice.supplierId) && pendingReviewInvoice(invoice)).length,
         totalPurchaseQty: supplierItems.reduce((sum, item) => sum + moneyNumber(item.actualQty || item.totalQty || item.quantity), 0),
         searchText,
         supplierSearchText
@@ -1040,9 +1107,10 @@ export const localDb = {
     const suppliers = await all('suppliers');
     const supplier = resolveByAnyId(suppliers, supplierId);
     const supplierIds = idsFor(supplier, supplierId);
-    const invoices = (await all('invoices')).filter(active);
+    const invoices = (await all('invoices')).filter(approvedForStats);
+    const approvedInvoiceIds = invoiceIdSet(invoices);
     const invoiceById = new Map(invoices.flatMap((invoice) => idsFor(invoice).map((idValue) => [idValue, invoice])));
-    const records = (await all('invoice_items')).filter((item) => active(item) && !Number(item.isDiscountLine || 0) && !Number(item.candidateOnly || 0) && supplierIds.includes(item.supplierId));
+    const records = (await all('invoice_items')).filter((item) => active(item) && approvedInvoiceIds.has(item.invoiceId) && !Number(item.isDiscountLine || 0) && !Number(item.candidateOnly || 0) && supplierIds.includes(item.supplierId));
     const groups = new Map();
     for (const item of records) {
       const key = item.productId || item.productNameNormalized || normalizeProductName(item.productNameOriginal || item.rawName || '');
@@ -1078,9 +1146,11 @@ export const localDb = {
 
   async getDashboardMetrics() {
     const suppliers = (await all('suppliers')).filter(active);
-    const invoices = (await all('invoices')).filter(active);
-    const items = (await all('invoice_items')).filter((item) => active(item) && !Number(item.candidateOnly || 0) && !Number(item.isDiscountLine || 0));
-    const discounts = (await all('invoice_discounts')).filter(active);
+    const allInvoices = (await all('invoices')).filter(active);
+    const invoices = allInvoices.filter(approvedForStats);
+    const approvedInvoiceIds = invoiceIdSet(invoices);
+    const items = (await all('invoice_items')).filter((item) => active(item) && approvedInvoiceIds.has(item.invoiceId) && !Number(item.candidateOnly || 0) && !Number(item.isDiscountLine || 0));
+    const discounts = (await all('invoice_discounts')).filter((discount) => active(discount) && approvedInvoiceIds.has(discount.invoiceId));
     const month = currentMonth();
     const monthInvoices = invoices.filter((invoice) => String(invoice.invoiceDate || invoice.createdAt || '').startsWith(month));
     const monthSupplierIds = new Set(monthInvoices.map((invoice) => invoice.supplierId).filter(Boolean));
@@ -1091,16 +1161,17 @@ export const localDb = {
       monthNewSupplierCount: suppliers.filter((supplier) => monthSupplierIds.has(supplier.id) || monthSupplierIds.has(supplier.serverId) || String(supplier.createdAt || '').startsWith(month)).length,
       giftValueTotal: items.reduce((sum, item) => sum + moneyNumber(item.freeQty) * moneyNumber(item.effectiveUnitCost || item.unitPrice), 0),
       discountTotal: discounts.reduce((sum, discount) => sum + moneyNumber(discount.amount), 0),
-      abnormalInvoiceCount: invoices.filter((invoice) => invoice.duplicateStatus === 'possible' || invoice.recognitionWarnings).length,
-      pendingInvoiceCount: invoices.filter((invoice) => ['pending', 'review', 'needs_review'].includes(invoice.status) || invoice.syncStatus === 'pending').length
+      abnormalInvoiceCount: allInvoices.filter(pendingReviewInvoice).length,
+      pendingInvoiceCount: allInvoices.filter((invoice) => pendingReviewInvoice(invoice) || invoice.syncStatus === 'pending').length
     };
   },
 
   async getPurchaseAnalytics() {
     const suppliers = (await all('suppliers')).filter(active);
     const supplierById = new Map(suppliers.flatMap((supplier) => idsFor(supplier).map((idValue) => [idValue, supplier])));
-    const invoices = (await all('invoices')).filter(active);
-    const items = (await all('invoice_items')).filter((item) => active(item) && !Number(item.candidateOnly || 0) && !Number(item.isDiscountLine || 0));
+    const invoices = (await all('invoices')).filter(approvedForStats);
+    const approvedInvoiceIds = invoiceIdSet(invoices);
+    const items = (await all('invoice_items')).filter((item) => active(item) && approvedInvoiceIds.has(item.invoiceId) && !Number(item.candidateOnly || 0) && !Number(item.isDiscountLine || 0));
     const supplierGroups = new Map();
     for (const invoice of invoices) {
       const key = invoice.supplierId || 'unknown';

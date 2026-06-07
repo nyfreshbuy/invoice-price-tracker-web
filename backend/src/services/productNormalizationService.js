@@ -423,16 +423,17 @@ export function promoGroupCandidate(item = {}) {
   const source = [displayStandardName(item), displayRawName(item), item.spec, item.unit].filter(Boolean).join(' ');
   const brand = firstBrandToken(source);
   const specs = packagingTokens(source);
-  if (!brand || specs.length === 0) {
+  const normalizedProductName = normalizeProductNameAdvanced(displayStandardName(item) || displayRawName(item));
+  if (!brand || !normalizedProductName || specs.length === 0) {
     return {
       key: '',
       name: '需要人工确认分摊组',
-      rule: 'uncertain: missing brand or package/spec'
+      rule: 'uncertain: missing brand, product name, or package/spec'
     };
   }
   return {
-    key: `${brand}|${specs.join('|')}`,
+    key: `${brand}|${normalizedProductName}|${specs.join('|')}`,
     name: `${brand} ${specs.join(' ')}`,
-    rule: 'same brand + same spec/package'
+    rule: 'same brand + same normalized product + same spec/package'
   };
 }

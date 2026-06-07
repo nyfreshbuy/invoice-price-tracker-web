@@ -837,7 +837,7 @@ function InvoiceFormPage() {
       ...current,
       supplierName: result.parsed?.supplierName || current.supplierName,
       invoiceNo: result.parsed?.invoiceNo || current.invoiceNo,
-      invoiceDate: normalizeDateInput(result.parsed?.invoiceDate) || current.invoiceDate,
+      invoiceDate: normalizeDateInput(result.parsed?.invoiceDate) || '',
       pageNumber: Number(result.parsed?.pageNumber || current.pageNumber || 0),
       pageCount: Number(result.parsed?.pageCount || current.pageCount || 0),
       invoiceGroupKey: result.parsed?.invoiceGroupKey || current.invoiceGroupKey || '',
@@ -1147,6 +1147,7 @@ function InvoiceDetailPageWithGifts() {
   const navigate = useNavigate();
   const [detail, setDetail] = useState(null);
   const [recognitionTask, setRecognitionTask] = useState(null);
+  const [editingInvoice, setEditingInvoice] = useState(false);
   const [editingItem, setEditingItem] = useState(null);
   const [editingPromoGroups, setEditingPromoGroups] = useState(false);
   const [detailMessage, setDetailMessage] = useState('');
@@ -1195,6 +1196,14 @@ function InvoiceDetailPageWithGifts() {
     setEditingPromoGroups(false);
   }
 
+  async function saveInvoiceFields(fields) {
+    const updated = await localDb.updateInvoiceFields(id, fields);
+    setDetail(updated);
+    setEditingInvoice(false);
+    setDetailMessage('已保存发票修改，并重新计算统计状态');
+    syncNow();
+  }
+
   if (!detail) return <Page title="发票详情"><EmptyState text="未找到发票" /></Page>;
 
   const { invoice, items, discounts = [], mergedInvoices = [] } = detail;
@@ -1207,7 +1216,7 @@ function InvoiceDetailPageWithGifts() {
   const promoGroups = summarizePromoGroups(items);
   const finalSavedResult = { invoice, items, discounts, mergedInvoices };
   return (
-    <Page title="发票详情" action={<button className="danger-button" onClick={remove}><Trash2 size={16} />删除</button>}>
+    <Page title="发票详情" action={<div className="row-actions"><button type="button" onClick={() => setEditingInvoice(true)}>编辑发票</button><button className="danger-button" onClick={remove}><Trash2 size={16} />删除</button></div>}>
       {detailMessage && <p className="success-text">{detailMessage}</p>}
       <Section title="发票信息">
         <Info label="供应商" value={invoice.supplierName || '未命名供应商'} />
@@ -1222,6 +1231,7 @@ function InvoiceDetailPageWithGifts() {
         <Info label="usedCorrection" value={items.some((item) => Number(item.correctedByUser || 0)) ? "yes" : "no"} />
         <Info label="confidence" value={recognitionTask?.result?.parsed?.confidence ?? recognitionTask?.result?.confidence ?? "-"} />
         <Info label="重复状态" value={duplicateStatusLabel(invoice.duplicateStatus)} />
+        <Info label="发票状态" value={invoice.status || '-'} />
         <Info label="同步状态" value={statusText(invoice.syncStatus)} />
       </Section>
       {invoice.recognitionWarnings && <Section title="识别警告"><p className="warning-text">{invoice.recognitionWarnings}</p></Section>}
@@ -1301,6 +1311,13 @@ function InvoiceDetailPageWithGifts() {
           onSave={saveEditedItem}
         />
       )}
+      {editingInvoice && (
+        <InvoiceEditDialog
+          invoice={invoice}
+          onClose={() => setEditingInvoice(false)}
+          onSave={saveInvoiceFields}
+        />
+      )}
       {editingPromoGroups && (
         <PromoAllocationDialog
           items={items}
@@ -1309,6 +1326,52 @@ function InvoiceDetailPageWithGifts() {
         />
       )}
     </Page>
+  );
+}
+
+function InvoiceEditDialog({ invoice, onClose, onSave }) {
+  const [form, setForm] = useState(() => ({
+    supplierName: invoice.supplierName || '',
+    invoiceNo: invoice.invoiceNo || '',
+    invoiceDate: normalizeDateInput(invoice.invoiceDate) || '',
+    totalAmount: Number(invoice.totalAmount || 0),
+    subtotal: Number(invoice.subtotal || invoice.totalAmount || 0),
+    tax: Number(invoice.tax || 0),
+    recognitionWarnings: invoice.recognitionWarnings || ''
+  }));
+
+  function update(field, value) {
+    setForm((current) => ({ ...current, [field]: value }));
+  }
+
+  function save() {
+    onSave({
+      supplierName: form.supplierName,
+      invoiceNo: form.invoiceNo,
+      invoiceDate: normalizeDateInput(form.invoiceDate) || '',
+      totalAmount: Number(form.totalAmount || 0),
+      subtotal: Number(form.subtotal || form.totalAmount || 0),
+      tax: Number(form.tax || 0),
+      recognitionWarnings: form.recognitionWarnings
+    });
+  }
+
+  return (
+    <Dialog title="编辑发票" onClose={onClose}>
+      <label className="field"><span>供应商</span><input value={form.supplierName} onChange={(event) => update('supplierName', event.target.value)} /></label>
+      <label className="field"><span>发票号</span><input value={form.invoiceNo} onChange={(event) => update('invoiceNo', event.target.value)} /></label>
+      <label className="field"><span>日期</span><input type="date" value={form.invoiceDate} onChange={(event) => update('invoiceDate', event.target.value)} /></label>
+      <div className="grid-2">
+        <label className="field"><span>金额</span><input type="number" value={form.totalAmount} onChange={(event) => update('totalAmount', event.target.value)} /></label>
+        <label className="field"><span>Subtotal</span><input type="number" value={form.subtotal} onChange={(event) => update('subtotal', event.target.value)} /></label>
+        <label className="field"><span>Tax</span><input type="number" value={form.tax} onChange={(event) => update('tax', event.target.value)} /></label>
+      </div>
+      <label className="field"><span>识别警告</span><textarea rows="3" value={form.recognitionWarnings} onChange={(event) => update('recognitionWarnings', event.target.value)} /></label>
+      <div className="dialog-actions">
+        <button className="secondary-button" type="button" onClick={onClose}>取消</button>
+        <button className="primary-button" type="button" onClick={save}>保存发票</button>
+      </div>
+    </Dialog>
   );
 }
 
@@ -1983,6 +2046,8 @@ function InvoiceImageViewer({ invoice, onUpdated }) {
     message: ''
   });
   const [uploading, setUploading] = useState(false);
+  const [showDebug, setShowDebug] = useState(false);
+  const [fullScreen, setFullScreen] = useState(false);
 
   useEffect(() => {
     let objectUrl = '';
@@ -2085,34 +2150,44 @@ function InvoiceImageViewer({ invoice, onUpdated }) {
   return (
     <div>
       {imageUrl ? (
-        <img
-          className="invoice-image"
-          src={imageUrl}
-          alt="发票原图"
-          onLoad={() => setDiagnostic((current) => ({ ...current, status: '正常', message: '' }))}
-          onError={() => {
-            console.error('Invoice image load failed', imageUrl);
-            setImageUrl('');
-            setDiagnostic((current) => ({
-              ...current,
-              status: current.source === 'Server' ? '缺失' : '损坏',
-              message: current.source === 'Server' ? '图片已丢失' : '图片损坏'
-            }));
-          }}
-        />
+        <button type="button" className="image-open-button" onClick={() => setFullScreen(true)}>
+          <img
+            className="invoice-image"
+            src={imageUrl}
+            alt="发票原图"
+            onLoad={() => setDiagnostic((current) => ({ ...current, status: '正常', message: '' }))}
+            onError={() => {
+              console.error('Invoice image load failed', imageUrl);
+              setImageUrl('');
+              setDiagnostic((current) => ({
+                ...current,
+                status: current.source === 'Server' ? '缺失' : '损坏',
+                message: current.source === 'Server' ? '图片已丢失' : '图片损坏'
+              }));
+            }}
+          />
+        </button>
       ) : (
         <EmptyState text={diagnostic.message || '图片不存在'} />
       )}
       <div className="image-diagnostics">
-        <Info label="invoice.imageUrl" value={invoice.imageUrl || '-'} />
-        <Info label="invoice.imagePath" value={invoice.imagePath || '-'} />
-        <Info label="invoice.imageId" value={invoice.imageId || '-'} />
         <Info label="图片来源" value={diagnostic.source} />
         <Info label="图片大小" value={diagnostic.size ? formatBytes(diagnostic.size) : '-'} />
         <Info label="图片状态" value={diagnostic.status} />
         {diagnostic.message && <p className="error">{diagnostic.message}</p>}
+        <button type="button" className="secondary-button" onClick={() => setShowDebug((value) => !value)}>
+          {showDebug ? '隐藏调试信息' : '显示调试信息'}
+        </button>
+        {showDebug && (
+          <div className="debug-fields">
+            <Info label="invoice.imageUrl" value={invoice.imageUrl || '-'} />
+            <Info label="invoice.imagePath" value={invoice.imagePath || '-'} />
+            <Info label="invoice.imageId" value={invoice.imageId || '-'} />
+          </div>
+        )}
       </div>
       <div className="row-actions">
+        {imageUrl && <button className="secondary-button" type="button" onClick={() => setFullScreen(true)}>查看原图</button>}
         <button className="secondary-button" disabled={uploading} onClick={() => fileInputRef.current?.click()}>
           {uploading ? '上传中...' : '重新上传图片'}
         </button>
@@ -2127,10 +2202,20 @@ function InvoiceImageViewer({ invoice, onUpdated }) {
           }}
         />
       </div>
+      {fullScreen && imageUrl && (
+        <div className="image-fullscreen" role="dialog" aria-modal="true">
+          <div className="image-fullscreen-toolbar">
+            <span>{invoice.pageCount ? `Page ${invoice.pageNumber || 1} / ${invoice.pageCount}` : '发票原图'}</span>
+            <button type="button" onClick={() => setFullScreen(false)}>关闭</button>
+          </div>
+          <div className="image-fullscreen-scroll">
+            <img src={imageUrl} alt="发票原图全屏预览" />
+          </div>
+        </div>
+      )}
     </div>
   );
 }
-
 function Info({ label, value }) {
   return <div className="info-row"><span>{label}</span><strong>{value}</strong></div>;
 }

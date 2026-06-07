@@ -54,6 +54,7 @@ export async function recognizeInvoiceWithAI(imagePath, options = {}) {
                 normalizedName: '卡奇锅巴（香辣味） k.q. rice chips'
               }),
               'Return invoiceDate as yyyy-MM-dd. For US supplier invoices, parse MM/DD/YYYY as month/day/year, so 06/01/2026 must be 2026-06-01. If date confidence is low, leave invoiceDate empty and add a warning.',
+              'Date priority must be: Invoice Date first, then Delivery Date, then OCR/scan time. Never inherit the date from a previous invoice.',
               'Use the invoice bottom Total as totalAmount. Do not overwrite it with the item sum.',
               'Item totals are only for validation.',
               'If the invoice has a page total, put it in totalAmount for that page.',

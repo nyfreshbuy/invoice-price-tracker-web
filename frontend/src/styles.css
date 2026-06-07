@@ -15,6 +15,17 @@
   box-sizing: border-box;
 }
 
+.page-header,
+.section,
+.row-card,
+.detail-item,
+.info-row,
+.item-editor,
+.image-diagnostics {
+  max-width: 100%;
+  box-sizing: border-box;
+}
+
 html,
 body {
   margin: 0;
@@ -442,6 +453,16 @@ textarea {
   background: #fff;
 }
 
+.image-open-button {
+  display: block;
+  width: 100%;
+  max-width: 100%;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  cursor: zoom-in;
+}
+
 .image-diagnostics {
   display: grid;
   gap: 6px;
@@ -450,6 +471,54 @@ textarea {
   background: var(--panel);
   border: 1px solid var(--line);
   border-radius: 8px;
+  max-width: 100%;
+  overflow-wrap: anywhere;
+  word-break: break-all;
+  white-space: normal;
+}
+
+.debug-fields {
+  display: grid;
+  gap: 6px;
+  max-width: 100%;
+  overflow-wrap: anywhere;
+  word-break: break-all;
+  white-space: normal;
+}
+
+.image-fullscreen {
+  position: fixed;
+  inset: 0;
+  z-index: 60;
+  display: grid;
+  grid-template-rows: auto 1fr;
+  background: #0f172a;
+  color: #fff;
+}
+
+.image-fullscreen-toolbar {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 12px;
+  padding: calc(10px + env(safe-area-inset-top)) max(12px, env(safe-area-inset-right)) 10px max(12px, env(safe-area-inset-left));
+  border-bottom: 1px solid rgb(255 255 255 / 0.18);
+}
+
+.image-fullscreen-scroll {
+  overflow: auto;
+  -webkit-overflow-scrolling: touch;
+  touch-action: pinch-zoom;
+  display: grid;
+  place-items: start center;
+  padding: 12px;
+}
+
+.image-fullscreen-scroll img {
+  max-width: none;
+  width: min(1200px, 140vw);
+  height: auto;
+  background: #fff;
 }
 
 .ocr-text {

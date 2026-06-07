@@ -252,7 +252,7 @@ function prepareRecord(table, record, deviceId, companyId) {
       scanBatchId: record.scanBatchId || record.batchId || '',
       supplierId: record.supplierId || '',
       invoiceNo: record.invoiceNo || '',
-      invoiceDate: record.invoiceDate || today(),
+      invoiceDate: record.invoiceDate || '',
       pageNumber: Number(record.pageNumber || 0),
       pageCount: Number(record.pageCount || 0),
       invoiceGroupKey: record.invoiceGroupKey || buildInvoiceGroupKey({
@@ -611,7 +611,10 @@ function itemNameParts(item = {}) {
 
 function giftAccountingKey(item = {}) {
   const candidate = promoGroupCandidate(item);
-  return candidate.key || normalizeProductNameAdvanced(item.standardName || item.productNameNormalized || item.normalizedName || item.productNameOriginal || item.name || item.rawName || '');
+  const manual = Number(item.participatesInGiftAllocation || 0) || String(item.promoGroupRule || '').includes('manual');
+  return manual && item.promoGroupId
+    ? item.promoGroupId
+    : candidate.key || normalizeProductNameAdvanced(item.standardName || item.productNameNormalized || item.normalizedName || item.productNameOriginal || item.name || item.rawName || '');
 }
 
 function splitInvoiceRows(items = []) {
@@ -664,19 +667,25 @@ function applyGiftAccounting(items = []) {
   return normalized.map((item) => {
     const key = giftAccountingKey(item) || itemRawName(item);
     const group = groups.get(key) || { chargedQty: item.isFreeItem ? 0 : item.quantity, freeQty: item.isFreeItem ? item.quantity : 0, invoiceAmount: item.isFreeItem ? 0 : item.totalPrice };
+    const quantity = Number(item.quantity || 0);
+    const unitPrice = Number(item.unitPrice || 0);
     const chargedQty = Number(group.chargedQty || 0);
     const freeQty = Number(group.freeQty || 0);
     const totalQty = chargedQty + freeQty;
     const invoiceAmount = Number(group.invoiceAmount || 0);
+    const hasFreeShare = freeQty > 0 && chargedQty > 0;
+    const noDiscount = Number(item.discountAmount || 0) === 0;
+    const originalCost = hasFreeShare ? (invoiceAmount / chargedQty) : unitPrice;
+    const effectiveCost = hasFreeShare ? (invoiceAmount / totalQty) : unitPrice;
     return {
       ...item,
-      chargedQty,
-      freeQty,
-      totalQty,
-      actualQty: totalQty,
-      originalUnitCost: chargedQty > 0 ? invoiceAmount / chargedQty : 0,
-      effectiveUnitCost: totalQty > 0 ? invoiceAmount / totalQty : 0,
-      discountedEffectiveUnitCost: totalQty > 0 ? invoiceAmount / totalQty : 0
+      chargedQty: hasFreeShare ? chargedQty : (item.isFreeItem ? 0 : quantity),
+      freeQty: hasFreeShare ? freeQty : (item.isFreeItem ? quantity : 0),
+      totalQty: hasFreeShare ? totalQty : quantity,
+      actualQty: hasFreeShare ? totalQty : quantity,
+      originalUnitCost: originalCost,
+      effectiveUnitCost: effectiveCost,
+      discountedEffectiveUnitCost: noDiscount ? effectiveCost : Number(item.discountedEffectiveUnitCost || effectiveCost)
     };
   });
 }
@@ -1569,12 +1578,12 @@ function compareInvoiceForDuplicateV2(current, candidate, label) {
     return result;
   }
 
-  if (sameGroupKey && sameInvoiceNo && !sameItems) {
+  if (sameInvoiceNo && sameOrCloseDate && !sameItems) {
     result.sameInvoiceGroup = true;
     result.possibleSameInvoicePages = true;
-    result.multiPageInvoice = false;
+    result.multiPageInvoice = true;
     result.duplicateStatus = 'none';
-    result.sameInvoiceGroupReason = '同供应商同发票号，可能是同一张多页发票，请人工确认合并。';
+    result.sameInvoiceGroupReason = '同供应商同发票号同日期，已按同一张多页发票自动合并。';
     return result;
   }
 
@@ -1590,7 +1599,7 @@ function compareInvoiceForDuplicateV2(current, candidate, label) {
   result.duplicateStatus = 'possible';
   result.sameInvoiceGroup = true;
   result.possibleSameInvoicePages = sameBatch && (!sameAmount || !sameItems);
-  result.multiPageInvoice = false;
+  result.multiPageInvoice = result.possibleSameInvoicePages;
   result.sameInvoiceGroupReason = sameAmount
     ? '同供应商同发票号且日期接近，金额相同但商品明细不同，请人工确认。'
     : '同供应商同发票号且日期接近，但金额不同，可能是多页/同批次发票，请人工确认。';
@@ -1669,11 +1678,18 @@ async function findRecognitionDuplicate(companyId, parsed, totalAmount, currentI
         ...duplicateInfo,
         sameInvoiceGroup: true,
         possibleSameInvoicePages: true,
-        multiPageInvoice: false,
+        multiPageInvoice: true,
         duplicateStatus: 'none',
         mergeInvoiceId: candidate.serverId || candidate.id,
         pageTotal: totalAmount,
         sameInvoiceGroupReason: '同批次同供应商同发票号，可能是同一张多页发票，请人工确认合并。'
+      };
+    }
+    if (duplicateInfo.multiPageInvoice) {
+      return {
+        ...duplicateInfo,
+        mergeInvoiceId: candidate.serverId || candidate.id,
+        pageTotal: totalAmount
       };
     }
     if (duplicateInfo.sameInvoiceGroup && !groupInfo.sameInvoiceGroup) groupInfo = duplicateInfo;
@@ -1712,9 +1728,18 @@ async function saveRecognizedInvoiceFromTask(task, result, options = {}) {
     LIMIT 1
   `, [companyId, mergeInvoiceId, mergeInvoiceId]) : null;
   const invoiceId = mergeInvoiceId || task.invoiceId || id();
+  const pageInvoiceId = existingInvoice ? (task.invoiceId && task.invoiceId !== invoiceId ? task.invoiceId : id()) : '';
+  const existingMergedIds = existingInvoice ? parseAliases(existingInvoice.mergedInvoiceIds) : [];
+  const mergedInvoiceIds = existingInvoice ? [...new Set([...existingMergedIds, pageInvoiceId].filter(Boolean))] : [];
   const invoiceTotal = existingInvoice
-    ? Number(existingInvoice.totalAmount || 0) + totalAmount
+    ? Math.max(Number(existingInvoice.totalAmount || 0), totalAmount)
     : totalAmount;
+  const calculatedTotal = Number(existingInvoice?.calculatedTotal || 0) + itemTotal;
+  const totalDifference = Math.abs(calculatedTotal - invoiceTotal);
+  const needsReview = duplicateCheck.duplicateStatus === 'possible'
+    || totalDifference > 0.05
+    || Number(parsed.dateConfidence ?? 1) < 0.7
+    || !parsed.invoiceDate;
   if (existingInvoice) {
     duplicateCheck.mergedIntoInvoiceId = existingInvoice.serverId || existingInvoice.id;
     duplicateCheck.invoiceTotal = invoiceTotal;
@@ -1725,11 +1750,13 @@ async function saveRecognizedInvoiceFromTask(task, result, options = {}) {
     serverId: invoiceId,
     supplierId: supplier?.serverId || supplier?.id || '',
     invoiceNo: parsed.invoiceNo || '',
-    invoiceDate: parsed.invoiceDate || today(),
+    invoiceDate: parsed.invoiceDate || '',
     pageNumber: Number(parsed.pageNumber || 0),
-    pageCount: Number(parsed.pageCount || 0),
+    pageCount: existingInvoice ? Math.max(Number(existingInvoice.pageCount || 1) + 1, Number(parsed.pageCount || 0), mergedInvoiceIds.length + 1) : Number(parsed.pageCount || 0),
     invoiceGroupKey: parsed.invoiceGroupKey || '',
     isMergedInvoice: Boolean(existingInvoice),
+    isMultiPage: Boolean(existingInvoice),
+    mergedInvoiceIds,
     invoiceLayoutType: parsed.invoiceLayoutType || 'normal_invoice',
     batchId: task.batchId || existingInvoice?.batchId || '',
     scanBatchId: task.batchId || existingInvoice?.scanBatchId || existingInvoice?.batchId || '',
@@ -1739,15 +1766,45 @@ async function saveRecognizedInvoiceFromTask(task, result, options = {}) {
     imagePath: existingInvoice?.imagePath || result.imagePath || task.imagePath || '',
     ocrText: [existingInvoice?.ocrText, result.ocrText].filter(Boolean).join('\n\n--- page ---\n\n'),
     totalAmount: invoiceTotal,
-    calculatedTotal: itemTotal,
-    totalDifference: Math.abs(itemTotal - totalAmount),
-    status: existingInvoice ? 'recognized-multipage' : 'recognized',
+    calculatedTotal,
+    totalDifference,
+    status: needsReview ? 'PENDING_REVIEW' : 'APPROVED',
     createdAt: existingInvoice?.createdAt || task.createdAt || now,
     updatedAt: now
   }, deviceId, companyId);
 
+  const pageInvoice = existingInvoice ? await prepareRecordWithReferences('invoices', {
+    id: pageInvoiceId,
+    localId: pageInvoiceId,
+    serverId: pageInvoiceId,
+    supplierId: invoice.supplierId,
+    invoiceNo: invoice.invoiceNo,
+    invoiceDate: invoice.invoiceDate,
+    pageNumber: invoice.pageCount,
+    pageCount: invoice.pageCount,
+    invoiceGroupKey: invoice.invoiceGroupKey,
+    isMergedInvoice: 0,
+    isMultiPage: 1,
+    mergedInvoiceIds: '[]',
+    invoiceLayoutType: parsed.invoiceLayoutType || 'normal_invoice',
+    batchId: task.batchId || existingInvoice?.batchId || '',
+    scanBatchId: task.batchId || existingInvoice?.scanBatchId || existingInvoice?.batchId || '',
+    duplicateStatus: 'none',
+    recognitionSource: result.recognitionSource || result.source || task.recognitionSource || '',
+    recognitionWarnings: '',
+    imagePath: result.imagePath || task.imagePath || '',
+    ocrText: result.ocrText || '',
+    totalAmount,
+    calculatedTotal: itemTotal,
+    totalDifference: Math.abs(itemTotal - totalAmount),
+    status: 'merged',
+    createdAt: task.createdAt || now,
+    updatedAt: now
+  }, deviceId, companyId) : null;
+
   await withTransaction(async (client) => {
     await upsertRecord('invoices', invoice, client);
+    if (pageInvoice) await upsertRecord('invoices', pageInvoice, client);
     if (!existingInvoice) {
       await run(`
         UPDATE ${quoteTable('invoice_items')}
@@ -2277,16 +2334,24 @@ app.post('/api/invoices/:id/merge', requireAuth, asyncHandler(async (req, res) =
     ...parseAliases(master.mergedInvoiceIds),
     ...mergeRows.map((invoice) => invoice.serverId || invoice.id)
   ])];
-  const totalAmount = allInvoices.reduce((sum, invoice) => sum + Number(invoice.totalAmount || 0), 0);
-  const subtotal = allInvoices.reduce((sum, invoice) => sum + Number(invoice.subtotal || invoice.totalAmount || 0), 0);
-  const tax = allInvoices.reduce((sum, invoice) => sum + Number(invoice.tax || 0), 0);
   const supplierConflict = new Set(allInvoices.map((invoice) => invoice.supplierId || '')).size > 1;
   const invoiceNoConflict = new Set(allInvoices.map((invoice) => invoice.invoiceNo || '')).size > 1;
+  const invoiceDateConflict = new Set(allInvoices.map((invoice) => invoice.invoiceDate || '')).size > 1;
+  const sameInvoiceIdentity = !supplierConflict && !invoiceNoConflict && !invoiceDateConflict;
+  const totalAmount = sameInvoiceIdentity
+    ? Math.max(...allInvoices.map((invoice) => Number(invoice.totalAmount || 0)))
+    : allInvoices.reduce((sum, invoice) => sum + Number(invoice.totalAmount || 0), 0);
+  const subtotal = sameInvoiceIdentity
+    ? Math.max(...allInvoices.map((invoice) => Number(invoice.subtotal || invoice.totalAmount || 0)))
+    : allInvoices.reduce((sum, invoice) => sum + Number(invoice.subtotal || invoice.totalAmount || 0), 0);
+  const tax = sameInvoiceIdentity
+    ? Math.max(...allInvoices.map((invoice) => Number(invoice.tax || 0)))
+    : allInvoices.reduce((sum, invoice) => sum + Number(invoice.tax || 0), 0);
   const amountConflict = new Set(allInvoices.map((invoice) => Number(invoice.totalAmount || 0).toFixed(2))).size > 1;
   const warnings = [
     supplierConflict ? '供应商不同' : '',
     invoiceNoConflict ? '发票号不同' : '',
-    amountConflict ? '金额不同' : ''
+    amountConflict && !sameInvoiceIdentity ? '金额不同' : ''
   ].filter(Boolean);
   const timestamp = nowIso();
 
