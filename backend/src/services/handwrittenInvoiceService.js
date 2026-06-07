@@ -10,19 +10,19 @@ export function detectInvoiceLayoutType(result = {}, ocrText = '') {
   const text = String(ocrText || '').toLowerCase();
   const supplier = String(result.supplierName || '').toLowerCase();
   if (supplier.includes('grand yc')) return 'printed_catalog_handwritten';
-  if (/page\s+\d+\s+of\s+\d+/i.test(text) || Number(result.pageCount || 0) > 1) return 'multi_page';
+  if (extractPageInfo({}, ocrText).pageCount > 1) return 'multi_page';
   if (/catalog|pre[\s-]?printed|handwritten|circle|checked|勾选|圈选|手写/i.test(text)) return 'printed_catalog_handwritten';
   return 'normal_invoice';
 }
 
 export function extractPageInfo(result = {}, ocrText = '') {
-  const text = String(ocrText || '');
-  const pageNumber = Number(result.pageNumber || result.page || 0);
-  const pageCount = Number(result.pageCount || result.pages || 0);
-  const match = text.match(/page\s*(\d+)\s*(?:of|\/)\s*(\d+)/i) || text.match(/(\d+)\s*\/\s*(\d+)\s*pages?/i);
+  const lines = String(ocrText || '').split(/\r?\n/).map((line) => line.trim()).filter(Boolean);
+  const pageLine = lines.find((line) => /^(invoice\s+)?page\s*(no\.?|number|#|:)?\s*\d+\s*(of|\/)\s*\d+$/i.test(line)
+    || /^page\s*(no\.?|number|#|:)\s*\d+$/i.test(line));
+  const match = pageLine?.match(/(\d+)\s*(?:of|\/)\s*(\d+)/i);
   return {
-    pageNumber: pageNumber || Number(match?.[1] || 0),
-    pageCount: pageCount || Number(match?.[2] || 0)
+    pageNumber: Number(match?.[1] || 0),
+    pageCount: Number(match?.[2] || 0)
   };
 }
 

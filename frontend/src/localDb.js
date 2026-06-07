@@ -1,9 +1,9 @@
 import { getCompanyId as getAuthCompanyId } from './api.js';
 
 const DB_NAME = 'InvoicePriceTrackerLocal';
-const DB_VERSION = 7;
+const DB_VERSION = 8;
 
-export const syncTables = ['purchase_batches', 'suppliers', 'invoices', 'invoice_items', 'products', 'price_history', 'invoice_discounts', 'supplier_templates', 'product_aliases', 'product_learning_rules', 'recognition_corrections', 'price_anomalies'];
+export const syncTables = ['purchase_batches', 'suppliers', 'invoices', 'invoice_items', 'products', 'price_history', 'invoice_discounts', 'gift_allocation_rules', 'supplier_templates', 'product_aliases', 'product_learning_rules', 'recognition_corrections', 'price_anomalies'];
 const localOnlyTables = ['invoice_images', 'meta'];
 
 let dbPromise;
@@ -196,6 +196,39 @@ export function applyGiftAccounting(items = []) {
       discountedEffectiveUnitCost: totalQty > 0 ? invoiceAmount / totalQty : 0
     };
   });
+}
+
+function summarizeLocalPromoGroups(items = []) {
+  const groups = new Map();
+  for (const item of items) {
+    const idValue = item.promoGroupId || giftAccountingKey(item) || item.id;
+    if (!idValue) continue;
+    const group = groups.get(idValue) || {
+      id: idValue,
+      name: item.promoGroupName || idValue,
+      rule: item.promoGroupRule || '',
+      productNames: [],
+      chargedQty: 0,
+      freeQty: 0,
+      actualQty: 0,
+      invoiceAmount: 0
+    };
+    group.productNames.push(displayItemName(item));
+    if (Number(item.isFreeItem || 0)) {
+      group.freeQty += moneyNumber(item.quantity);
+    } else {
+      group.chargedQty += moneyNumber(item.quantity);
+      group.invoiceAmount += moneyNumber(item.totalPrice);
+    }
+    group.actualQty = group.chargedQty + group.freeQty;
+    groups.set(idValue, group);
+  }
+  return [...groups.values()].map((group) => ({
+    ...group,
+    productNames: [...new Set(group.productNames.filter(Boolean))],
+    originalUnitCost: group.chargedQty > 0 ? group.invoiceAmount / group.chargedQty : 0,
+    effectiveUnitCost: group.actualQty > 0 ? group.invoiceAmount / group.actualQty : 0
+  })).filter((group) => group.freeQty > 0 || group.productNames.length > 1);
 }
 
 function openDb() {
@@ -561,6 +594,8 @@ export const localDb = {
       subtotal: Number(payload.subtotal || totalAmount || 0),
       tax: Number(payload.tax || 0),
       totalAmount,
+      calculatedTotal: itemTotal,
+      totalDifference: Math.abs(itemTotal - totalAmount),
       isMultiPage: payload.isMultiPage ? 1 : 0,
       mergedInvoiceIds: payload.mergedInvoiceIds || '[]',
       status: 'saved'
@@ -573,8 +608,15 @@ export const localDb = {
         id: rawItem.id || generateId(),
         invoiceId: invoice.id,
         supplierId: supplier?.id || '',
+        rawName: rawItem.rawName || displayItemName(rawItem),
+        nameCn: rawItem.nameCn || '',
+        nameEn: rawItem.nameEn || '',
+        spec: rawItem.spec || '',
+        productNameOriginal: rawItem.productNameOriginal || displayItemName(rawItem),
         productNameNormalized: normalizeProductName(rawItem.productNameNormalized || rawItem.productNameOriginal || ''),
+        normalizedName: normalizeProductName(rawItem.normalizedName || rawItem.productNameNormalized || rawItem.productNameOriginal || ''),
         quantity: Number(rawItem.quantity || 0),
+        unit: rawItem.unit || '',
         unitPrice: Number(rawItem.unitPrice || 0),
         totalPrice: Number(rawItem.totalPrice || 0),
         chargedQty: Number(rawItem.chargedQty || 0),
@@ -588,9 +630,11 @@ export const localDb = {
         promoGroupId: rawItem.promoGroupId || '',
         promoGroupName: rawItem.promoGroupName || '',
         promoGroupRule: rawItem.promoGroupRule || '',
+        participatesInGiftAllocation: rawItem.participatesInGiftAllocation ? 1 : 0,
         isFreeItem: rawItem.isFreeItem ? 1 : 0,
         isDiscountLine: 0,
         candidateOnly: rawItem.candidateOnly ? 1 : 0,
+        correctedByUser: rawItem.correctedByUser ? 1 : 0,
         isHandwrittenQuantity: rawItem.isHandwrittenQuantity ? 1 : 0,
         isHandwrittenPrice: rawItem.isHandwrittenPrice ? 1 : 0,
         isHandwrittenAmount: rawItem.isHandwrittenAmount ? 1 : 0,
@@ -684,7 +728,7 @@ export const localDb = {
     if (!source || !target) throw new Error('Supplier not found');
     const sourceIds = idsFor(source);
     const targetId = target.serverId || target.id;
-    const tablesWithSupplier = ['invoices', 'invoice_items', 'invoice_discounts', 'price_history', 'product_aliases', 'product_learning_rules', 'recognition_corrections', 'price_anomalies', 'supplier_templates'];
+    const tablesWithSupplier = ['invoices', 'invoice_items', 'invoice_discounts', 'gift_allocation_rules', 'price_history', 'product_aliases', 'product_learning_rules', 'recognition_corrections', 'price_anomalies', 'supplier_templates'];
     for (const table of tablesWithSupplier) {
       const rows = await all(table);
       await putMany(table, rows
@@ -706,6 +750,129 @@ export const localDb = {
     await put('invoices', syncFields({ ...detail.invoice, deletedAt }, 'deleted'));
     await putMany('invoice_items', detail.items.map((item) => syncFields({ ...item, deletedAt }, 'deleted')));
     await putMany('invoice_discounts', (detail.discounts || []).map((discount) => syncFields({ ...discount, deletedAt }, 'deleted')));
+  },
+
+  async updateInvoiceItems(invoiceId, nextItems, beforeItems = []) {
+    const detail = await localDb.getInvoice(invoiceId);
+    if (!detail) throw new Error('Invoice not found');
+    const { invoice } = detail;
+    const now = nowIso();
+    const existingById = new Map(beforeItems.map((item) => [item.id, item]));
+    const requestedById = new Map((nextItems || []).map((item) => [item.id, item]));
+    const recalculated = applyGiftAccounting((nextItems || []).map((item) => ({
+      ...item,
+      id: item.id || generateId(),
+      invoiceId: invoice.id,
+      supplierId: invoice.supplierId || item.supplierId || '',
+      rawName: item.rawName || displayItemName(item),
+      nameCn: item.nameCn || '',
+      nameEn: item.nameEn || '',
+      spec: item.spec || '',
+      productNameOriginal: item.productNameOriginal || displayItemName(item),
+      productNameNormalized: normalizeProductName(item.productNameNormalized || item.normalizedName || item.productNameOriginal || displayItemName(item)),
+      normalizedName: normalizeProductName(item.normalizedName || item.productNameNormalized || item.productNameOriginal || displayItemName(item)),
+      quantity: Number(item.quantity || 0),
+      unit: item.unit || '',
+      unitPrice: Number(item.unitPrice || 0),
+      totalPrice: Number(item.totalPrice || 0),
+      isFreeItem: item.isFreeItem ? 1 : 0,
+      participatesInGiftAllocation: item.participatesInGiftAllocation ? 1 : 0,
+      correctedByUser: 1,
+      invoiceDate: invoice.invoiceDate || today(),
+      updatedAt: now
+    })));
+    const savedItems = recalculated.map((item) => syncFields({
+      ...item,
+      chargedQty: Number(item.chargedQty || 0),
+      freeQty: Number(item.freeQty || 0),
+      totalQty: Number(item.totalQty || item.actualQty || item.quantity || 0),
+      actualQty: Number(item.actualQty || item.totalQty || item.quantity || 0),
+      originalUnitCost: Number(requestedById.get(item.id)?.manualCostOverride ? requestedById.get(item.id)?.originalUnitCost : (item.originalUnitCost || item.unitPrice || 0)),
+      effectiveUnitCost: Number(requestedById.get(item.id)?.manualCostOverride ? requestedById.get(item.id)?.effectiveUnitCost : (item.effectiveUnitCost || item.unitPrice || 0)),
+      discountedEffectiveUnitCost: Number(item.discountedEffectiveUnitCost || (requestedById.get(item.id)?.manualCostOverride ? requestedById.get(item.id)?.effectiveUnitCost : item.effectiveUnitCost) || item.unitPrice || 0),
+      discountAmount: Number(item.discountAmount || 0),
+      candidateOnly: item.candidateOnly ? 1 : 0,
+      isDiscountLine: item.isDiscountLine ? 1 : 0
+    }));
+    await putMany('invoice_items', savedItems);
+
+    const calculatedTotal = savedItems
+      .filter((item) => !Number(item.isDiscountLine || 0) && !Number(item.candidateOnly || 0))
+      .reduce((sum, item) => sum + Number(item.totalPrice || 0), 0);
+    await put('invoices', syncFields({
+      ...invoice,
+      calculatedTotal,
+      totalDifference: Math.abs(calculatedTotal - Number(invoice.totalAmount || 0))
+    }));
+
+    const correctionFields = ['nameCn', 'nameEn', 'spec', 'productNameOriginal', 'productNameNormalized', 'quantity', 'unit', 'unitPrice', 'totalPrice', 'isFreeItem', 'promoGroupId', 'promoGroupName', 'chargedQty', 'freeQty', 'actualQty', 'effectiveUnitCost'];
+    const corrections = [];
+    for (const item of savedItems) {
+      const before = existingById.get(item.id) || {};
+      for (const fieldName of correctionFields) {
+        const beforeValue = String(before[fieldName] ?? '');
+        const afterValue = String(item[fieldName] ?? '');
+        if (beforeValue !== afterValue) {
+          corrections.push(syncFields({
+            fieldName: `invoice_items.${fieldName}`,
+            beforeValue,
+            afterValue,
+            supplierId: invoice.supplierId || '',
+            invoiceTemplateId: '',
+            invoiceId: invoice.id,
+            invoiceItemId: item.id
+          }));
+        }
+      }
+    }
+    if (corrections.length) await putMany('recognition_corrections', corrections);
+
+    for (const item of savedItems.filter((entry) => !Number(entry.isDiscountLine || 0) && !Number(entry.candidateOnly || 0))) {
+      const product = await upsertProductForItem(item);
+      await put('product_aliases', syncFields({
+        keyword: normalizeProductName(item.rawName || item.productNameOriginal || ''),
+        aliasName: item.rawName || item.productNameOriginal || '',
+        normalizedAlias: normalizeProductName(item.rawName || item.productNameOriginal || ''),
+        standardName: item.productNameNormalized || item.productNameOriginal || '',
+        productId: product?.id || item.productId || '',
+        supplierId: invoice.supplierId || '',
+        rawName: item.rawName || '',
+        nameCn: item.nameCn || '',
+        nameEn: item.nameEn || '',
+        spec: item.spec || '',
+        unit: item.unit || '',
+        confidence: 1,
+        createdByUser: 1
+      }));
+      await put('price_history', syncFields({
+        productId: product?.id || item.productId || '',
+        invoiceItemId: item.id,
+        supplierId: invoice.supplierId || '',
+        price: item.discountedEffectiveUnitCost || item.effectiveUnitCost || item.unitPrice,
+        quantity: item.actualQty || item.totalQty || item.quantity,
+        unit: item.unit || '',
+        invoiceDate: invoice.invoiceDate || today(),
+        invoiceNo: invoice.invoiceNo || ''
+      }));
+    }
+
+    const groups = summarizeLocalPromoGroups(savedItems);
+    if (groups.length) {
+      await putMany('gift_allocation_rules', groups.map((group) => syncFields({
+        supplierId: invoice.supplierId || '',
+        ruleKey: group.id,
+        productNames: JSON.stringify(group.productNames),
+        promoGroupName: group.name,
+        promoGroupRule: group.rule,
+        chargedQty: group.chargedQty,
+        freeQty: group.freeQty,
+        actualQty: group.actualQty,
+        invoiceAmount: group.invoiceAmount,
+        originalUnitCost: group.originalUnitCost,
+        effectiveUnitCost: group.effectiveUnitCost
+      })));
+    }
+    return localDb.getInvoice(invoiceId);
   },
 
   async searchProducts(query) {

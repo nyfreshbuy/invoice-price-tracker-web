@@ -269,6 +269,8 @@ function prepareRecord(table, record, deviceId, companyId) {
       subtotal: Number(record.subtotal || record.totalAmount || 0),
       tax: Number(record.tax || 0),
       totalAmount: Number(record.totalAmount || 0),
+      calculatedTotal: Number(record.calculatedTotal || 0),
+      totalDifference: Number(record.totalDifference || 0),
       duplicateStatus: record.duplicateStatus || 'none',
       recognitionSource: record.recognitionSource || '',
       recognitionWarnings: Array.isArray(record.recognitionWarnings) ? JSON.stringify(record.recognitionWarnings) : (record.recognitionWarnings || ''),
@@ -285,6 +287,9 @@ function prepareRecord(table, record, deviceId, companyId) {
       supplierId: record.supplierId || '',
       productId: record.productId || '',
       rawName,
+      nameCn: record.nameCn || '',
+      nameEn: record.nameEn || '',
+      spec: record.spec || '',
       productNameOriginal: standardName,
       productNameNormalized: normalizedName,
       normalizedName,
@@ -304,9 +309,11 @@ function prepareRecord(table, record, deviceId, companyId) {
       promoGroupId: record.promoGroupId || '',
       promoGroupName: record.promoGroupName || '',
       promoGroupRule: record.promoGroupRule || '',
+      participatesInGiftAllocation: record.participatesInGiftAllocation ? 1 : 0,
       isFreeItem: record.isFreeItem ? 1 : 0,
       isDiscountLine: record.isDiscountLine ? 1 : 0,
       candidateOnly: record.candidateOnly ? 1 : 0,
+      correctedByUser: record.correctedByUser ? 1 : 0,
       isHandwrittenQuantity: record.isHandwrittenQuantity ? 1 : 0,
       isHandwrittenPrice: record.isHandwrittenPrice ? 1 : 0,
       isHandwrittenAmount: record.isHandwrittenAmount ? 1 : 0,
@@ -332,6 +339,22 @@ function prepareRecord(table, record, deviceId, companyId) {
       amount: Number(record.amount || 0),
       discountType: record.discountType || 'unknown',
       appliedToProductIds: Array.isArray(record.appliedToProductIds) ? record.appliedToProductIds.join(',') : (record.appliedToProductIds || '')
+    };
+  }
+  if (table === 'gift_allocation_rules') {
+    return {
+      ...base,
+      supplierId: record.supplierId || '',
+      ruleKey: record.ruleKey || '',
+      productNames: Array.isArray(record.productNames) ? JSON.stringify(record.productNames) : (record.productNames || '[]'),
+      promoGroupName: record.promoGroupName || '',
+      promoGroupRule: record.promoGroupRule || '',
+      chargedQty: Number(record.chargedQty || 0),
+      freeQty: Number(record.freeQty || 0),
+      actualQty: Number(record.actualQty || 0),
+      invoiceAmount: Number(record.invoiceAmount || 0),
+      originalUnitCost: Number(record.originalUnitCost || 0),
+      effectiveUnitCost: Number(record.effectiveUnitCost || 0)
     };
   }
   if (table === 'product_aliases') {
@@ -453,6 +476,9 @@ async function prepareRecordWithReferences(table, record, deviceId, companyId, c
   }
   if (table === 'invoice_discounts') {
     prepared.invoiceId = await resolveReference('invoices', prepared.invoiceId, deviceId, companyId, client);
+    prepared.supplierId = await resolveReference('suppliers', prepared.supplierId, deviceId, companyId, client);
+  }
+  if (table === 'gift_allocation_rules') {
     prepared.supplierId = await resolveReference('suppliers', prepared.supplierId, deviceId, companyId, client);
   }
   if (table === 'product_aliases' || table === 'product_learning_rules') {
@@ -1522,7 +1548,6 @@ function compareInvoiceForDuplicateV2(current, candidate, label) {
   const sameItems = invoiceItemsNearlyEqual(current, candidate);
   const sameOrCloseDate = daysBetweenDates(current.invoiceDate, candidate.invoiceDate) <= 1;
   const sameBatch = Boolean(current.batchId && candidate.batchId && current.batchId === candidate.batchId);
-  const differentPageNumber = Boolean(current.pageNumber && candidate.pageNumber && current.pageNumber !== candidate.pageNumber);
   const sameGroupKey = Boolean(current.invoiceGroupKey && candidate.invoiceGroupKey && current.invoiceGroupKey === candidate.invoiceGroupKey);
 
   result.sameSupplierBatch = true;
@@ -1536,17 +1561,20 @@ function compareInvoiceForDuplicateV2(current, candidate, label) {
   }
 
   if (!sameOrCloseDate) {
-    result.duplicateStatus = 'none';
-    result.possibleDuplicateReason = `${label}: same supplier and invoiceNo, but invoiceDate differs by more than 1 day.`;
+    result.duplicateStatus = 'possible';
+    result.sameInvoiceGroup = true;
+    result.possibleSameInvoicePages = true;
+    result.possibleDuplicateReason = `${label}: same supplier and invoiceNo, but invoiceDate conflicts. Please confirm the correct date.`;
+    result.sameInvoiceGroupReason = '同供应商同发票号但日期冲突，请人工确认，不自动拆分或自动合并。';
     return result;
   }
 
-  if ((sameGroupKey || (sameInvoiceNo && sameAmount)) && differentPageNumber) {
+  if (sameGroupKey && sameInvoiceNo && !sameItems) {
     result.sameInvoiceGroup = true;
     result.possibleSameInvoicePages = true;
-    result.multiPageInvoice = true;
+    result.multiPageInvoice = false;
     result.duplicateStatus = 'none';
-    result.sameInvoiceGroupReason = 'Same invoice number with a different page number, treated as multipage rather than duplicate.';
+    result.sameInvoiceGroupReason = '同供应商同发票号，可能是同一张多页发票，请人工确认合并。';
     return result;
   }
 
@@ -1562,6 +1590,7 @@ function compareInvoiceForDuplicateV2(current, candidate, label) {
   result.duplicateStatus = 'possible';
   result.sameInvoiceGroup = true;
   result.possibleSameInvoicePages = sameBatch && (!sameAmount || !sameItems);
+  result.multiPageInvoice = false;
   result.sameInvoiceGroupReason = sameAmount
     ? '同供应商同发票号且日期接近，金额相同但商品明细不同，请人工确认。'
     : '同供应商同发票号且日期接近，但金额不同，可能是多页/同批次发票，请人工确认。';
@@ -1640,11 +1669,11 @@ async function findRecognitionDuplicate(companyId, parsed, totalAmount, currentI
         ...duplicateInfo,
         sameInvoiceGroup: true,
         possibleSameInvoicePages: true,
-        multiPageInvoice: true,
+        multiPageInvoice: false,
         duplicateStatus: 'none',
         mergeInvoiceId: candidate.serverId || candidate.id,
         pageTotal: totalAmount,
-        sameInvoiceGroupReason: '同批次同供应商同发票号，金额和商品不同，已自动判定为同一发票多页并合并。'
+        sameInvoiceGroupReason: '同批次同供应商同发票号，可能是同一张多页发票，请人工确认合并。'
       };
     }
     if (duplicateInfo.sameInvoiceGroup && !groupInfo.sameInvoiceGroup) groupInfo = duplicateInfo;
@@ -1710,6 +1739,8 @@ async function saveRecognizedInvoiceFromTask(task, result, options = {}) {
     imagePath: existingInvoice?.imagePath || result.imagePath || task.imagePath || '',
     ocrText: [existingInvoice?.ocrText, result.ocrText].filter(Boolean).join('\n\n--- page ---\n\n'),
     totalAmount: invoiceTotal,
+    calculatedTotal: itemTotal,
+    totalDifference: Math.abs(itemTotal - totalAmount),
     status: existingInvoice ? 'recognized-multipage' : 'recognized',
     createdAt: existingInvoice?.createdAt || task.createdAt || now,
     updatedAt: now
@@ -1736,6 +1767,10 @@ async function saveRecognizedInvoiceFromTask(task, result, options = {}) {
         id: itemId,
         localId: itemId,
         serverId: itemId,
+        rawName: item.rawName || item.name || item.productNameOriginal || '',
+        nameCn: item.nameCn || '',
+        nameEn: item.nameEn || '',
+        spec: item.spec || '',
         productNameOriginal: item.productNameOriginal || item.name || '',
         productNameNormalized: item.productNameNormalized || item.normalizedName || item.standardName || item.name || '',
         category: item.category || '',
@@ -1754,6 +1789,7 @@ async function saveRecognizedInvoiceFromTask(task, result, options = {}) {
         promoGroupId: item.promoGroupId,
         promoGroupName: item.promoGroupName,
         promoGroupRule: item.promoGroupRule,
+        participatesInGiftAllocation: item.participatesInGiftAllocation ? 1 : 0,
         isFreeItem: item.isFreeItem ? 1 : 0,
         candidateOnly: item.candidateOnly ? 1 : 0,
         isHandwrittenQuantity: item.isHandwrittenQuantity ? 1 : 0,
@@ -1934,7 +1970,7 @@ app.post('/api/suppliers/:id/merge', requireAuth, asyncHandler(async (req, res) 
 
   await withTransaction(async (client) => {
     await upsertRecord('suppliers', updatedTarget, client);
-    for (const table of ['invoices', 'invoice_items', 'invoice_discounts', 'price_history', 'product_aliases', 'product_learning_rules', 'recognition_corrections', 'price_anomalies', 'supplier_templates']) {
+    for (const table of ['invoices', 'invoice_items', 'invoice_discounts', 'gift_allocation_rules', 'price_history', 'product_aliases', 'product_learning_rules', 'recognition_corrections', 'price_anomalies', 'supplier_templates']) {
       await run(`
         UPDATE ${quoteTable(table)}
         SET ${quoteIdentifier('supplierId')} = ?, ${quoteIdentifier('updatedAt')} = ?

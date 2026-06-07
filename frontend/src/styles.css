@@ -15,10 +15,19 @@
   box-sizing: border-box;
 }
 
+html,
 body {
   margin: 0;
   background: var(--bg);
   color: var(--text);
+  max-width: 100vw;
+  overflow-x: hidden;
+}
+
+#root,
+.app-shell {
+  max-width: 100vw;
+  overflow-x: hidden;
 }
 
 button,
@@ -33,9 +42,7 @@ a {
   text-decoration: none;
 }
 
-.app-shell {
-  min-height: 100dvh;
-}
+.app-shell { min-height: 100dvh; }
 
 .auth-shell {
   min-height: 100dvh;
@@ -85,9 +92,11 @@ a {
 }
 
 .main {
-  max-width: 960px;
+  width: min(960px, 100%);
+  max-width: 100vw;
   margin: 0 auto;
-  padding: calc(16px + env(safe-area-inset-top)) 16px 96px;
+  padding: calc(16px + env(safe-area-inset-top)) max(12px, env(safe-area-inset-right)) calc(96px + env(safe-area-inset-bottom)) max(12px, env(safe-area-inset-left));
+  overflow-x: hidden;
 }
 
 .offline-banner {
@@ -187,6 +196,8 @@ a {
 .section > .field,
 .search-bar,
 .info-row {
+  min-width: 0;
+  max-width: 100%;
   background: var(--panel);
   border: 1px solid var(--line);
   border-radius: 8px;
@@ -200,6 +211,7 @@ a {
   min-height: 68px;
   margin-bottom: 8px;
   padding: 12px;
+  overflow-wrap: anywhere;
 }
 
 .action-icon {
@@ -217,6 +229,8 @@ a {
 .row-card p,
 .detail-item p {
   color: var(--muted);
+  overflow-wrap: anywhere;
+  word-break: break-word;
 }
 
 .card-list {
@@ -230,11 +244,22 @@ a {
   justify-content: space-between;
   gap: 12px;
   padding: 14px;
+  min-width: 0;
 }
 
 .row-card h3,
 .row-card p {
   margin: 0 0 4px;
+  max-width: 100%;
+  overflow-wrap: anywhere;
+  word-break: break-word;
+}
+
+.row-card > div,
+.detail-item > div,
+.item-editor > div,
+.info-row > * {
+  min-width: 0;
 }
 
 .row-actions {
@@ -409,6 +434,7 @@ textarea {
 
 .invoice-image {
   width: 100%;
+  max-width: 100%;
   max-height: 520px;
   object-fit: contain;
   border-radius: 8px;
@@ -427,8 +453,12 @@ textarea {
 }
 
 .ocr-text {
+  max-width: 100%;
+  max-height: 360px;
   overflow: auto;
   white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  word-break: break-word;
   background: var(--panel);
   border: 1px solid var(--line);
   border-radius: 8px;
@@ -441,17 +471,32 @@ textarea {
   z-index: 30;
   display: grid;
   place-items: end center;
-  padding: 16px;
+  padding: calc(16px + env(safe-area-inset-top)) max(16px, env(safe-area-inset-right)) calc(16px + env(safe-area-inset-bottom)) max(16px, env(safe-area-inset-left));
   background: rgb(0 0 0 / 0.32);
 }
 
 .dialog {
   width: min(640px, 100%);
+  max-width: 100%;
   max-height: min(760px, 90dvh);
   overflow: auto;
   background: var(--bg);
   border-radius: 12px;
   padding: 16px;
+}
+
+.collapsible-toggle {
+  width: 100%;
+  display: flex;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 10px 12px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--panel);
+  color: var(--text);
+  font-weight: 700;
+  overflow-wrap: anywhere;
 }
 
 .dialog-header {

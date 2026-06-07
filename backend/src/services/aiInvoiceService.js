@@ -53,11 +53,11 @@ export async function recognizeInvoiceWithAI(imagePath, options = {}) {
                 name: '卡奇锅巴（香辣味） K.Q. Rice Chips',
                 normalizedName: '卡奇锅巴（香辣味） k.q. rice chips'
               }),
-              'Return invoiceDate as yyyy-MM-dd when possible.',
+              'Return invoiceDate as yyyy-MM-dd. For US supplier invoices, parse MM/DD/YYYY as month/day/year, so 06/01/2026 must be 2026-06-01. If date confidence is low, leave invoiceDate empty and add a warning.',
               'Use the invoice bottom Total as totalAmount. Do not overwrite it with the item sum.',
               'Item totals are only for validation.',
               'If the invoice has a page total, put it in totalAmount for that page.',
-              'Detect multipage invoices. Return pageNumber and pageCount when printed, such as "Page 1 of 2".',
+              'Do not infer pageNumber/pageCount from photo viewer overlays, upload order, filenames, or preview counters. Return pageNumber/pageCount only when the invoice OCR text contains an explicit invoice PAGE field.',
               'Set invoiceGroupKey to supplierName + invoiceNo + totalAmount when possible.',
               'Detect invoiceLayoutType as one of: normal_invoice, printed_catalog_handwritten, multi_page, mixed.',
               'For printed catalog handwritten forms, do not return every catalog item as a purchased item.',

@@ -22,8 +22,13 @@ import { generateId, localDb, today } from './localDb.js';
 import { getSyncSnapshot, startAutoSync, syncNow } from './syncService.js';
 
 const emptyItem = () => ({
+  rawName: '',
+  nameCn: '',
+  nameEn: '',
+  spec: '',
   productNameOriginal: '',
   productNameNormalized: '',
+  normalizedName: '',
   category: '',
   quantity: 0,
   unit: '',
@@ -40,9 +45,11 @@ const emptyItem = () => ({
   promoGroupId: '',
   promoGroupName: '',
   promoGroupRule: '',
+  participatesInGiftAllocation: false,
   isFreeItem: false,
   isDiscountLine: false,
   candidateOnly: false,
+  correctedByUser: false,
   isHandwrittenQuantity: false,
   isHandwrittenPrice: false,
   isHandwrittenAmount: false,
@@ -359,6 +366,7 @@ function BatchImportPage() {
   const [message, setMessage] = useState('');
   const [saving, setSaving] = useState(false);
   const [batchId, setBatchId] = useState('');
+  const [selectedMergeIds, setSelectedMergeIds] = useState([]);
 
   useLocalReload(() => localDb.getInvoices().then(setExistingInvoices));
 
@@ -368,6 +376,8 @@ function BatchImportPage() {
   const nonDuplicateEntries = successfulEntries.filter((entry) => !entry.isDuplicate);
   const sameInvoiceGroupEntries = successfulEntries.filter((entry) => entry.sameInvoiceGroup && !entry.isDuplicate);
   const possibleDuplicateEntries = successfulEntries.filter((entry) => entry.duplicateStatus === 'possible' && !entry.isDuplicate);
+  const failedEntries = analyzedEntries.filter((entry) => entry.status === 'failed');
+  const mergeableEntries = analyzedEntries.filter((entry) => entry.status === 'success' && (entry.task?.invoiceId || entry.result?.invoiceId));
   const activeTaskIds = entries.filter((entry) => entry.taskId && !['success', 'failed'].includes(entry.status)).map((entry) => entry.taskId);
 
   useEffect(() => {
@@ -455,6 +465,51 @@ function BatchImportPage() {
     navigate('/recognition-tasks');
   }
 
+  async function retryEntry(entry) {
+    updateEntry(entry.id, { status: 'recognizing', error: '' });
+    const data = new FormData();
+    data.append('image', entry.file);
+    data.append('batchId', batchId || generateId());
+    try {
+      const created = await api.createRecognitionTask(data);
+      updateEntry(entry.id, {
+        taskId: created.taskId,
+        task: created.task,
+        status: taskStatusToEntryStatus(created.task?.status || 'pending'),
+        result: created.task?.result || null,
+        error: ''
+      });
+    } catch (error) {
+      updateEntry(entry.id, { status: 'failed', error: error.message || '识别失败' });
+    }
+  }
+
+  function deleteEntry(id) {
+    setEntries((current) => current.filter((entry) => entry.id !== id));
+    setSelectedMergeIds((current) => current.filter((entryId) => entryId !== id));
+  }
+
+  function toggleBatchMerge(id) {
+    setSelectedMergeIds((current) => current.includes(id) ? current.filter((entry) => entry !== id) : [...current, id]);
+  }
+
+  async function mergeSelectedBatchInvoices() {
+    const selected = mergeableEntries.filter((entry) => selectedMergeIds.includes(entry.id));
+    if (selected.length < 2) {
+      setMessage('请至少选择两张已识别成功的发票进行合并。');
+      return;
+    }
+    const invoiceIds = selected.map((entry) => entry.task?.invoiceId || entry.result?.invoiceId).filter(Boolean);
+    try {
+      const result = await api.mergeInvoice(invoiceIds[0], invoiceIds.slice(1));
+      await syncNow();
+      setMessage(result.message || '合并成功');
+      navigate(`/invoices/${encodeURIComponent(result.invoiceId || invoiceIds[0])}`);
+    } catch (error) {
+      setMessage(error.message || '合并失败');
+    }
+  }
+
   async function controlBatch(action) {
     if (!batchId) return;
     try {
@@ -502,7 +557,17 @@ function BatchImportPage() {
         <Info label="重复发票" value={analyzedEntries.filter((entry) => entry.duplicateStatus === 'confirmed' || entry.isDuplicate).length} />
         <Info label="疑似重复" value={possibleDuplicateEntries.length} />
         <Info label="同号不同金额" value={sameInvoiceGroupEntries.length} />
+        <Info label="失败" value={failedEntries.length} />
         <Info label="可保存" value={nonDuplicateEntries.length} />
+        {failedEntries.length > 0 && (
+          <div className="detail-item">
+            <strong>错误列表</strong>
+            {failedEntries.map((entry) => <p key={entry.id}>{entry.fileName}: {entry.error || '识别失败'}</p>)}
+          </div>
+        )}
+        {mergeableEntries.length >= 2 && (
+          <button type="button" className="secondary-button" onClick={mergeSelectedBatchInvoices}>合并选中的发票</button>
+        )}
       </Section>
 
       {Object.entries(groupedEntries).map(([supplierName, supplierEntries]) => (
@@ -517,6 +582,9 @@ function BatchImportPage() {
               <img className="invoice-preview" src={entry.previewUrl} alt={entry.fileName} />
               {entry.status === 'success' && (
                 <>
+                  {(entry.task?.invoiceId || entry.result?.invoiceId) && (
+                    <label className="hint"><input type="checkbox" checked={selectedMergeIds.includes(entry.id)} onChange={() => toggleBatchMerge(entry.id)} /> 选择用于合并</label>
+                  )}
                   <p>发票号：{entry.parsed.invoiceNo || '-'}</p>
                   <p>日期：{entry.parsed.invoiceDate || '-'} · 金额：{money(entry.parsed.totalAmount || entry.itemTotal)}</p>
                   <p>识别来源：{entry.result.recognitionSource || sourceLabel(entry.result.source)} · 商品 {entry.parsed.items?.length || 0} 行</p>
@@ -526,7 +594,16 @@ function BatchImportPage() {
                   {entry.sequenceNote && <p className="hint">{entry.sequenceNote}</p>}
                 </>
               )}
-              {entry.status === 'failed' && <p className="error">{entry.error}</p>}
+              {entry.status === 'failed' && (
+                <>
+                  <p className="error">{entry.error}</p>
+                  <div className="row-actions">
+                    <button type="button" onClick={() => retryEntry(entry)}>重新识别</button>
+                    <button type="button" onClick={() => navigate('/invoices/new')}>手动编辑</button>
+                    <button type="button" className="text-danger" onClick={() => deleteEntry(entry.id)}>删除</button>
+                  </div>
+                </>
+              )}
             </div>
           ))}
         </Section>
@@ -1070,6 +1147,9 @@ function InvoiceDetailPageWithGifts() {
   const navigate = useNavigate();
   const [detail, setDetail] = useState(null);
   const [recognitionTask, setRecognitionTask] = useState(null);
+  const [editingItem, setEditingItem] = useState(null);
+  const [editingPromoGroups, setEditingPromoGroups] = useState(false);
+  const [detailMessage, setDetailMessage] = useState('');
 
   const loadDetail = () => localDb.getInvoice(id).then(setDetail);
   useLocalReload(loadDetail, [id]);
@@ -1097,6 +1177,24 @@ function InvoiceDetailPageWithGifts() {
     navigate('/invoices');
   }
 
+  async function saveEditedItems(nextItems) {
+    const updated = await localDb.updateInvoiceItems(id, nextItems, detail?.items || []);
+    setDetail(updated);
+    setDetailMessage('已保存人工修改，并写入学习记录');
+    syncNow();
+  }
+
+  async function saveEditedItem(nextItem) {
+    const nextItems = (detail?.items || []).map((item) => item.id === nextItem.id ? nextItem : item);
+    await saveEditedItems(nextItems);
+    setEditingItem(null);
+  }
+
+  async function savePromoGroups(nextItems) {
+    await saveEditedItems(nextItems);
+    setEditingPromoGroups(false);
+  }
+
   if (!detail) return <Page title="发票详情"><EmptyState text="未找到发票" /></Page>;
 
   const { invoice, items, discounts = [], mergedInvoices = [] } = detail;
@@ -1110,6 +1208,7 @@ function InvoiceDetailPageWithGifts() {
   const finalSavedResult = { invoice, items, discounts, mergedInvoices };
   return (
     <Page title="发票详情" action={<button className="danger-button" onClick={remove}><Trash2 size={16} />删除</button>}>
+      {detailMessage && <p className="success-text">{detailMessage}</p>}
       <Section title="发票信息">
         <Info label="供应商" value={invoice.supplierName || '未命名供应商'} />
         <Info label="发票号" value={invoice.invoiceNo || '-'} />
@@ -1119,6 +1218,9 @@ function InvoiceDetailPageWithGifts() {
         <Info label="发票版式" value={invoice.invoiceLayoutType || 'normal_invoice'} />
         <Info label="多页合并" value={Number(invoice.isMergedInvoice || 0) ? '是' : '否'} />
         <Info label="AI/OCR 来源" value={sourceLabel(invoice.recognitionSource)} />
+        <Info label="usedTemplate" value={recognitionTask?.usedTemplate || recognitionTask?.result?.usedTemplate ? "yes" : "no"} />
+        <Info label="usedCorrection" value={items.some((item) => Number(item.correctedByUser || 0)) ? "yes" : "no"} />
+        <Info label="confidence" value={recognitionTask?.result?.parsed?.confidence ?? recognitionTask?.result?.confidence ?? "-"} />
         <Info label="重复状态" value={duplicateStatusLabel(invoice.duplicateStatus)} />
         <Info label="同步状态" value={statusText(invoice.syncStatus)} />
       </Section>
@@ -1131,10 +1233,12 @@ function InvoiceDetailPageWithGifts() {
           <Info label="发票金额" value={money(giftSummary.invoiceAmount)} />
           <Info label="原始单价" value={money(giftSummary.originalUnitCost)} />
           <Info label="实际成本" value={money(giftSummary.effectiveUnitCost)} />
+          <button className="secondary-button" type="button" onClick={() => setEditingPromoGroups(true)}>编辑分摊组</button>
         </Section>
       )}
       {promoGroups.length > 0 && (
         <Section title="赠品分摊组">
+          <button className="secondary-button" type="button" onClick={() => setEditingPromoGroups(true)}>人工分摊</button>
           {promoGroups.map((group) => (
             <div className="detail-item" key={group.id}>
               <strong>{group.name}</strong>
@@ -1172,7 +1276,7 @@ function InvoiceDetailPageWithGifts() {
       <Section title="商品明细">
         {items.map((item) => (
           <div className="detail-item" key={item.id}>
-            <strong>{item.productNameOriginal}</strong>
+            <div className="split"><strong>{item.productNameOriginal}</strong><button type="button" onClick={() => setEditingItem(item)}>编辑</button></div>
             <p>标准名：{item.productNameNormalized || '-'}</p>
             <p>数量 {numberText(item.quantity)} {item.unit} · 原单价 {money(item.unitPrice)} · 总价 {money(item.totalPrice)}</p>
             <p>是否赠品：{Number(item.isFreeItem || 0) ? `是（${item.freeReason || '免费行'}）` : '否'} · 收费数量 {numberText(item.chargedQty)} · 免费数量 {numberText(item.freeQty)} · 实际数量 {numberText(item.totalQty)}</p>
@@ -1181,14 +1285,155 @@ function InvoiceDetailPageWithGifts() {
           </div>
         ))}
       </Section>
-      <Section title="查看OCR原文"><pre className="ocr-text">{invoice.ocrText || '无 OCR 内容'}</pre></Section>
-      <Section title="查看AI识别JSON">
+      <CollapsibleSection title="查看 OCR 原文">
+        <pre className="ocr-text">{invoice.ocrText || '无 OCR 内容'}</pre>
+      </CollapsibleSection>
+      <CollapsibleSection title="查看 AI 识别 JSON">
         <pre className="ocr-text">{recognitionTask?.result ? JSON.stringify(recognitionTask.result, null, 2) : '未找到关联 AI 识别 JSON'}</pre>
-      </Section>
-      <Section title="查看最终保存结果">
+      </CollapsibleSection>
+      <CollapsibleSection title="查看最终保存结果">
         <pre className="ocr-text">{JSON.stringify(finalSavedResult, null, 2)}</pre>
-      </Section>
+      </CollapsibleSection>
+      {editingItem && (
+        <InvoiceItemEditDialog
+          item={editingItem}
+          onClose={() => setEditingItem(null)}
+          onSave={saveEditedItem}
+        />
+      )}
+      {editingPromoGroups && (
+        <PromoAllocationDialog
+          items={items}
+          onClose={() => setEditingPromoGroups(false)}
+          onSave={savePromoGroups}
+        />
+      )}
     </Page>
+  );
+}
+
+function InvoiceItemEditDialog({ item, onClose, onSave }) {
+  const [form, setForm] = useState(() => ({
+    ...emptyItem(),
+    ...item,
+    nameCn: item.nameCn || '',
+    nameEn: item.nameEn || '',
+    spec: item.spec || '',
+    quantity: Number(item.quantity || 0),
+    unitPrice: Number(item.unitPrice || 0),
+    totalPrice: Number(item.totalPrice || 0),
+    isFreeItem: Boolean(Number(item.isFreeItem || 0)),
+    participatesInGiftAllocation: Boolean(Number(item.participatesInGiftAllocation || 0))
+  }));
+
+  function update(field, value) {
+    setForm((current) => ({ ...current, [field]: value }));
+  }
+
+  function save() {
+    const name = form.productNameOriginal || [form.nameCn, form.nameEn].filter(Boolean).join(' ');
+    onSave({
+      ...form,
+      productNameOriginal: name,
+      productNameNormalized: form.productNameNormalized || name,
+      quantity: Number(form.quantity || 0),
+      unitPrice: Number(form.unitPrice || 0),
+      totalPrice: Number(form.totalPrice || 0),
+      isFreeItem: form.isFreeItem ? 1 : 0,
+      participatesInGiftAllocation: form.participatesInGiftAllocation ? 1 : 0,
+      correctedByUser: 1
+    });
+  }
+
+  return (
+    <Dialog title="编辑商品明细" onClose={onClose}>
+      <div className="item-editor">
+        <label className="field"><span>中文名</span><input value={form.nameCn || ''} onChange={(event) => update('nameCn', event.target.value)} /></label>
+        <label className="field"><span>英文名</span><input value={form.nameEn || ''} onChange={(event) => update('nameEn', event.target.value)} /></label>
+        <label className="field"><span>商品名称</span><input value={form.productNameOriginal || ''} onChange={(event) => update('productNameOriginal', event.target.value)} /></label>
+        <label className="field"><span>标准名</span><input value={form.productNameNormalized || ''} onChange={(event) => update('productNameNormalized', event.target.value)} /></label>
+        <label className="field"><span>规格</span><input value={form.spec || ''} onChange={(event) => update('spec', event.target.value)} /></label>
+        <div className="grid-2">
+          <label className="field"><span>数量</span><input type="number" value={form.quantity || 0} onChange={(event) => update('quantity', event.target.value)} /></label>
+          <label className="field"><span>单位</span><input value={form.unit || ''} onChange={(event) => update('unit', event.target.value)} /></label>
+          <label className="field"><span>单价</span><input type="number" value={form.unitPrice || 0} onChange={(event) => update('unitPrice', event.target.value)} /></label>
+          <label className="field"><span>金额</span><input type="number" value={form.totalPrice || 0} onChange={(event) => update('totalPrice', event.target.value)} /></label>
+        </div>
+        <label className="field"><span>赠品</span><input type="checkbox" checked={Boolean(form.isFreeItem)} onChange={(event) => update('isFreeItem', event.target.checked)} /></label>
+        <label className="field"><span>参与赠品分摊</span><input type="checkbox" checked={Boolean(form.participatesInGiftAllocation)} onChange={(event) => update('participatesInGiftAllocation', event.target.checked)} /></label>
+        <label className="field"><span>分摊组</span><input value={form.promoGroupName || ''} onChange={(event) => update('promoGroupName', event.target.value)} /></label>
+        <label className="field"><span>备注</span><input value={form.notes || ''} onChange={(event) => update('notes', event.target.value)} /></label>
+      </div>
+      <div className="dialog-actions">
+        <button className="secondary-button" type="button" onClick={onClose}>取消</button>
+        <button className="primary-button" type="button" onClick={save}>保存</button>
+      </div>
+    </Dialog>
+  );
+}
+
+function PromoAllocationDialog({ items, onClose, onSave }) {
+  const [rows, setRows] = useState(() => items.map((item) => ({
+    ...item,
+    participatesInGiftAllocation: Boolean(Number(item.participatesInGiftAllocation || 0) || item.promoGroupId || item.isFreeItem),
+    promoGroupName: item.promoGroupName || 'Manual Promo Group',
+    chargedQty: Number(item.chargedQty || 0),
+    freeQty: Number(item.freeQty || 0),
+    actualQty: Number(item.actualQty || item.totalQty || item.quantity || 0),
+    originalUnitCost: Number(item.originalUnitCost || item.unitPrice || 0),
+    effectiveUnitCost: Number(item.effectiveUnitCost || item.unitPrice || 0)
+  })));
+
+  function updateRow(idValue, field, value) {
+    setRows((current) => current.map((row) => row.id === idValue ? { ...row, [field]: value } : row));
+  }
+
+  function save() {
+    onSave(rows.map((row) => {
+      const groupName = String(row.promoGroupName || '').trim();
+      const participates = Boolean(row.participatesInGiftAllocation);
+      return {
+        ...row,
+        promoGroupId: participates ? groupName.toLowerCase().replace(/[^a-z0-9\u3400-\u9fff]+/g, '-') : '',
+        promoGroupName: participates ? groupName : '',
+        promoGroupRule: participates ? 'manual allocation' : '',
+        participatesInGiftAllocation: participates ? 1 : 0,
+        chargedQty: Number(row.chargedQty || 0),
+        freeQty: Number(row.freeQty || 0),
+        totalQty: Number(row.actualQty || 0),
+        actualQty: Number(row.actualQty || 0),
+        originalUnitCost: Number(row.originalUnitCost || 0),
+        effectiveUnitCost: Number(row.effectiveUnitCost || 0),
+        manualCostOverride: 1,
+        correctedByUser: 1
+      };
+    }));
+  }
+
+  return (
+    <Dialog title="编辑赠品分摊组" onClose={onClose}>
+      <div className="card-list">
+        {rows.map((row) => (
+          <div className="detail-item" key={row.id}>
+            <strong>{row.productNameOriginal || row.rawName}</strong>
+            <label className="field"><span>加入分摊组</span><input type="checkbox" checked={Boolean(row.participatesInGiftAllocation)} onChange={(event) => updateRow(row.id, 'participatesInGiftAllocation', event.target.checked)} /></label>
+            <label className="field"><span>分摊组名称</span><input value={row.promoGroupName || ''} onChange={(event) => updateRow(row.id, 'promoGroupName', event.target.value)} /></label>
+            <div className="grid-2">
+              <label className="field"><span>收费数量</span><input type="number" value={row.chargedQty || 0} onChange={(event) => updateRow(row.id, 'chargedQty', event.target.value)} /></label>
+              <label className="field"><span>免费数量</span><input type="number" value={row.freeQty || 0} onChange={(event) => updateRow(row.id, 'freeQty', event.target.value)} /></label>
+              <label className="field"><span>实际数量</span><input type="number" value={row.actualQty || 0} onChange={(event) => updateRow(row.id, 'actualQty', event.target.value)} /></label>
+              <label className="field"><span>发票金额</span><input type="number" value={row.totalPrice || 0} onChange={(event) => updateRow(row.id, 'totalPrice', event.target.value)} /></label>
+              <label className="field"><span>原始单价</span><input type="number" value={row.originalUnitCost || 0} onChange={(event) => updateRow(row.id, 'originalUnitCost', event.target.value)} /></label>
+              <label className="field"><span>实际摊薄成本</span><input type="number" value={row.effectiveUnitCost || 0} onChange={(event) => updateRow(row.id, 'effectiveUnitCost', event.target.value)} /></label>
+            </div>
+          </div>
+        ))}
+      </div>
+      <div className="dialog-actions">
+        <button className="secondary-button" type="button" onClick={onClose}>取消</button>
+        <button className="primary-button" type="button" onClick={save}>保存分摊</button>
+      </div>
+    </Dialog>
   );
 }
 
@@ -1705,6 +1950,19 @@ function Section({ title, children }) {
   return <section className="section"><h2>{title}</h2>{children}</section>;
 }
 
+function CollapsibleSection({ title, children, defaultOpen = false }) {
+  const [open, setOpen] = useState(defaultOpen);
+  return (
+    <section className="section">
+      <button type="button" className="collapsible-toggle" onClick={() => setOpen((value) => !value)}>
+        <span>{title}</span>
+        <span>{open ? '收起' : '展开'}</span>
+      </button>
+      {open && <div className="collapsible-content">{children}</div>}
+    </section>
+  );
+}
+
 function ActionLink({ to, icon, title, subtitle }) {
   return (
     <Link className="action-row" to={to}>
@@ -2062,7 +2320,6 @@ function compareInvoiceFingerprints(current, candidate, sourceLabelText) {
   const similarItems = invoiceItemsHighlySimilar(current, candidate);
   const sameOrCloseDate = daysBetweenDates(current.invoiceDate, candidate.invoiceDate) <= 1;
   const sameGroupKey = Boolean(current.invoiceGroupKey && candidate.invoiceGroupKey && current.invoiceGroupKey === candidate.invoiceGroupKey);
-  const differentPageNumber = Boolean(current.pageNumber && candidate.pageNumber && current.pageNumber !== candidate.pageNumber);
 
   if (!sameInvoiceNo) {
     if (sameAmount && similarItems && sameOrCloseDate) {
@@ -2073,15 +2330,18 @@ function compareInvoiceFingerprints(current, candidate, sourceLabelText) {
   }
 
   if (!sameOrCloseDate) {
-    result.duplicateStatus = 'none';
+    result.duplicateStatus = 'possible';
+    result.sameInvoiceGroup = true;
+    result.possibleSameInvoicePages = true;
+    result.sameInvoiceGroupReason = '同供应商同发票号但日期冲突，请人工确认正确日期，不自动拆分。';
     return result;
   }
 
-  if ((sameGroupKey || (sameInvoiceNo && sameAmount)) && differentPageNumber) {
+  if (sameGroupKey && sameInvoiceNo && !similarItems) {
     result.sameInvoiceGroup = true;
     result.possibleSameInvoicePages = true;
     result.duplicateStatus = 'none';
-    result.sameInvoiceGroupReason = '同一发票分组但页码不同，按多页发票处理。';
+    result.sameInvoiceGroupReason = '同供应商同发票号，可能是同一张多页发票，请人工确认合并。';
     return result;
   }
 
