@@ -1,32 +1,56 @@
-const traditionalMap = new Map(Object.entries({
-  '閩': '闽',
-  '國': '国',
-  '際': '际',
-  '貿': '贸',
-  '進': '进',
-  '齣': '出',
-  '發': '发',
-  '臺': '台',
-  '灣': '湾',
-  '華': '华',
-  '東': '东',
-  '廣': '广',
-  '龍': '龙',
-  '萬': '万',
-  '聯': '联',
-  '豐': '丰',
-  '業': '业',
-  '號': '号',
-  '產': '产',
-  '實': '实',
-  '貿': '贸',
-  '購': '购',
-  '應': '应',
-  '氣': '气'
+const traditionalCharMap = new Map(Object.entries({
+  '\u95a9': '\u95fd',
+  '\u570b': '\u56fd',
+  '\u969b': '\u9645',
+  '\u8cbf': '\u8d38',
+  '\u9032': '\u8fdb',
+  '\u83ef': '\u534e',
+  '\u6771': '\u4e1c',
+  '\u7522': '\u4ea7',
+  '\u696d': '\u4e1a',
+  '\u842c': '\u4e07',
+  '\u767c': '\u53d1',
+  '\u9580': '\u95e8',
+  '\u9f8d': '\u9f99',
+  '\u8ca8': '\u8d27',
+  '\u8ce3': '\u5356',
+  '\u8cb7': '\u4e70'
 }));
 
-const companySuffixPattern = /\b(INC|INCORPORATED|CO|COMPANY|LTD|LIMITED|LLC|CORP|CORPORATION|INTERNATIONAL|TRADING|IMPORT|EXPORT)\b/g;
-const chineseSuffixPattern = /(股份有限公司|有限责任公司|有限公司|公司|股份|国际|國際|贸易|貿易|进出口|進出口|商行|企业|企業)$/g;
+const englishLegalSuffixes = new Set([
+  'INC',
+  'INC.',
+  'INCORPORATED',
+  'CO',
+  'CO.',
+  'COMPANY',
+  'LTD',
+  'LTD.',
+  'LIMITED',
+  'LLC',
+  'CORP',
+  'CORP.',
+  'CORPORATION'
+]);
+
+const englishLegalSuffixDisplay = {
+  INC: 'Inc.',
+  'INC.': 'Inc.',
+  INCORPORATED: 'Inc.',
+  CO: 'Co.',
+  'CO.': 'Co.',
+  COMPANY: 'Company',
+  LTD: 'Ltd.',
+  'LTD.': 'Ltd.',
+  LIMITED: 'Ltd.',
+  LLC: 'LLC',
+  CORP: 'Corp.',
+  'CORP.': 'Corp.',
+  CORPORATION: 'Corp.'
+};
+
+const englishNormalizeSuffixPattern = /\b(INC|INC\.|INCORPORATED|CO|CO\.|COMPANY|LTD|LTD\.|LIMITED|LLC|CORP|CORP\.|CORPORATION|INTERNATIONAL|TRADING|IMPORT|EXPORT)\b/g;
+const chineseNormalizeSuffixPattern = /(\u80a1\u4efd\u6709\u9650\u516c\u53f8|\u6709\u9650\u8d23\u4efb\u516c\u53f8|\u6709\u9650\u516c\u53f8|\u516c\u53f8|\u80a1\u4efd|\u570b\u969b|\u56fd\u9645|\u8cbf\u6613|\u8d38\u6613|\u9032\u51fa\u53e3|\u8fdb\u51fa\u53e3|\u5546\u884c|\u4f01\u4e1a|\u4f01\u696d)$/g;
 
 export function toHalfWidth(value = '') {
   return String(value)
@@ -35,33 +59,113 @@ export function toHalfWidth(value = '') {
 }
 
 export function traditionalToSimplified(value = '') {
-  return [...String(value)].map((char) => traditionalMap.get(char) || char).join('');
+  return [...String(value)].map((char) => traditionalCharMap.get(char) || char).join('');
+}
+
+function normalizeEnglishToken(token = '') {
+  return String(token || '').replace(/[^\w&.'-]/g, '').toUpperCase();
+}
+
+function titleCaseEnglishCompany(value = '') {
+  return String(value || '')
+    .split(/\s+/)
+    .filter(Boolean)
+    .map((word) => {
+      const upper = normalizeEnglishToken(word);
+      if (!upper) return '';
+      if (englishLegalSuffixes.has(upper)) return englishLegalSuffixDisplay[upper] || upper;
+      if (upper.length <= 2) return upper;
+      return `${upper.slice(0, 1)}${upper.slice(1).toLowerCase()}`;
+    })
+    .filter(Boolean)
+    .join(' ')
+    .replace(/\bInc\b\.?/g, 'Inc.')
+    .replace(/\bCo\b\.?/g, 'Co.')
+    .replace(/\bCorp\b\.?/g, 'Corp.')
+    .replace(/\bLtd\b\.?/g, 'Ltd.');
+}
+
+function collapseRepeatedWordSequence(words = []) {
+  const clean = words.map(normalizeEnglishToken).filter(Boolean);
+  if (clean.length < 2) return clean;
+
+  for (let size = 1; size <= Math.floor(clean.length / 2); size += 1) {
+    const base = clean.slice(0, size);
+    let repeated = true;
+    for (let index = size; index < clean.length; index += 1) {
+      if (clean[index] !== base[index % size]) {
+        repeated = false;
+        break;
+      }
+    }
+    if (repeated) return base;
+  }
+
+  const output = [];
+  for (const word of clean) {
+    if (output[output.length - 1] === word) continue;
+    output.push(word);
+  }
+  return output;
+}
+
+export function cleanSupplierEnglishName(value = '') {
+  const normalized = toHalfWidth(value)
+    .replace(/[^A-Za-z0-9&.'\-\s]/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+  if (!/[A-Za-z]/.test(normalized)) return '';
+  return titleCaseEnglishCompany(collapseRepeatedWordSequence(normalized.split(/\s+/)).join(' '));
+}
+
+export function splitSupplierNameParts(value = '') {
+  const raw = traditionalToSimplified(toHalfWidth(value));
+  const supplierNameChinese = raw.match(/[\u3400-\u9fff]+/g)?.join('').trim() || '';
+  const supplierNameEnglish = cleanSupplierEnglishName(raw.match(/[A-Za-z][A-Za-z0-9&.,'\-\s]+/g)?.join(' ') || '');
+  return { supplierNameChinese, supplierNameEnglish };
+}
+
+export function buildSupplierDisplayName({ supplierNameChinese = '', supplierNameEnglish = '', supplierDisplayName = '', displayName = '', name = '' } = {}) {
+  const fallbackParts = splitSupplierNameParts(supplierDisplayName || displayName || name);
+  const chinese = String(supplierNameChinese || fallbackParts.supplierNameChinese || '').trim();
+  const english = cleanSupplierEnglishName(supplierNameEnglish || fallbackParts.supplierNameEnglish || '');
+  const fallback = cleanSupplierEnglishName(supplierDisplayName || displayName || name) || String(supplierDisplayName || displayName || name || '').trim();
+  return [chinese, english].filter(Boolean).join(' ') || fallback;
 }
 
 export function supplierAliasesFromName(value = '') {
   const raw = String(value || '').trim();
   const simplified = traditionalToSimplified(toHalfWidth(raw));
-  const english = simplified.match(/[A-Za-z][A-Za-z0-9&.,'\-\s]+/g)?.join(' ').trim().toUpperCase() || '';
-  const chinese = simplified.match(/[\u3400-\u9fff]+/g)?.join('').trim() || '';
-  return [...new Set([raw, simplified, chinese, english].map((entry) => String(entry || '').trim()).filter(Boolean))];
+  const { supplierNameChinese, supplierNameEnglish } = splitSupplierNameParts(simplified);
+  return [...new Set([raw, simplified, supplierNameChinese, supplierNameEnglish].map((entry) => String(entry || '').trim()).filter(Boolean))];
 }
 
 export function normalizeSupplierName(value = '') {
   const simplified = traditionalToSimplified(toHalfWidth(value)).toUpperCase();
-  const withoutChineseSuffix = simplified.replace(chineseSuffixPattern, '');
-  const withoutEnglishSuffix = withoutChineseSuffix.replace(companySuffixPattern, ' ');
+  const withoutChineseSuffix = simplified.replace(chineseNormalizeSuffixPattern, '');
+  const withoutEnglishSuffix = withoutChineseSuffix.replace(englishNormalizeSuffixPattern, ' ');
   const compact = withoutEnglishSuffix
     .replace(/[^\u3400-\u9fffA-Z0-9]+/g, '')
-    .replace(/有限公司|股份有限公司|公司|股份/g, '');
+    .replace(/\u80a1\u4efd\u6709\u9650\u516c\u53f8|\u6709\u9650\u516c\u53f8|\u516c\u53f8|\u80a1\u4efd/g, '');
   return compact || simplified.replace(/[^\u3400-\u9fffA-Z0-9]+/g, '');
 }
 
 export function displaySupplierName(existing = {}, incomingName = '') {
-  const aliases = supplierAliasesFromName(incomingName || existing.displayName || existing.name || '');
-  const all = [...supplierAliasesFromName(existing.displayName || existing.name || ''), ...aliases];
-  const chinese = all.find((entry) => /[\u3400-\u9fff]/.test(entry)) || '';
-  const english = all.find((entry) => /^[A-Z0-9&.,'\-\s]+$/.test(entry) && /[A-Z]/.test(entry)) || '';
-  return [chinese, english].filter(Boolean).join(' ') || incomingName || existing.displayName || existing.name || '';
+  const mergedInput = [
+    existing.supplierNameChinese,
+    existing.supplierNameEnglish,
+    existing.supplierDisplayName,
+    existing.displayName,
+    existing.name,
+    incomingName
+  ].filter(Boolean).join(' ');
+  const parts = splitSupplierNameParts(mergedInput);
+  return buildSupplierDisplayName({
+    supplierNameChinese: existing.supplierNameChinese || parts.supplierNameChinese,
+    supplierNameEnglish: existing.supplierNameEnglish || parts.supplierNameEnglish,
+    supplierDisplayName: existing.supplierDisplayName,
+    displayName: incomingName || existing.displayName || existing.name || ''
+  });
 }
 
 export function parseAliases(value) {
@@ -110,11 +214,13 @@ export function supplierSimilarity(a = '', b = '') {
 }
 
 export function isSupplierDuplicateCandidate(a = {}, b = {}) {
-  const leftNormalized = a.normalizedName || normalizeSupplierName(a.name || a.displayName || '');
-  const rightNormalized = b.normalizedName || normalizeSupplierName(b.name || b.displayName || '');
+  const leftName = a.supplierDisplayName || a.displayName || a.name || '';
+  const rightName = b.supplierDisplayName || b.displayName || b.name || '';
+  const leftNormalized = a.normalizedName || normalizeSupplierName(leftName);
+  const rightNormalized = b.normalizedName || normalizeSupplierName(rightName);
   if (leftNormalized && rightNormalized && leftNormalized === rightNormalized) return true;
   if (a.phone && b.phone && a.phone === b.phone) return true;
   if (a.email && b.email && String(a.email).toLowerCase() === String(b.email).toLowerCase()) return true;
   if (a.address && b.address && normalizeSupplierName(a.address) === normalizeSupplierName(b.address)) return true;
-  return supplierSimilarity(leftNormalized, rightNormalized) > 0.85;
+  return supplierSimilarity(leftNormalized || leftName, rightNormalized || rightName) > 0.85;
 }

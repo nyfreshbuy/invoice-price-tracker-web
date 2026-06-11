@@ -37,11 +37,13 @@ import {
   promoGroupCandidate
 } from './services/productNormalizationService.js';
 import {
+  buildSupplierDisplayName,
   displaySupplierName,
   isSupplierDuplicateCandidate,
   mergeAliases,
   normalizeSupplierName,
   parseAliases,
+  splitSupplierNameParts,
   supplierAliasesFromName
 } from './services/supplierNormalizationService.js';
 import { buildInvoiceGroupKey } from './services/handwrittenInvoiceService.js';
@@ -225,14 +227,35 @@ function prepareRecord(table, record, deviceId, companyId) {
     return { ...base, batchName: record.batchName || '', supplierCount: Number(record.supplierCount || 0), invoiceCount: Number(record.invoiceCount || 0), totalAmount: Number(record.totalAmount || 0) };
   }
   if (table === 'suppliers') {
-    const rawName = record.displayName || record.name || '';
-    const normalizedName = record.normalizedName || normalizeSupplierName(rawName);
-    const aliases = mergeAliases(record.aliases, supplierAliasesFromName(rawName), supplierAliasesFromName(record.name || ''), supplierAliasesFromName(record.displayName || ''));
-    const displayName = displaySupplierName(record, rawName);
+    const rawName = record.supplierDisplayName || record.displayName || record.name || '';
+    const parts = splitSupplierNameParts([
+      record.supplierNameChinese,
+      record.supplierNameEnglish,
+      rawName
+    ].filter(Boolean).join(' '));
+    const supplierNameChinese = record.supplierNameChinese || parts.supplierNameChinese || '';
+    const supplierNameEnglish = record.supplierNameEnglish || parts.supplierNameEnglish || '';
+    const supplierDisplayName = buildSupplierDisplayName({
+      supplierNameChinese,
+      supplierNameEnglish,
+      displayName: record.supplierDisplayName || record.displayName || rawName,
+      name: record.name || rawName
+    });
+    const normalizedName = record.normalizedName || normalizeSupplierName(supplierDisplayName || rawName);
+    const aliases = mergeAliases(
+      record.aliases,
+      supplierAliasesFromName(rawName),
+      supplierAliasesFromName(record.name || ''),
+      supplierAliasesFromName(record.displayName || ''),
+      supplierAliasesFromName(supplierDisplayName)
+    );
     return {
       ...base,
-      name: displayName || rawName,
-      displayName: displayName || rawName,
+      name: supplierDisplayName || rawName,
+      displayName: supplierDisplayName || rawName,
+      supplierNameChinese,
+      supplierNameEnglish,
+      supplierDisplayName: supplierDisplayName || rawName,
       normalizedName,
       aliases: JSON.stringify(aliases),
       contactName: record.contactName || '',
@@ -1023,14 +1046,15 @@ async function enhanceRecognizedResultWithLearning(result, companyId) {
 }
 
 function resultFromFinalPayload(payload = {}) {
+  const totalAmount = Number(payload.totalAmount || 0);
   return {
     supplierName: payload.supplierName || '',
     invoiceNo: payload.invoiceNo || '',
     invoiceDate: payload.invoiceDate || '',
-    totalAmount: Number(payload.totalAmount || 0),
+    totalAmount,
     pageNumber: Number(payload.pageNumber || 0),
     pageCount: Number(payload.pageCount || 0),
-    invoiceGroupKey: payload.invoiceGroupKey || buildInvoiceGroupKey({ supplierName: supplier?.name || payload.supplierName || '', invoiceNo: payload.invoiceNo || '', totalAmount }),
+    invoiceGroupKey: payload.invoiceGroupKey || buildInvoiceGroupKey({ supplierName: payload.supplierName || '', invoiceNo: payload.invoiceNo || '', totalAmount }),
     invoiceLayoutType: payload.invoiceLayoutType || 'normal_invoice',
     items: (payload.items || []).map((item) => ({
       rawName: item.rawName || item.productNameOriginal || item.name || '',
@@ -1162,7 +1186,7 @@ async function saveInvoicePayloadWithLearning(payload, user, options = {}) {
   }
 
   return {
-    invoice: { ...invoice, supplierName: supplier?.name || payload.supplierName || '' },
+    invoice: { ...invoice, supplierName: displaySupplierName(supplier, payload.supplierName || '') },
     items: itemRecords,
     priceAnomalies,
     template
@@ -1221,7 +1245,7 @@ async function allSyncData(companyId, since) {
 
 async function invoiceWithSupplierRows(companyId) {
   return queryAll(`
-    SELECT invoices.*, suppliers.${quoteIdentifier('name')} AS "supplierName"
+    SELECT invoices.*, COALESCE(suppliers.${quoteIdentifier('supplierDisplayName')}, suppliers.${quoteIdentifier('displayName')}, suppliers.${quoteIdentifier('name')}) AS "supplierName"
     FROM ${quoteTable('invoices')} invoices
     LEFT JOIN ${quoteTable('suppliers')} suppliers
       ON suppliers.${quoteIdentifier('companyId')} = invoices.${quoteIdentifier('companyId')}
@@ -1635,7 +1659,7 @@ async function findRecognitionDuplicate(companyId, parsed, totalAmount, currentI
   if (!current.invoiceNo) return emptyDuplicateCheck();
 
   const candidates = await queryAll(`
-    SELECT invoices.*, suppliers.${quoteIdentifier('name')} AS "supplierName"
+    SELECT invoices.*, COALESCE(suppliers.${quoteIdentifier('supplierDisplayName')}, suppliers.${quoteIdentifier('displayName')}, suppliers.${quoteIdentifier('name')}) AS "supplierName"
     FROM ${quoteTable('invoices')} invoices
     LEFT JOIN ${quoteTable('suppliers')} suppliers
       ON suppliers.${quoteIdentifier('companyId')} = invoices.${quoteIdentifier('companyId')}
@@ -2015,11 +2039,25 @@ app.post('/api/suppliers/:id/merge', requireAuth, asyncHandler(async (req, res) 
   const sourceIds = [source.id, source.serverId, source.localId].filter(Boolean);
   const targetId = target.serverId || target.id;
   const sourcePlaceholders = sourceIds.map(() => '?').join(', ');
-  const aliases = mergeAliases(target.aliases, source.aliases, supplierAliasesFromName(source.displayName || source.name || ''), supplierAliasesFromName(target.displayName || target.name || ''));
+  const aliases = mergeAliases(
+    target.aliases,
+    source.aliases,
+    supplierAliasesFromName(source.supplierDisplayName || source.displayName || source.name || ''),
+    supplierAliasesFromName(target.supplierDisplayName || target.displayName || target.name || ''),
+    source.supplierNameChinese,
+    source.supplierNameEnglish,
+    target.supplierNameChinese,
+    target.supplierNameEnglish
+  );
   const templateIds = mergeAliases(target.templateIds, source.templateIds);
+  const mergedDisplayName = displaySupplierName(target, source.supplierDisplayName || source.displayName || source.name || '');
+  const mergedParts = splitSupplierNameParts(mergedDisplayName);
   const updatedTarget = prepareRecord('suppliers', {
     ...target,
-    displayName: displaySupplierName(target, source.displayName || source.name || ''),
+    supplierNameChinese: target.supplierNameChinese || source.supplierNameChinese || mergedParts.supplierNameChinese,
+    supplierNameEnglish: target.supplierNameEnglish || source.supplierNameEnglish || mergedParts.supplierNameEnglish,
+    supplierDisplayName: mergedDisplayName,
+    displayName: mergedDisplayName,
     aliases,
     templateIds,
     updatedAt: timestamp
@@ -2102,7 +2140,7 @@ async function supplierInvoiceHistoryRows(companyId, supplierId, filters = {}) {
   const supplier = await getByAnyId('suppliers', supplierId, companyId);
   const resolvedSupplierId = supplier?.serverId || supplier?.id || supplierId;
   const rows = await queryAll(`
-    SELECT invoices.*, suppliers.${quoteIdentifier('name')} AS "supplierName"
+    SELECT invoices.*, COALESCE(suppliers.${quoteIdentifier('supplierDisplayName')}, suppliers.${quoteIdentifier('displayName')}, suppliers.${quoteIdentifier('name')}) AS "supplierName"
     FROM ${quoteTable('invoices')} invoices
     LEFT JOIN ${quoteTable('suppliers')} suppliers
       ON suppliers.${quoteIdentifier('companyId')} = invoices.${quoteIdentifier('companyId')}
@@ -2216,7 +2254,7 @@ app.post('/api/invoices', requireAuth, asyncHandler(async (req, res) => {
     ...req.body,
     supplierId: supplier?.serverId || supplier?.id || '',
     totalAmount,
-    invoiceGroupKey: req.body.invoiceGroupKey || buildInvoiceGroupKey({ supplierName: supplier?.name || req.body.supplierName || '', invoiceNo: req.body.invoiceNo || '', totalAmount }),
+    invoiceGroupKey: req.body.invoiceGroupKey || buildInvoiceGroupKey({ supplierName: displaySupplierName(supplier, req.body.supplierName || ''), invoiceNo: req.body.invoiceNo || '', totalAmount }),
     updatedAt: now
   }, deviceId, req.user.companyId);
 
@@ -2240,12 +2278,12 @@ app.post('/api/invoices', requireAuth, asyncHandler(async (req, res) => {
     }
     await saveInvoiceDiscounts({ discountItems, productItemRecords: itemRecords, invoice, supplier, deviceId, companyId: req.user.companyId, client });
   });
-  res.json({ ...invoice, supplierName: supplier?.name || '未命名供应商' });
+  res.json({ ...invoice, supplierName: displaySupplierName(supplier, req.body.supplierName || '') || '未命名供应商' });
 }));
 
 app.get('/api/invoices/:id', requireAuth, asyncHandler(async (req, res) => {
   const invoice = await queryGet(`
-    SELECT invoices.*, suppliers.${quoteIdentifier('name')} AS "supplierName"
+    SELECT invoices.*, COALESCE(suppliers.${quoteIdentifier('supplierDisplayName')}, suppliers.${quoteIdentifier('displayName')}, suppliers.${quoteIdentifier('name')}) AS "supplierName"
     FROM ${quoteTable('invoices')} invoices
     LEFT JOIN ${quoteTable('suppliers')} suppliers
       ON suppliers.${quoteIdentifier('companyId')} = invoices.${quoteIdentifier('companyId')}
@@ -2487,7 +2525,7 @@ app.get('/api/products/:name', requireAuth, asyncHandler(async (req, res) => {
     .map((alias) => alias.productId)
     .filter(Boolean));
   const rows = await queryAll(`
-    SELECT invoice_items.*, suppliers.${quoteIdentifier('name')} AS "supplierName", invoices.${quoteIdentifier('invoiceNo')} AS "invoiceNo", invoices.${quoteIdentifier('imagePath')} AS "invoiceImagePath"
+    SELECT invoice_items.*, COALESCE(suppliers.${quoteIdentifier('supplierDisplayName')}, suppliers.${quoteIdentifier('displayName')}, suppliers.${quoteIdentifier('name')}) AS "supplierName", invoices.${quoteIdentifier('invoiceNo')} AS "invoiceNo", invoices.${quoteIdentifier('imagePath')} AS "invoiceImagePath"
     FROM ${quoteTable('invoice_items')} invoice_items
     LEFT JOIN ${quoteTable('suppliers')} suppliers
       ON suppliers.${quoteIdentifier('companyId')} = invoice_items.${quoteIdentifier('companyId')}

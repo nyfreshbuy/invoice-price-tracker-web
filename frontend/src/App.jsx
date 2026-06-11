@@ -62,6 +62,9 @@ const emptyItem = () => ({
 const emptySupplier = {
   name: '',
   displayName: '',
+  supplierNameChinese: '',
+  supplierNameEnglish: '',
+  supplierDisplayName: '',
   normalizedName: '',
   aliases: '[]',
   contactName: '',
@@ -954,7 +957,7 @@ function InvoiceFormPage() {
           <span>供应商名称</span>
           <input list="supplier-list" value={form.supplierName} onChange={(event) => setForm({ ...form, supplierName: event.target.value })} />
           <datalist id="supplier-list">
-            {suppliers.map((supplier) => <option key={supplier.id} value={supplier.name} />)}
+            {suppliers.map((supplier) => <option key={supplier.id} value={supplier.supplierDisplayName || supplier.displayName || supplier.name} />)}
           </datalist>
         </label>
         <label className="field"><span>发票号</span><input value={form.invoiceNo} onChange={(event) => setForm({ ...form, invoiceNo: event.target.value })} /></label>
@@ -1332,6 +1335,9 @@ function InvoiceDetailPageWithGifts() {
 function InvoiceEditDialog({ invoice, onClose, onSave }) {
   const [form, setForm] = useState(() => ({
     supplierName: invoice.supplierName || '',
+    supplierNameChinese: invoice.supplierNameChinese || '',
+    supplierNameEnglish: invoice.supplierNameEnglish || '',
+    supplierDisplayName: invoice.supplierDisplayName || invoice.supplierName || '',
     invoiceNo: invoice.invoiceNo || '',
     invoiceDate: normalizeDateInput(invoice.invoiceDate) || '',
     totalAmount: Number(invoice.totalAmount || 0),
@@ -1347,6 +1353,9 @@ function InvoiceEditDialog({ invoice, onClose, onSave }) {
   function save() {
     onSave({
       supplierName: form.supplierName,
+      supplierNameChinese: form.supplierNameChinese,
+      supplierNameEnglish: form.supplierNameEnglish,
+      supplierDisplayName: form.supplierDisplayName,
       invoiceNo: form.invoiceNo,
       invoiceDate: normalizeDateInput(form.invoiceDate) || '',
       totalAmount: Number(form.totalAmount || 0),
@@ -1359,6 +1368,9 @@ function InvoiceEditDialog({ invoice, onClose, onSave }) {
   return (
     <Dialog title="编辑发票" onClose={onClose}>
       <label className="field"><span>供应商</span><input value={form.supplierName} onChange={(event) => update('supplierName', event.target.value)} /></label>
+      <label className="field"><span>中文公司名</span><input value={form.supplierNameChinese} onChange={(event) => update('supplierNameChinese', event.target.value)} /></label>
+      <label className="field"><span>英文公司名</span><input value={form.supplierNameEnglish} onChange={(event) => update('supplierNameEnglish', event.target.value)} /></label>
+      <label className="field"><span>显示名称</span><input value={form.supplierDisplayName} onChange={(event) => update('supplierDisplayName', event.target.value)} /></label>
       <label className="field"><span>发票号</span><input value={form.invoiceNo} onChange={(event) => update('invoiceNo', event.target.value)} /></label>
       <label className="field"><span>日期</span><input type="date" value={form.invoiceDate} onChange={(event) => update('invoiceDate', event.target.value)} /></label>
       <div className="grid-2">
@@ -1593,7 +1605,7 @@ function SupplierCenterPage() {
         {suppliers.map((supplier) => (
           <Link className="row-card" to={`/suppliers/${encodeURIComponent(supplier.id)}`} key={supplier.id}>
             <div>
-              <h3>{supplier.displayName || supplier.name || '未命名供应商'}</h3>
+              <h3>{supplier.supplierDisplayName || supplier.displayName || supplier.name || '未命名供应商'}</h3>
               <p>累计采购 {money(supplier.totalPurchaseAmount)} · 发票 {supplier.invoiceCount} 张 · SKU {supplier.skuCount}</p>
               <p>最近采购 {supplier.recentPurchaseDate || '-'} · 最近金额 {money(supplier.recentPurchaseAmount)}</p>
               <p>赠品数量 {numberText(supplier.freeQtyTotal)} · 折扣 {money(supplier.discountTotal)} · 异常 {supplier.abnormalInvoiceCount}</p>
@@ -1609,15 +1621,26 @@ function SupplierCenterPage() {
 function SupplierDetailPage() {
   const { id } = useParams();
   const [detail, setDetail] = useState(null);
+  const [editing, setEditing] = useState(null);
 
-  useLocalReload(() => localDb.getSupplierDetail(id).then(setDetail), [id]);
+  const load = () => localDb.getSupplierDetail(id).then(setDetail);
+  useLocalReload(load, [id]);
+
+  async function saveSupplier(data) {
+    await localDb.saveSupplier(data);
+    setEditing(null);
+    syncNow();
+    load();
+  }
 
   if (!detail) return <Page title="供应商详情"><EmptyState text="未找到供应商" /></Page>;
   const { supplier, stats } = detail;
   return (
-    <Page title="供应商详情" subtitle={supplier.name || '未命名供应商'}>
+    <Page title="供应商详情" subtitle={supplier.supplierDisplayName || supplier.displayName || supplier.name || '未命名供应商'} action={<button type="button" onClick={() => setEditing(supplier)}>编辑供应商</button>}>
       <Section title="基本信息">
-        <Info label="供应商名称" value={supplier.name || '-'} />
+        <Info label="中文公司名" value={supplier.supplierNameChinese || '-'} />
+        <Info label="英文公司名" value={supplier.supplierNameEnglish || '-'} />
+        <Info label="供应商名称" value={supplier.supplierDisplayName || supplier.displayName || supplier.name || '-'} />
         <Info label="联系人" value={supplier.contactName || '-'} />
         <Info label="电话" value={supplier.phone || '-'} />
         <Info label="地址" value={supplier.address || '-'} />
@@ -1635,6 +1658,7 @@ function SupplierDetailPage() {
         <ActionLink to={`/suppliers/${encodeURIComponent(id)}/invoices`} icon={<FileText />} title="历史发票" subtitle="筛选并查看该供应商所有发票" />
         <ActionLink to={`/suppliers/${encodeURIComponent(id)}/products`} icon={<ShoppingCart />} title="采购商品" subtitle="查看该供应商商品价格、次数、数量" />
       </Section>
+      {editing && <SupplierDialog supplier={editing} onClose={() => setEditing(null)} onSave={saveSupplier} />}
     </Page>
   );
 }
@@ -1754,7 +1778,7 @@ function SupplierPage() {
   }
 
   async function deleteSupplier(supplier) {
-    if (!confirm(`删除供应商「${supplier.name}」？`)) return;
+    if (!confirm(`删除供应商「${supplier.supplierDisplayName || supplier.displayName || supplier.name}」？`)) return;
     await localDb.deleteSupplier(supplier);
     syncNow();
     load();
@@ -1767,7 +1791,7 @@ function SupplierPage() {
         {suppliers.map((supplier) => (
           <div className="row-card" key={supplier.id}>
             <div>
-              <h3>{supplier.displayName || supplier.name || '未命名供应商'}</h3>
+              <h3>{supplier.supplierDisplayName || supplier.displayName || supplier.name || '未命名供应商'}</h3>
               <p>{supplier.phone || '无电话'} · {supplier.email || '无邮箱'} · {statusText(supplier.syncStatus)}</p>
             </div>
             <div className="row-actions">
@@ -1820,7 +1844,7 @@ function MergeSupplierDialog({ supplier, suppliers, onClose, onMerged }) {
   return (
     <Dialog title="合并供应商" onClose={onClose}>
       <Section title="源供应商">
-        <Info label="名称" value={supplier.displayName || supplier.name || '-'} />
+        <Info label="名称" value={supplier.supplierDisplayName || supplier.displayName || supplier.name || '-'} />
         <Info label="标准名" value={supplier.normalizedName || '-'} />
       </Section>
       <Section title="目标供应商">
@@ -1829,7 +1853,7 @@ function MergeSupplierDialog({ supplier, suppliers, onClose, onMerged }) {
           <select value={targetId} onChange={(event) => setTargetId(event.target.value)}>
             <option value="">请选择目标供应商</option>
             {candidates.map((candidate) => (
-              <option key={candidate.id} value={candidate.id}>{candidate.displayName || candidate.name}</option>
+              <option key={candidate.id} value={candidate.id}>{candidate.supplierDisplayName || candidate.displayName || candidate.name}</option>
             ))}
           </select>
         </label>
@@ -1867,7 +1891,7 @@ function SupplierInvoiceHistoryPage() {
   };
 
   return (
-    <Page title="历史发票" subtitle={supplier?.name || '供应商'}>
+    <Page title="历史发票" subtitle={supplier?.supplierDisplayName || supplier?.displayName || supplier?.name || '供应商'}>
       <Section title="汇总">
         <Info label="发票数量" value={historyStats.invoiceCount} />
         <Info label="累计采购金额" value={money(historyStats.totalAmount)} />
@@ -1948,9 +1972,9 @@ function SupplierDialog({ supplier, onClose, onSave }) {
   const [form, setForm] = useState(supplier);
   return (
     <Dialog title="编辑供应商" onClose={onClose}>
-      {['name', 'displayName', 'normalizedName', 'aliases', 'contactName', 'phone', 'email', 'address', 'notes'].map((field) => (
+      {['supplierNameChinese', 'supplierNameEnglish', 'supplierDisplayName', 'name', 'displayName', 'normalizedName', 'aliases', 'contactName', 'phone', 'email', 'address', 'notes'].map((field) => (
         <label className="field" key={field}>
-          <span>{({ name: '名称', displayName: '显示名称', normalizedName: '标准化名称', aliases: '别名', contactName: '联系人', phone: '电话', email: '邮箱', address: '地址', notes: '备注' })[field]}</span>
+          <span>{({ supplierNameChinese: '中文公司名', supplierNameEnglish: '英文公司名', supplierDisplayName: '显示名称', name: '名称', displayName: '旧显示名称', normalizedName: '标准化名称', aliases: '别名', contactName: '联系人', phone: '电话', email: '邮箱', address: '地址', notes: '备注' })[field]}</span>
           <input value={form[field] || ''} onChange={(event) => setForm({ ...form, [field]: event.target.value })} />
         </label>
       ))}
@@ -1960,10 +1984,10 @@ function SupplierDialog({ supplier, onClose, onSave }) {
 }
 
 function TemplateDialog({ supplier, onClose }) {
-  const [template, setTemplate] = useState(emptyTemplate(supplier.name));
+  const [template, setTemplate] = useState(emptyTemplate(supplier.supplierDisplayName || supplier.displayName || supplier.name));
 
   useEffect(() => {
-    localDb.getTemplate(supplier.id).then((data) => setTemplate(data || emptyTemplate(supplier.name)));
+    localDb.getTemplate(supplier.id).then((data) => setTemplate(data || emptyTemplate(supplier.supplierDisplayName || supplier.displayName || supplier.name)));
   }, [supplier]);
 
   async function save() {
@@ -1973,7 +1997,7 @@ function TemplateDialog({ supplier, onClose }) {
   }
 
   return (
-    <Dialog title={`${supplier.name} · 识别模板`} onClose={onClose}>
+    <Dialog title={`${supplier.supplierDisplayName || supplier.displayName || supplier.name} · 识别模板`} onClose={onClose}>
       {['supplierNameKeywords', 'invoiceNoKeywords', 'dateKeywords', 'itemTableStartKeywords', 'itemTableEndKeywords'].map((field) => (
         <label className="field" key={field}>
           <span>{field}</span>

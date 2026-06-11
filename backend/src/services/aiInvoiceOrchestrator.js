@@ -11,6 +11,7 @@ import {
   saveOrUpdateTemplateFromResult
 } from './invoiceTemplateService.js';
 import { recognizeInvoiceWithAI } from './aiInvoiceService.js';
+import { buildSupplierDisplayName, splitSupplierNameParts } from './supplierNormalizationService.js';
 
 export async function recognizeInvoice(file, options = {}) {
   const companyId = options.companyId || 'default';
@@ -105,7 +106,11 @@ function responsePayload({ source, imagePath, ocrText, result, template, sampleI
   const recognitionSource = source === 'template' ? '模板' : source === 'ai' ? 'AI Vision' : 'OCR';
   const usedTemplate = source === 'template';
   const usedAI = source === 'ai';
-  const calculatedTotal = result.items.reduce((sum, item) => sum + Number(item.totalPrice || item.amount || 0), 0);
+  const invoiceItems = Array.isArray(result.items) ? result.items : [];
+  const supplierParts = splitSupplierNameParts(result.supplierName || '');
+  const supplierNameChinese = result.supplierNameChinese || supplierParts.supplierNameChinese;
+  const supplierNameEnglish = result.supplierNameEnglish || supplierParts.supplierNameEnglish;
+  const calculatedTotal = invoiceItems.reduce((sum, item) => sum + Number(item.totalPrice || item.amount || 0), 0);
   const invoiceTotal = Number(result.totalAmount || 0);
   const totalDifference = invoiceTotal > 0 ? Math.abs(calculatedTotal - invoiceTotal) : 0;
   const warnings = [...(result.warnings || [])];
@@ -114,7 +119,13 @@ function responsePayload({ source, imagePath, ocrText, result, template, sampleI
   }
 
   const parsed = {
-    supplierName: result.supplierName,
+    supplierName: buildSupplierDisplayName({
+      supplierNameChinese,
+      supplierNameEnglish,
+      displayName: result.supplierName || ''
+    }),
+    supplierNameChinese,
+    supplierNameEnglish,
     invoiceNo: result.invoiceNo,
     invoiceDate: normalizeInvoiceDate(result.invoiceDate),
     pageNumber: Number(result.pageNumber || 0),
@@ -128,9 +139,9 @@ function responsePayload({ source, imagePath, ocrText, result, template, sampleI
     supplierConfidence: Number(result.supplierConfidence ?? result.confidence ?? (result.supplierName ? 0.8 : 0.35)),
     invoiceNoConfidence: Number(result.invoiceNoConfidence ?? result.confidence ?? (result.invoiceNo ? 0.8 : 0.35)),
     dateConfidence: Number(result.dateConfidence ?? result.confidence ?? (result.invoiceDate ? 0.8 : 0.35)),
-    itemConfidence: Number(result.itemConfidence ?? result.confidence ?? (result.items.length ? 0.75 : 0.25)),
+    itemConfidence: Number(result.itemConfidence ?? result.confidence ?? (invoiceItems.length ? 0.75 : 0.25)),
     priceConfidence: Number(result.priceConfidence ?? (totalDifference > 0.05 ? 0.45 : 0.85)),
-    items: result.items.map((item) => {
+    items: invoiceItems.map((item) => {
       const displayName = item.name || [item.nameCn, item.nameEn].filter(Boolean).join(' ');
       const standardName = item.standardName || displayName;
       const normalizedName = item.normalizedName || standardName.trim().toLowerCase();

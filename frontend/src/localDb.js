@@ -78,9 +78,89 @@ export function normalizeSupplierName(value = '') {
 function supplierAliasesFromName(value = '') {
   const raw = String(value || '').trim();
   const normalized = normalizeSupplierName(raw);
-  const english = raw.match(/[A-Za-z][A-Za-z0-9&.,'\-\s]+/g)?.join(' ').trim().toUpperCase() || '';
+  const english = cleanSupplierEnglishName(raw.match(/[A-Za-z][A-Za-z0-9&.,'\-\s]+/g)?.join(' ') || '');
   const chinese = raw.match(/[\u3400-\u9fff]+/g)?.join('').trim() || '';
   return [...new Set([raw, normalized, english, chinese].filter(Boolean))];
+}
+
+function titleCaseEnglishCompany(value = '') {
+  const legalSuffixes = new Set(['INC', 'INC.', 'INCORPORATED', 'CO', 'CO.', 'COMPANY', 'LTD', 'LTD.', 'LIMITED', 'LLC', 'CORP', 'CORP.', 'CORPORATION']);
+  const suffixDisplay = {
+    INC: 'Inc.',
+    'INC.': 'Inc.',
+    INCORPORATED: 'Inc.',
+    CO: 'Co.',
+    'CO.': 'Co.',
+    COMPANY: 'Company',
+    LTD: 'Ltd.',
+    'LTD.': 'Ltd.',
+    LIMITED: 'Ltd.',
+    LLC: 'LLC',
+    CORP: 'Corp.',
+    'CORP.': 'Corp.',
+    CORPORATION: 'Corp.'
+  };
+  return String(value || '')
+    .split(/\s+/)
+    .filter(Boolean)
+    .map((word) => {
+      const upper = word.toUpperCase();
+      if (legalSuffixes.has(upper)) return suffixDisplay[upper] || upper;
+      if (upper.length <= 2) return upper;
+      return `${upper.slice(0, 1)}${upper.slice(1).toLowerCase()}`;
+    })
+    .join(' ')
+    .replace(/\bInc\b\.?/g, 'Inc.')
+    .replace(/\bCo\b\.?/g, 'Co.')
+    .replace(/\bCorp\b\.?/g, 'Corp.')
+    .replace(/\bLtd\b\.?/g, 'Ltd.');
+}
+
+function collapseRepeatedWordSequence(words = []) {
+  const clean = words.filter(Boolean);
+  if (clean.length < 2) return clean;
+  for (let size = 1; size <= Math.floor(clean.length / 2); size += 1) {
+    if (clean.length % size !== 0) continue;
+    const base = clean.slice(0, size);
+    if (clean.every((word, index) => word === base[index % size])) return base;
+  }
+  const output = [];
+  for (const word of clean) {
+    if (output[output.length - 1] !== word) output.push(word);
+  }
+  return output;
+}
+
+function cleanSupplierEnglishName(value = '') {
+  const normalized = String(value || '')
+    .replace(/[\uFF01-\uFF5E]/g, (char) => String.fromCharCode(char.charCodeAt(0) - 0xFEE0))
+    .replace(/[^A-Za-z0-9&.'\-\s]/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim()
+    .toUpperCase();
+  if (!/[A-Z]/.test(normalized)) return '';
+  return titleCaseEnglishCompany(collapseRepeatedWordSequence(normalized.split(/\s+/)).join(' '));
+}
+
+function splitSupplierNameParts(value = '') {
+  const raw = String(value || '')
+    .replace(/[\uFF01-\uFF5E]/g, (char) => String.fromCharCode(char.charCodeAt(0) - 0xFEE0))
+    .replace(/\u3000/g, ' ');
+  return {
+    supplierNameChinese: raw.match(/[\u3400-\u9fff]+/g)?.join('').trim() || '',
+    supplierNameEnglish: cleanSupplierEnglishName(raw.match(/[A-Za-z][A-Za-z0-9&.,'\-\s]+/g)?.join(' ') || '')
+  };
+}
+
+function buildSupplierDisplayName({ supplierNameChinese = '', supplierNameEnglish = '', supplierDisplayName = '', displayName = '', name = '' } = {}) {
+  const fallback = splitSupplierNameParts(supplierDisplayName || displayName || name);
+  const chinese = String(supplierNameChinese || fallback.supplierNameChinese || '').trim();
+  const english = cleanSupplierEnglishName(supplierNameEnglish || fallback.supplierNameEnglish || '');
+  return [chinese, english].filter(Boolean).join(' ') || cleanSupplierEnglishName(supplierDisplayName || displayName || name) || String(supplierDisplayName || displayName || name || '').trim();
+}
+
+function supplierDisplayName(record = {}) {
+  return buildSupplierDisplayName(record) || record.displayName || record.name || '未命名供应商';
 }
 
 function parseJsonList(value) {
@@ -375,7 +455,7 @@ async function findSupplierByName(name) {
   const suppliers = await localDb.getSuppliers();
   const normalizedName = normalizeSupplierName(name);
   return suppliers.find((supplier) => {
-    const aliases = mergeJsonLists(supplier.aliases, supplier.name, supplier.displayName);
+    const aliases = mergeJsonLists(supplier.aliases, supplier.name, supplier.displayName, supplier.supplierDisplayName, supplier.supplierNameChinese, supplier.supplierNameEnglish);
     return supplier.name === name
       || supplier.displayName === name
       || supplier.normalizedName === normalizedName
@@ -465,15 +545,31 @@ export const localDb = {
   async getSuppliers() {
     return (await all('suppliers'))
       .filter((supplier) => active(supplier) && supplier.status !== 'merged')
-      .sort((a, b) => (a.displayName || a.name || '').localeCompare(b.displayName || b.name || ''));
+      .map((supplier) => ({ ...supplier, supplierDisplayName: supplierDisplayName(supplier), displayName: supplierDisplayName(supplier), name: supplierDisplayName(supplier) }))
+      .sort((a, b) => supplierDisplayName(a).localeCompare(supplierDisplayName(b)));
   },
 
   async saveSupplier(supplier) {
-    const displayName = supplier.displayName || supplier.name || '';
+    const parts = splitSupplierNameParts([
+      supplier.supplierNameChinese,
+      supplier.supplierNameEnglish,
+      supplier.supplierDisplayName,
+      supplier.displayName,
+      supplier.name
+    ].filter(Boolean).join(' '));
+    const supplierNameChinese = supplier.supplierNameChinese || parts.supplierNameChinese || '';
+    const supplierNameEnglish = supplier.supplierNameEnglish || parts.supplierNameEnglish || '';
+    const displayName = buildSupplierDisplayName({
+      supplierNameChinese,
+      supplierNameEnglish,
+      supplierDisplayName: supplier.supplierDisplayName,
+      displayName: supplier.displayName,
+      name: supplier.name
+    });
     const normalizedName = normalizeSupplierName(displayName);
     const existing = (await localDb.getSuppliers()).find((entry) => {
       if (supplier.id && idsFor(entry).includes(supplier.id)) return false;
-      const aliases = mergeJsonLists(entry.aliases, entry.name, entry.displayName);
+      const aliases = mergeJsonLists(entry.aliases, entry.name, entry.displayName, entry.supplierDisplayName, entry.supplierNameChinese, entry.supplierNameEnglish);
       return entry.normalizedName === normalizedName || aliases.some((alias) => normalizeSupplierName(alias) === normalizedName);
     });
     if (existing) {
@@ -481,17 +577,24 @@ export const localDb = {
         ...existing,
         ...supplier,
         id: existing.id,
-        displayName: existing.displayName || displayName,
+        name: displayName,
+        displayName,
+        supplierNameChinese: existing.supplierNameChinese || supplierNameChinese,
+        supplierNameEnglish: existing.supplierNameEnglish || supplierNameEnglish,
+        supplierDisplayName: displayName,
         normalizedName: existing.normalizedName || normalizedName,
-        aliases: JSON.stringify(mergeJsonLists(existing.aliases, supplier.aliases, supplierAliasesFromName(displayName)))
+        aliases: JSON.stringify(mergeJsonLists(existing.aliases, supplier.aliases, supplierAliasesFromName(displayName), supplierNameChinese, supplierNameEnglish))
       }));
     }
     return put('suppliers', syncFields({
       ...supplier,
       name: displayName,
       displayName,
+      supplierNameChinese,
+      supplierNameEnglish,
+      supplierDisplayName: displayName,
       normalizedName,
-      aliases: JSON.stringify(mergeJsonLists(supplier.aliases, supplierAliasesFromName(displayName))),
+      aliases: JSON.stringify(mergeJsonLists(supplier.aliases, supplierAliasesFromName(displayName), supplierNameChinese, supplierNameEnglish)),
       templateIds: supplier.templateIds || '[]',
       status: supplier.status || 'active'
     }));
@@ -600,12 +703,24 @@ export const localDb = {
     const detail = await localDb.getInvoice(invoiceId);
     if (!detail) throw new Error('Invoice not found');
     const before = detail.invoice;
-    const supplier = fields.supplierName ? await findOrCreateSupplier(fields.supplierName) : null;
+    const supplierInput = {
+      id: before.supplierId || '',
+      name: fields.supplierName || fields.supplierDisplayName || before.supplierName || '',
+      displayName: fields.supplierDisplayName || fields.supplierName || before.supplierName || '',
+      supplierDisplayName: fields.supplierDisplayName || fields.supplierName || before.supplierName || '',
+      supplierNameChinese: fields.supplierNameChinese || '',
+      supplierNameEnglish: fields.supplierNameEnglish || ''
+    };
+    const supplier = (supplierInput.name || supplierInput.supplierNameChinese || supplierInput.supplierNameEnglish)
+      ? await localDb.saveSupplier(supplierInput)
+      : null;
+    const supplierName = supplierDisplayName(supplier) || fields.supplierName || before.supplierName || '';
     const calculatedTotal = Number(before.calculatedTotal || detail.items.reduce((sum, item) => sum + Number(item.totalPrice || 0), 0));
     const updated = syncFields({
       ...before,
       ...fields,
       supplierId: supplier?.id || before.supplierId || '',
+      supplierName,
       totalAmount: Number(fields.totalAmount ?? before.totalAmount ?? 0),
       subtotal: Number(fields.subtotal ?? before.subtotal ?? fields.totalAmount ?? before.totalAmount ?? 0),
       tax: Number(fields.tax ?? before.tax ?? 0),
@@ -645,7 +760,7 @@ export const localDb = {
       invoiceDate,
       pageNumber: Number(payload.pageNumber || 0),
       pageCount: Number(payload.pageCount || 0),
-      invoiceGroupKey: payload.invoiceGroupKey || [payload.supplierName || supplier?.name || '', payload.invoiceNo || '', Number(totalAmount || 0).toFixed(2)].join('|').toLowerCase(),
+      invoiceGroupKey: payload.invoiceGroupKey || [payload.supplierName || supplierDisplayName(supplier), payload.invoiceNo || '', Number(totalAmount || 0).toFixed(2)].join('|').toLowerCase(),
       invoiceLayoutType: payload.invoiceLayoutType || 'normal_invoice',
       imageId: payload.imageId || '',
       imageUrl: payload.imageUrl || '',
@@ -738,13 +853,13 @@ export const localDb = {
       const items = invoiceItems.filter((item) => invoiceIds.includes(item.invoiceId));
       return {
         ...invoice,
-        supplierName: supplier?.name || '未命名供应商',
+        supplierName: supplierDisplayName(supplier),
         itemCount: items.length,
         itemNames: items.map((item) => item.productNameNormalized || item.productNameOriginal || ''),
         itemTotal: items.reduce((sum, item) => sum + Number(item.totalPrice || 0), 0),
         itemTotalQuantity: items.reduce((sum, item) => sum + Number(item.quantity || 0), 0)
       };
-      return { ...invoice, supplierName: supplier?.name || '未命名供应商' };
+      return { ...invoice, supplierName: supplierDisplayName(supplier) };
     }).sort((a, b) => `${b.invoiceDate || ''}${b.createdAt || ''}`.localeCompare(`${a.invoiceDate || ''}${a.createdAt || ''}`));
   },
 
@@ -759,7 +874,7 @@ export const localDb = {
     const discounts = (await all('invoice_discounts')).filter((discount) => active(discount) && invoiceIds.includes(discount.invoiceId));
     const mergedIds = parseJsonList(invoice.mergedInvoiceIds);
     const mergedInvoices = invoices.filter((entry) => mergedIds.some((idValue) => idsFor(entry).includes(idValue)));
-    return { invoice: { ...invoice, supplierName: supplier?.name || '未命名供应商' }, items, discounts, mergedInvoices };
+    return { invoice: { ...invoice, supplierName: supplierDisplayName(supplier) }, items, discounts, mergedInvoices };
   },
 
   async getMergeCandidates(invoiceId) {
@@ -795,9 +910,21 @@ export const localDb = {
         .filter((row) => sourceIds.includes(row.supplierId))
         .map((row) => syncFields({ ...row, supplierId: targetId })));
     }
+    const mergedDisplayName = buildSupplierDisplayName({
+      supplierNameChinese: target.supplierNameChinese || source.supplierNameChinese,
+      supplierNameEnglish: target.supplierNameEnglish || source.supplierNameEnglish,
+      supplierDisplayName: target.supplierDisplayName || target.displayName || target.name,
+      displayName: source.supplierDisplayName || source.displayName || source.name
+    });
+    const mergedParts = splitSupplierNameParts(mergedDisplayName);
     await put('suppliers', syncFields({
       ...target,
-      aliases: JSON.stringify(mergeJsonLists(target.aliases, source.aliases, supplierAliasesFromName(source.displayName || source.name || ''))),
+      name: mergedDisplayName,
+      displayName: mergedDisplayName,
+      supplierNameChinese: target.supplierNameChinese || source.supplierNameChinese || mergedParts.supplierNameChinese,
+      supplierNameEnglish: target.supplierNameEnglish || source.supplierNameEnglish || mergedParts.supplierNameEnglish,
+      supplierDisplayName: mergedDisplayName,
+      aliases: JSON.stringify(mergeJsonLists(target.aliases, source.aliases, supplierAliasesFromName(source.supplierDisplayName || source.displayName || source.name || ''), source.supplierNameChinese, source.supplierNameEnglish)),
       templateIds: JSON.stringify(mergeJsonLists(target.templateIds, source.templateIds))
     }));
     await put('suppliers', syncFields({ ...source, status: 'merged', suspectedDuplicateOf: targetId, deletedAt: nowIso() }, 'deleted'));
@@ -992,7 +1119,7 @@ export const localDb = {
     }).map((item) => {
       const supplier = resolveByAnyId(suppliers, item.supplierId);
       const invoice = resolveByAnyId(invoices, item.invoiceId);
-      return { ...item, supplierName: supplier?.name || '未命名供应商', invoiceNo: invoice?.invoiceNo || '', invoiceImagePath: invoice?.imagePath || '', invoiceRecordId: invoice?.id || '' };
+      return { ...item, supplierName: supplierDisplayName(supplier), invoiceNo: invoice?.invoiceNo || '', invoiceImagePath: invoice?.imagePath || '', invoiceRecordId: invoice?.id || '' };
     }).sort((a, b) => `${b.invoiceDate}${b.createdAt}`.localeCompare(`${a.invoiceDate}${a.createdAt}`));
   },
 
@@ -1008,7 +1135,7 @@ export const localDb = {
       const discounts = invoiceDiscounts.filter((discount) => invoiceIds.includes(discount.invoiceId));
       return {
         ...invoice,
-        supplierName: supplier?.name || '未命名供应商',
+        supplierName: supplierDisplayName(supplier),
         itemCount: items.length,
         hasGifts: items.some((item) => Number(item.isFreeItem || 0) || Number(item.freeQty || 0) > 0),
         hasDiscounts: discounts.length > 0,
@@ -1068,6 +1195,9 @@ export const localDb = {
       ].join(' '));
       return {
         ...supplier,
+        name: supplierDisplayName(supplier),
+        displayName: supplierDisplayName(supplier),
+        supplierDisplayName: supplierDisplayName(supplier),
         totalPurchaseAmount: supplierInvoices.reduce((sum, invoice) => sum + moneyNumber(invoice.totalAmount), 0),
         invoiceCount: supplierInvoices.length,
         recentPurchaseDate: sortedInvoices[0]?.invoiceDate || '',
@@ -1212,7 +1342,7 @@ export const localDb = {
         lowestByProduct.set(key, {
           productName: item.productNameNormalized || item.productNameOriginal || key,
           price,
-          supplierName: supplierById.get(item.supplierId)?.name || '未命名供应商',
+          supplierName: supplierDisplayName(supplierById.get(item.supplierId)),
           invoiceId: invoice?.id || '',
           invoiceNo: invoice?.invoiceNo || '',
           invoiceDate: item.invoiceDate || ''
@@ -1221,7 +1351,7 @@ export const localDb = {
     }
     return {
       supplierRanking: [...supplierGroups.values()].map((group) => ({
-        supplierName: group.supplier?.name || '未命名供应商',
+        supplierName: supplierDisplayName(group.supplier),
         amount: group.amount,
         count: group.count,
         averageOrderAmount: group.count ? group.amount / group.count : 0

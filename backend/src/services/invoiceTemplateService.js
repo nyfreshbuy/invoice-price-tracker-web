@@ -13,6 +13,8 @@ export function normalizeInvoiceResult(result = {}) {
   const items = Array.isArray(result.items) ? result.items : [];
   return {
     supplierName: layoutAdjusted.supplierName || '',
+    supplierNameChinese: layoutAdjusted.supplierNameChinese || '',
+    supplierNameEnglish: layoutAdjusted.supplierNameEnglish || '',
     invoiceNo: layoutAdjusted.invoiceNo || '',
     invoiceDate: normalizeInvoiceDate(layoutAdjusted.invoiceDate),
     totalAmount: Number(layoutAdjusted.totalAmount || 0),

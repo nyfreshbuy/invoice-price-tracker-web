@@ -30,6 +30,10 @@ export async function recognizeInvoiceWithAI(imagePath, options = {}) {
               'Extract this supplier invoice into strict JSON. Return only JSON.',
               'Do not save anything.',
               'Product names are critical:',
+              'Supplier names are critical:',
+              '- Extract supplierNameChinese and supplierNameEnglish separately.',
+              '- Do not repeat the same English company name. If the invoice shows the same English company name multiple times, return it once.',
+              '- Set supplierName to supplierNameChinese + " " + supplierNameEnglish, using only available parts.',
               '- Do not extract English only.',
               '- Preserve the original Chinese text exactly as printed.',
               '- Do not translate Chinese into English.',
@@ -98,6 +102,8 @@ export async function recognizeInvoiceWithAI(imagePath, options = {}) {
 function invoiceJsonShape() {
   return {
     supplierName: '',
+    supplierNameChinese: '',
+    supplierNameEnglish: '',
     invoiceNo: '',
     invoiceDate: '',
     pageNumber: 0,
