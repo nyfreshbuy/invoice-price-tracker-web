@@ -104,7 +104,8 @@ export function defaultTemplateCandidate(supplierName) {
   };
 }
 
-export async function findTemplateByOcrText(ocrText, companyId = 'default') {
+export async function findTemplateByOcrText(ocrText, companyId = '') {
+  if (!companyId) return null;
   const templates = await queryAll(`
     SELECT * FROM ${quoteTable('invoice_templates')}
     WHERE ${quoteIdentifier('companyId')} = ? AND ${quoteIdentifier('isActive')} = 1
@@ -125,7 +126,8 @@ export async function findTemplateByOcrText(ocrText, companyId = 'default') {
   return null;
 }
 
-export async function findTemplateBySupplierHint(hint, companyId = 'default') {
+export async function findTemplateBySupplierHint(hint, companyId = '') {
+  if (!companyId) return null;
   const text = String(hint || '').toLowerCase();
   const normalizedHint = normalizeSupplierName(hint);
   if (!text) return null;
@@ -185,7 +187,8 @@ export function parseWithTemplate(ocrText, template) {
   };
 }
 
-export async function saveOrUpdateTemplateFromResult(result, sampleImageHash, companyId = 'default') {
+export async function saveOrUpdateTemplateFromResult(result, sampleImageHash, companyId = '') {
+  if (!companyId) throw new Error('Missing authenticated companyId');
   const normalized = normalizeInvoiceResult(result);
   const candidate = normalized.templateCandidate || defaultTemplateCandidate(normalized.supplierName);
   const supplierName = normalized.supplierName || candidate.supplierKeywords?.[0] || '';
@@ -227,8 +230,8 @@ export async function saveOrUpdateTemplateFromResult(result, sampleImageHash, co
   return parseInvoiceTemplate(template);
 }
 
-export async function markTemplateSuccess(templateId, companyId = 'default') {
-  if (!templateId) return;
+export async function markTemplateSuccess(templateId, companyId = '') {
+  if (!templateId || !companyId) return;
   await run(`
     UPDATE ${quoteTable('invoice_templates')}
     SET ${quoteIdentifier('successCount')} = ${quoteIdentifier('successCount')} + 1,
@@ -239,8 +242,8 @@ export async function markTemplateSuccess(templateId, companyId = 'default') {
   `, [nowIso(), nowIso(), templateId, companyId]);
 }
 
-export async function markTemplateFailure(templateId, companyId = 'default') {
-  if (!templateId) return;
+export async function markTemplateFailure(templateId, companyId = '') {
+  if (!templateId || !companyId) return;
   await run(`
     UPDATE ${quoteTable('invoice_templates')}
     SET ${quoteIdentifier('failCount')} = ${quoteIdentifier('failCount')} + 1,

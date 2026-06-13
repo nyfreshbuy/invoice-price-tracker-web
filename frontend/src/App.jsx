@@ -133,7 +133,7 @@ export default function App() {
         const data = await api.me();
         if (cancelled) return;
         const verifiedSession = { token: authSession.token, user: data.user, company: data.company };
-        localStorage.setItem('invoicePriceTrackerAuth', JSON.stringify(verifiedSession));
+        setAuthSession(verifiedSession);
         setAuthState(verifiedSession);
       } catch {
         if (!cancelled) setAuthSession(null);

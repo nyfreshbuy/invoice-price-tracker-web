@@ -4,7 +4,7 @@ export function createInvoiceTemplate(input = {}) {
   const timestamp = nowIso();
   return {
     id: input.id || id(),
-    companyId: input.companyId || 'default',
+    companyId: input.companyId || '',
     supplierName: input.supplierName || '',
     invoiceLayoutType: input.invoiceLayoutType || 'normal_invoice',
     supplierKeywords: JSON.stringify(input.supplierKeywords || []),

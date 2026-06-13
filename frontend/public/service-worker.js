@@ -1,4 +1,4 @@
-const CACHE_NAME = 'invoice-price-tracker-v1';
+const CACHE_NAME = 'invoice-price-tracker-auth-required-v2';
 const APP_SHELL = [
   '/',
   '/index.html',
@@ -20,6 +20,12 @@ self.addEventListener('activate', (event) => {
     caches.keys()
       .then((keys) => Promise.all(keys.filter((key) => key !== CACHE_NAME).map((key) => caches.delete(key))))
       .then(() => self.clients.claim())
+      .then(() => self.clients.matchAll({ type: 'window', includeUncontrolled: true }))
+      .then((clients) => {
+        for (const client of clients) {
+          client.postMessage({ type: 'AUTH_REQUIRED_VERSION_ACTIVE' });
+        }
+      })
   );
 });
 

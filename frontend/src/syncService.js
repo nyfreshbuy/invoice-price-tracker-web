@@ -42,6 +42,10 @@ export async function syncNow() {
   try {
     const deviceId = getDeviceId();
     const companyId = getCompanyId();
+    if (!companyId) {
+      lastError = '请先登录';
+      return getSyncSnapshot();
+    }
     const pending = await localDb.getPendingChanges();
     const hasPending = Object.values(pending).some((records) => records.length > 0);
     if (hasPending) {
@@ -51,7 +55,7 @@ export async function syncNow() {
       }
     }
 
-    const metaKey = `lastPullAt:${companyId || 'default'}`;
+    const metaKey = `lastPullAt:${companyId}`;
     const meta = await localDb.getMeta(metaKey);
     const pulled = await api.syncPull(meta?.value || '');
     for (const table of syncTables) {

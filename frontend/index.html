@@ -13,6 +13,30 @@
     <title>InvoicePriceTracker</title>
   </head>
   <body>
+    <script>
+      (() => {
+        const authKey = 'invoicePriceTrackerAuth';
+        const legacyKeys = ['authToken', 'token', 'user', 'company', 'companyId', 'invoicePriceTrackerLoggedOut'];
+        try {
+          const session = JSON.parse(localStorage.getItem(authKey) || 'null');
+          const company = session && session.company ? session.company : {};
+          const user = session && session.user ? session.user : {};
+          const legacyDemo = session && (
+            !session.token ||
+            company.id === 'demo-company' ||
+            user.companyId === 'demo-company' ||
+            user.id === 'demo-user' ||
+            company.name === '测试公司' ||
+            user.username === 'demo'
+          );
+          if (legacyDemo) localStorage.removeItem(authKey);
+          for (const key of legacyKeys) localStorage.removeItem(key);
+        } catch {
+          localStorage.removeItem(authKey);
+          for (const key of legacyKeys) localStorage.removeItem(key);
+        }
+      })();
+    </script>
     <div id="root"></div>
     <script type="module" src="/src/main.jsx"></script>
   </body>

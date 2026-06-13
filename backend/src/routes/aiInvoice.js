@@ -14,13 +14,17 @@ const upload = multer({ dest: uploadDir });
 const router = express.Router();
 
 router.post('/recognize', upload.single('image'), async (req, res) => {
+  if (!req.user?.companyId) {
+    res.status(401).json({ success: false, error: 'Unauthorized' });
+    return;
+  }
   if (!req.file) {
     res.status(400).json({ success: false, error: 'No image uploaded' });
     return;
   }
 
   try {
-    const result = await recognizeInvoice(req.file, { companyId: req.user?.companyId || 'default' });
+    const result = await recognizeInvoice(req.file, { companyId: req.user.companyId });
     res.json(result);
   } catch (error) {
     res.status(500).json({
@@ -31,15 +35,17 @@ router.post('/recognize', upload.single('image'), async (req, res) => {
 });
 
 router.post('/template-success', async (req, res) => {
-  await markTemplateSuccess(req.body.templateId, req.user?.companyId || 'default');
+  if (!req.user?.companyId) return res.status(401).json({ success: false, error: 'Unauthorized' });
+  await markTemplateSuccess(req.body.templateId, req.user.companyId);
   if (req.body.result) {
-    await saveOrUpdateTemplateFromResult(req.body.result, req.body.sampleImageHash || '', req.user?.companyId || 'default');
+    await saveOrUpdateTemplateFromResult(req.body.result, req.body.sampleImageHash || '', req.user.companyId);
   }
   res.json({ success: true });
 });
 
 router.post('/template-failure', async (req, res) => {
-  await markTemplateFailure(req.body.templateId, req.user?.companyId || 'default');
+  if (!req.user?.companyId) return res.status(401).json({ success: false, error: 'Unauthorized' });
+  await markTemplateFailure(req.body.templateId, req.user.companyId);
   res.json({ success: true });
 });
 

@@ -14,7 +14,8 @@ import { recognizeInvoiceWithAI } from './aiInvoiceService.js';
 import { buildSupplierDisplayName, splitSupplierNameParts } from './supplierNormalizationService.js';
 
 export async function recognizeInvoice(file, options = {}) {
-  const companyId = options.companyId || 'default';
+  const companyId = options.companyId || '';
+  if (!companyId) throw new Error('Missing authenticated companyId');
   const imageBuffer = fs.readFileSync(file.path);
   const sampleImageHash = hashImageFile(imageBuffer);
   const imagePath = `/uploads/${file.filename}`;

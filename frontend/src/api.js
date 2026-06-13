@@ -1,8 +1,9 @@
 const API_BASE = (import.meta.env.VITE_API_BASE_URL || 'http://localhost:3000').replace(/\/$/, '');
 const AUTH_KEY = 'invoicePriceTrackerAuth';
+const LEGACY_AUTH_KEYS = ['authToken', 'token', 'user', 'company', 'companyId', 'invoicePriceTrackerLoggedOut'];
 export const REGISTRATION_ENABLED = import.meta.env.VITE_REGISTRATION_ENABLED !== 'false';
 
-export function getAuthSession() {
+function parseStoredSession() {
   try {
     return JSON.parse(localStorage.getItem(AUTH_KEY) || 'null');
   } catch {
@@ -10,11 +11,46 @@ export function getAuthSession() {
   }
 }
 
+function isLegacyDemoSession(session) {
+  const company = session?.company || {};
+  const user = session?.user || {};
+  return !session?.token
+    || company.id === 'demo-company'
+    || user.companyId === 'demo-company'
+    || user.id === 'demo-user'
+    || company.name === '测试公司'
+    || user.username === 'demo';
+}
+
+export function clearAuthStorage() {
+  localStorage.removeItem(AUTH_KEY);
+  for (const key of LEGACY_AUTH_KEYS) localStorage.removeItem(key);
+}
+
+export function sanitizeAuthStorage() {
+  const session = parseStoredSession();
+  if (!session) {
+    for (const key of LEGACY_AUTH_KEYS) localStorage.removeItem(key);
+    return null;
+  }
+  if (isLegacyDemoSession(session)) {
+    clearAuthStorage();
+    return null;
+  }
+  return session;
+}
+
+sanitizeAuthStorage();
+
+export function getAuthSession() {
+  return sanitizeAuthStorage();
+}
+
 export function setAuthSession(session) {
   if (session?.token) {
     localStorage.setItem(AUTH_KEY, JSON.stringify(session));
   } else {
-    localStorage.removeItem(AUTH_KEY);
+    clearAuthStorage();
   }
   window.dispatchEvent(new Event('auth-change'));
 }
