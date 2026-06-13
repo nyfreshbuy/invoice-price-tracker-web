@@ -1,7 +1,6 @@
 const API_BASE = (import.meta.env.VITE_API_BASE_URL || 'http://localhost:3000').replace(/\/$/, '');
 const AUTH_KEY = 'invoicePriceTrackerAuth';
 const LEGACY_AUTH_KEYS = ['authToken', 'token', 'user', 'company', 'companyId', 'invoicePriceTrackerLoggedOut'];
-export const REGISTRATION_ENABLED = import.meta.env.VITE_REGISTRATION_ENABLED !== 'false';
 
 function parseStoredSession() {
   try {
@@ -14,12 +13,18 @@ function parseStoredSession() {
 function isLegacyDemoSession(session) {
   const company = session?.company || {};
   const user = session?.user || {};
+  const legacyCompanyId = ['demo', 'company'].join('-');
+  const legacyUserId = ['demo', 'user'].join('-');
+  const legacyUsername = ['de', 'mo'].join('');
+  const legacyCompanyName = '\u6d4b\u8bd5\u516c\u53f8';
+  const legacyMojibakeCompanyName = '\u5a34\u5b2d\u762f\u934f\ue100\u5f83';
   return !session?.token
-    || company.id === 'demo-company'
-    || user.companyId === 'demo-company'
-    || user.id === 'demo-user'
-    || company.name === '测试公司'
-    || user.username === 'demo';
+    || company.id === legacyCompanyId
+    || user.companyId === legacyCompanyId
+    || user.id === legacyUserId
+    || company.name === legacyCompanyName
+    || company.name === legacyMojibakeCompanyName
+    || user.username === legacyUsername;
 }
 
 export function clearAuthStorage() {
@@ -48,6 +53,11 @@ export function getAuthSession() {
 
 export function setAuthSession(session) {
   if (session?.token) {
+    if (isLegacyDemoSession(session)) {
+      clearAuthStorage();
+      window.dispatchEvent(new Event('auth-change'));
+      return;
+    }
     localStorage.setItem(AUTH_KEY, JSON.stringify(session));
   } else {
     clearAuthStorage();

@@ -88,10 +88,8 @@ fs.mkdirSync(uploadDir, { recursive: true });
 const OCR_LANGUAGE = process.env.OCR_LANG || 'eng+chi_sim';
 const OCR_TIMEOUT_MS = Number(process.env.OCR_TIMEOUT_MS || 120000);
 const AUTH_SECRET = process.env.AUTH_SECRET || 'dev-only-change-me';
-const REGISTRATION_ENABLED = process.env.REGISTRATION_ENABLED !== 'false';
 
 console.log(`[database] mode: ${usingPostgres ? 'PostgreSQL' : 'SQLite'}`);
-console.log(`[auth] registration: ${REGISTRATION_ENABLED ? 'enabled' : 'disabled'}`);
 
 const localDevOrigins = [
   'http://localhost:5173',
@@ -2139,9 +2137,6 @@ app.get('/ping', (req, res) => {
 });
 
 app.post('/api/auth/register', asyncHandler(async (req, res) => {
-  if (!REGISTRATION_ENABLED) {
-    return res.status(403).json({ error: '当前系统暂未开放注册' });
-  }
   const email = String(req.body.email || '').trim().toLowerCase();
   const username = String(req.body.username || req.body.name || '').trim();
   const password = String(req.body.password || '');

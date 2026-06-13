@@ -18,7 +18,7 @@ import {
   Upload,
   UserPlus
 } from 'lucide-react';
-import { api, getAuthSession, REGISTRATION_ENABLED, setAuthSession } from './api.js';
+import { api, getAuthSession, setAuthSession } from './api.js';
 import { generateId, localDb, today } from './localDb.js';
 import { getSyncSnapshot, startAutoSync, syncNow } from './syncService.js';
 
@@ -134,7 +134,7 @@ export default function App() {
         if (cancelled) return;
         const verifiedSession = { token: authSession.token, user: data.user, company: data.company };
         setAuthSession(verifiedSession);
-        setAuthState(verifiedSession);
+        setAuthState(getAuthSession());
       } catch {
         if (!cancelled) setAuthSession(null);
       } finally {
@@ -203,10 +203,6 @@ function AuthPage({ onAuthenticated }) {
     setMessage('');
     try {
       if (mode === 'register') {
-        if (!REGISTRATION_ENABLED) {
-          setMessage('当前系统暂未开放注册');
-          return;
-        }
         if (form.password !== form.confirmPassword) {
           setMessage('两次输入的密码不一致');
           return;
@@ -218,7 +214,7 @@ function AuthPage({ onAuthenticated }) {
       }
       const session = await api.login({ login: form.email, password: form.password });
       setAuthSession(session);
-      onAuthenticated(session);
+      onAuthenticated(getAuthSession());
       window.dispatchEvent(new Event('auth-change'));
       syncNow();
     } catch (error) {
@@ -237,7 +233,6 @@ function AuthPage({ onAuthenticated }) {
           <button type="button" className={mode === 'login' ? 'active' : ''} onClick={() => setMode('login')}>登录</button>
           <button type="button" className={mode === 'register' ? 'active' : ''} onClick={() => setMode('register')}>注册账号</button>
         </div>
-        {!REGISTRATION_ENABLED && <p className="warning-text">当前系统暂未开放注册。</p>}
         {mode === 'register' && (
           <>
             <label className="field"><span>公司/门店名称</span><input value={form.companyName} onChange={(event) => setForm({ ...form, companyName: event.target.value })} /></label>
@@ -248,7 +243,7 @@ function AuthPage({ onAuthenticated }) {
         <label className="field"><span>密码</span><input type="password" autoComplete={mode === 'login' ? 'current-password' : 'new-password'} value={form.password} onChange={(event) => setForm({ ...form, password: event.target.value })} /></label>
         {mode === 'register' && <label className="field"><span>确认密码</span><input type="password" autoComplete="new-password" value={form.confirmPassword} onChange={(event) => setForm({ ...form, confirmPassword: event.target.value })} /></label>}
         {message && <p className="error">{message}</p>}
-        <button className="primary-button" disabled={loading || (mode === 'register' && !REGISTRATION_ENABLED)}>{loading ? '处理中...' : mode === 'login' ? '登录' : '注册'}</button>
+        <button className="primary-button" disabled={loading}>{loading ? '处理中...' : mode === 'login' ? '登录' : '注册'}</button>
       </form>
     </div>
   );

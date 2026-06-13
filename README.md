@@ -31,12 +31,10 @@ This is the PWA version of InvoicePriceTracker.
 
 ## Authentication
 
-The old demo/no-auth mode has been removed.
-
 - No valid token: frontend shows the login/register page.
 - Valid token: frontend calls `GET /api/auth/me` and uses the returned user/company.
 - Business APIs reject requests without `Authorization: Bearer <token>`.
-- There is no mock company, guest user, default test company, skipAuth, or bypassAuth path.
+- All business data is scoped to the company returned by `GET /api/auth/me`.
 
 ## Background Invoice Recognition
 
@@ -178,7 +176,6 @@ CORS_ORIGIN=https://your-frontend-name.onrender.com
 DATA_DIR=/var/data
 UPLOAD_DIR=/var/data/uploads
 AUTH_SECRET=generate-a-long-random-secret
-REGISTRATION_ENABLED=true
 ```
 
 `DATABASE_URL` controls database mode:
@@ -188,28 +185,13 @@ REGISTRATION_ENABLED=true
 
 OpenAI keys must only be configured in backend environment variables. Never put `OPENAI_API_KEY` in the frontend.
 
-Account connection APIs require a real JWT login token. For testing account connections, set:
+Account connection APIs require a real JWT login token. Registration is always available on the login page.
 
 ```text
 # backend
 MONGODB_URI=your MongoDB connection string
 AUTH_SECRET=generate-a-long-random-secret
-
-# frontend
-VITE_REGISTRATION_ENABLED=true
 ```
-
-If registration is not open yet, set:
-
-```text
-# backend
-REGISTRATION_ENABLED=false
-
-# frontend
-VITE_REGISTRATION_ENABLED=false
-```
-
-The login page will show "当前系统暂未开放注册" instead of silently hiding the feature.
 
 Account APIs:
 
@@ -230,7 +212,6 @@ Render Static Site:
 
 ```text
 VITE_API_BASE_URL=https://your-backend-name.onrender.com
-VITE_REGISTRATION_ENABLED=true
 ```
 
 ## Render Deployment
@@ -258,7 +239,6 @@ CORS_ORIGIN=https://your-frontend-name.onrender.com
 DATA_DIR=/var/data
 UPLOAD_DIR=/var/data/uploads
 AUTH_SECRET=generate-a-long-random-secret
-REGISTRATION_ENABLED=true
 ```
 
 Optional Render Disk:
@@ -285,7 +265,6 @@ Environment variable:
 
 ```text
 VITE_API_BASE_URL=https://your-backend-name.onrender.com
-VITE_REGISTRATION_ENABLED=true
 ```
 
 After the frontend deploys, update backend:

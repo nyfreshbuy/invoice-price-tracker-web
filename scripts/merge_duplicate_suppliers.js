@@ -17,7 +17,11 @@ import {
 
 await migrate();
 
-const companyId = process.argv[2] || 'demo-company';
+const companyId = process.argv[2];
+if (!companyId) {
+  console.error('Usage: node scripts/merge_duplicate_suppliers.js <companyId>');
+  process.exit(1);
+}
 const suppliers = await queryAll(`
   SELECT * FROM ${quoteTable('suppliers')}
   WHERE ${quoteIdentifier('companyId')} = ?
