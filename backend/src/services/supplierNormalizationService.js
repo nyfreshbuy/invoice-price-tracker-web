@@ -89,16 +89,20 @@ function collapseRepeatedWordSequence(words = []) {
   const clean = words.map(normalizeEnglishToken).filter(Boolean);
   if (clean.length < 2) return clean;
 
-  for (let size = 1; size <= Math.floor(clean.length / 2); size += 1) {
-    const base = clean.slice(0, size);
-    let repeated = true;
-    for (let index = size; index < clean.length; index += 1) {
-      if (clean[index] !== base[index % size]) {
-        repeated = false;
-        break;
+  for (let offset = 0; offset < clean.length - 1; offset += 1) {
+    const tail = clean.slice(offset);
+    for (let size = 1; size <= Math.floor(tail.length / 2); size += 1) {
+      if (tail.length % size !== 0) continue;
+      const base = tail.slice(0, size);
+      let repeated = true;
+      for (let index = size; index < tail.length; index += 1) {
+        if (tail[index] !== base[index % size]) {
+          repeated = false;
+          break;
+        }
       }
+      if (repeated) return base;
     }
-    if (repeated) return base;
   }
 
   const output = [];

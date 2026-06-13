@@ -15,7 +15,8 @@ import {
   Settings,
   ShoppingCart,
   Trash2,
-  Upload
+  Upload,
+  UserPlus
 } from 'lucide-react';
 import { api, getAuthSession, setAuthSession } from './api.js';
 import { generateId, localDb, today } from './localDb.js';
@@ -149,6 +150,7 @@ export default function App() {
           <Route path="/suppliers/:id/products" element={<SupplierProductsPage />} />
           <Route path="/suppliers" element={<SupplierPage />} />
           <Route path="/suppliers/:id/invoices" element={<SupplierInvoiceHistoryPage />} />
+          <Route path="/account-connections" element={<AccountConnectionPage />} />
           <Route path="/analytics" element={<PurchaseAnalysisPage />} />
           <Route path="/settings" element={<SettingsPage />} />
         </Routes>
@@ -160,7 +162,7 @@ export default function App() {
 
 function AuthPage({ onAuthenticated }) {
   const [mode, setMode] = useState('login');
-  const [form, setForm] = useState({ companyName: '', name: '', email: '', password: '' });
+  const [form, setForm] = useState({ companyName: '', username: '', name: '', email: '', password: '', confirmPassword: '' });
   const [message, setMessage] = useState('');
   const [loading, setLoading] = useState(false);
 
@@ -169,9 +171,17 @@ function AuthPage({ onAuthenticated }) {
     setLoading(true);
     setMessage('');
     try {
-      const session = mode === 'register'
-        ? await api.register(form)
-        : await api.login({ email: form.email, password: form.password });
+      if (mode === 'register') {
+        if (form.password !== form.confirmPassword) {
+          setMessage('两次输入的密码不一致');
+          return;
+        }
+        await api.register(form);
+        setMode('login');
+        setMessage('注册成功，请登录');
+        return;
+      }
+      const session = await api.login({ login: form.email, password: form.password });
       setAuthSession(session);
       onAuthenticated(session);
       window.dispatchEvent(new Event('auth-change'));
@@ -195,13 +205,15 @@ function AuthPage({ onAuthenticated }) {
         {mode === 'register' && (
           <>
             <label className="field"><span>公司/门店名称</span><input value={form.companyName} onChange={(event) => setForm({ ...form, companyName: event.target.value })} /></label>
+            <label className="field"><span>用户名</span><input autoComplete="username" value={form.username} onChange={(event) => setForm({ ...form, username: event.target.value })} /></label>
             <label className="field"><span>姓名</span><input value={form.name} onChange={(event) => setForm({ ...form, name: event.target.value })} /></label>
           </>
         )}
-        <label className="field"><span>邮箱</span><input type="email" autoComplete="email" value={form.email} onChange={(event) => setForm({ ...form, email: event.target.value })} /></label>
+        <label className="field"><span>{mode === 'login' ? '邮箱/用户名' : '邮箱'}</span><input type={mode === 'login' ? 'text' : 'email'} autoComplete={mode === 'login' ? 'username' : 'email'} value={form.email} onChange={(event) => setForm({ ...form, email: event.target.value })} /></label>
         <label className="field"><span>密码</span><input type="password" autoComplete={mode === 'login' ? 'current-password' : 'new-password'} value={form.password} onChange={(event) => setForm({ ...form, password: event.target.value })} /></label>
+        {mode === 'register' && <label className="field"><span>确认密码</span><input type="password" autoComplete="new-password" value={form.confirmPassword} onChange={(event) => setForm({ ...form, confirmPassword: event.target.value })} /></label>}
         {message && <p className="error">{message}</p>}
-        <button className="primary-button" disabled={loading}>{loading ? '处理中...' : mode === 'login' ? '登录' : '注册并进入'}</button>
+        <button className="primary-button" disabled={loading}>{loading ? '处理中...' : mode === 'login' ? '登录' : '注册'}</button>
       </form>
     </div>
   );
@@ -234,6 +246,7 @@ function HomePage() {
       </Section>
       <Section title="管理">
         <ActionLink to="/suppliers" icon={<Building2 />} title="供应商管理" subtitle="供应商和模板支持离线编辑" />
+        <ActionLink to="/account-connections" icon={<UserPlus />} title="账户连接" subtitle="搜索账户、发送连接申请、审批收到的申请" />
         <ActionLink to="/settings" icon={<Settings />} title="设置/导出" subtitle="查看本地统计、导出云端 CSV" />
       </Section>
     </Page>
@@ -1934,6 +1947,144 @@ function SupplierInvoiceHistoryPage() {
   );
 }
 
+function AccountConnectionPage() {
+  const session = getAuthSession();
+  const [keyword, setKeyword] = useState('');
+  const [message, setMessage] = useState('');
+  const [notice, setNotice] = useState('');
+  const [searchResults, setSearchResults] = useState([]);
+  const [sent, setSent] = useState([]);
+  const [received, setReceived] = useState([]);
+  const [loading, setLoading] = useState(false);
+
+  async function loadRequests() {
+    if (!session?.token) return;
+    const [sentData, receivedData] = await Promise.all([
+      api.getSentConnections(),
+      api.getReceivedConnections()
+    ]);
+    setSent(sentData.requests || []);
+    setReceived(receivedData.requests || []);
+  }
+
+  useEffect(() => {
+    loadRequests().catch((error) => setNotice(error.message || '读取账户连接记录失败'));
+  }, [session?.token]);
+
+  async function searchUsers(event) {
+    event.preventDefault();
+    setNotice('');
+    if (!keyword.trim()) return;
+    setLoading(true);
+    try {
+      const data = await api.searchUsers(keyword.trim());
+      setSearchResults(data.users || []);
+    } catch (error) {
+      setNotice(error.message || '搜索账户失败');
+    } finally {
+      setLoading(false);
+    }
+  }
+
+  async function requestConnection(targetUserId) {
+    setNotice('');
+    try {
+      await api.requestAccountConnection({ targetUserId, message });
+      setNotice('连接申请已发送');
+      setMessage('');
+      await loadRequests();
+    } catch (error) {
+      setNotice(error.message || '发送连接申请失败');
+    }
+  }
+
+  async function decide(id, action) {
+    setNotice('');
+    try {
+      if (action === 'approve') await api.approveConnection(id);
+      else await api.rejectConnection(id);
+      setNotice(action === 'approve' ? '已同意连接申请' : '已拒绝连接申请');
+      await loadRequests();
+    } catch (error) {
+      setNotice(error.message || '处理申请失败');
+    }
+  }
+
+  if (!session?.token) {
+    return (
+      <Page title="账户连接" subtitle="搜索账户并建立连接关系">
+        <p className="warning-text">当前是免登录 DEMO 模式。账户连接需要先注册并登录真实账户。</p>
+      </Page>
+    );
+  }
+
+  return (
+    <Page title="账户连接" subtitle="搜索其他账户，发送或处理连接申请">
+      {notice && <p className={notice.includes('失败') || notice.includes('未配置') || notice.includes('错误') ? 'error' : 'success-text'}>{notice}</p>}
+      <Section title="搜索账户">
+        <form className="toolbar" onSubmit={searchUsers}>
+          <input placeholder="邮箱、用户名、公司名" value={keyword} onChange={(event) => setKeyword(event.target.value)} />
+          <button className="primary-button" disabled={loading}>{loading ? '搜索中...' : '搜索'}</button>
+        </form>
+        <label className="field"><span>申请备注</span><textarea value={message} onChange={(event) => setMessage(event.target.value)} /></label>
+        <div className="card-list">
+          {searchResults.map((user) => (
+            <div className="row-card" key={user.id}>
+              <div>
+                <h3>{user.companyName || user.username}</h3>
+                <p>{user.username} · {user.email}</p>
+              </div>
+              <button type="button" onClick={() => requestConnection(user.id)}>申请连接</button>
+            </div>
+          ))}
+          {searchResults.length === 0 && <EmptyState text="请输入关键词搜索账户" />}
+        </div>
+      </Section>
+
+      <Section title="我发出的申请">
+        <ConnectionList requests={sent} direction="sent" />
+      </Section>
+
+      <Section title="收到的申请">
+        <ConnectionList requests={received} direction="received" onDecide={decide} />
+      </Section>
+    </Page>
+  );
+}
+
+function ConnectionList({ requests, direction, onDecide }) {
+  if (!requests.length) return <EmptyState text="暂无记录" />;
+  return (
+    <div className="card-list">
+      {requests.map((request) => {
+        const other = direction === 'sent' ? request.target : request.requester;
+        return (
+          <div className="row-card" key={request.id}>
+            <div>
+              <h3>{other?.companyName || other?.username || '未知账户'}</h3>
+              <p>{other?.username || ''} · {other?.email || ''}</p>
+              {request.message && <p>{request.message}</p>}
+              <p>状态：{connectionStatusLabel(request.status)} · {request.createdAt ? new Date(request.createdAt).toLocaleString() : ''}</p>
+            </div>
+            {direction === 'received' && request.status === 'pending' && (
+              <div className="row-actions">
+                <button type="button" onClick={() => onDecide(request.id, 'approve')}>同意</button>
+                <button type="button" onClick={() => onDecide(request.id, 'reject')}>拒绝</button>
+              </div>
+            )}
+          </div>
+        );
+      })}
+    </div>
+  );
+}
+
+function connectionStatusLabel(status) {
+  if (status === 'approved') return '已同意';
+  if (status === 'rejected') return '已拒绝';
+  return '待处理';
+}
+
 function SettingsPage() {
   const [stats, setStats] = useState({});
   const load = () => localDb.getStats().then(setStats);
@@ -2334,6 +2485,7 @@ function sourceLabel(source) {
 }
 
 function duplicateStatusLabel(status) {
+  if (status === 'duplicate') return '重复发票';
   if (status === 'confirmed') return '重复发票';
   if (status === 'possible') return '疑似重复，请确认';
   return '正常';

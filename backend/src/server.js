@@ -4,7 +4,7 @@ import multer from 'multer';
 import path from 'node:path';
 import fs from 'node:fs';
 import crypto from 'node:crypto';
-import { fileURLToPath } from 'node:url';
+import { fileURLToPath, pathToFileURL } from 'node:url';
 import {
   getByAnyId,
   id,
@@ -38,6 +38,7 @@ import {
 } from './services/productNormalizationService.js';
 import {
   buildSupplierDisplayName,
+  cleanSupplierEnglishName,
   displaySupplierName,
   isSupplierDuplicateCandidate,
   mergeAliases,
@@ -47,6 +48,18 @@ import {
   supplierAliasesFromName
 } from './services/supplierNormalizationService.js';
 import { buildInvoiceGroupKey } from './services/handwrittenInvoiceService.js';
+import {
+  createConnectionRequest,
+  createMongoUser,
+  decideConnection,
+  findMongoUserById,
+  findMongoUserByLogin,
+  isMongoAuthConfigured,
+  listReceivedConnections,
+  listSentConnections,
+  searchMongoUsers,
+  toPublicMongoUser
+} from './services/mongoAccountStore.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
@@ -68,7 +81,7 @@ loadEnvFile(path.resolve(__dirname, '..', '.env'));
 
 await migrate();
 
-const app = express();
+export const app = express();
 const PORT = process.env.PORT || 3000;
 const uploadDir = process.env.UPLOAD_DIR || path.resolve(__dirname, '..', 'uploads');
 fs.mkdirSync(uploadDir, { recursive: true });
@@ -126,15 +139,28 @@ function asyncHandler(handler) {
 }
 
 function signToken(payload) {
+  const header = Buffer.from(JSON.stringify({ alg: 'HS256', typ: 'JWT' })).toString('base64url');
   const body = Buffer.from(JSON.stringify(payload)).toString('base64url');
-  const signature = crypto.createHmac('sha256', AUTH_SECRET).update(body).digest('base64url');
-  return `${body}.${signature}`;
+  const signature = crypto.createHmac('sha256', AUTH_SECRET).update(`${header}.${body}`).digest('base64url');
+  return `${header}.${body}.${signature}`;
 }
 
 function verifyToken(token) {
-  const [body, signature] = String(token || '').split('.');
+  const parts = String(token || '').split('.');
+  let body;
+  let signature;
+  let signedContent;
+  if (parts.length === 3) {
+    [, body, signature] = parts;
+    signedContent = `${parts[0]}.${body}`;
+  } else if (parts.length === 2) {
+    [body, signature] = parts;
+    signedContent = body;
+  } else {
+    return null;
+  }
   if (!body || !signature) return null;
-  const expected = crypto.createHmac('sha256', AUTH_SECRET).update(body).digest('base64url');
+  const expected = crypto.createHmac('sha256', AUTH_SECRET).update(signedContent).digest('base64url');
   if (signature.length !== expected.length) return null;
   if (!crypto.timingSafeEqual(Buffer.from(signature), Buffer.from(expected))) return null;
   const payload = JSON.parse(Buffer.from(body, 'base64url').toString('utf8'));
@@ -158,12 +184,23 @@ function authResponse(user, company) {
     userId: user.id,
     companyId: user.companyId,
     email: user.email,
+    username: user.username || user.name || '',
+    role: user.role || 'user',
+    authStore: user.authStore || 'sql',
     exp: Math.floor(Date.now() / 1000) + 60 * 60 * 24 * 30
   });
   return {
     token,
-    user: { id: user.id, email: user.email, name: user.name || '', companyId: user.companyId },
-    company: { id: company.id, name: company.name }
+    user: {
+      id: user.id,
+      username: user.username || user.name || '',
+      email: user.email,
+      name: user.name || user.username || '',
+      role: user.role || 'user',
+      companyId: user.companyId,
+      companyName: user.companyName || company.name || ''
+    },
+    company: { id: company.id, name: company.name || user.companyName || '' }
   };
 }
 
@@ -181,12 +218,62 @@ async function requireAuth(req, res, next) {
     res.status(401).json({ error: '请先登录' });
     return;
   }
+  if (payload.authStore === 'mongo' && isMongoAuthConfigured()) {
+    const mongoUser = await findMongoUserById(payload.userId);
+    if (!mongoUser || mongoUser.companyId !== payload.companyId) {
+      res.status(401).json({ error: '登录已失效' });
+      return;
+    }
+    req.user = {
+      id: mongoUser.id,
+      username: mongoUser.username || '',
+      email: mongoUser.email,
+      name: mongoUser.name || mongoUser.username || '',
+      role: mongoUser.role || 'user',
+      companyId: mongoUser.companyId,
+      companyName: mongoUser.companyName || ''
+    };
+    req.company = { id: mongoUser.companyId, name: mongoUser.companyName || '' };
+    next();
+    return;
+  }
   const user = await queryGet(`SELECT * FROM ${quoteTable('users')} WHERE ${quoteIdentifier('id')} = ? AND ${quoteIdentifier('companyId')} = ? LIMIT 1`, [payload.userId, payload.companyId]);
   if (!user) {
     res.status(401).json({ error: '登录已失效' });
     return;
   }
   req.user = { id: user.id, email: user.email, name: user.name || '', companyId: user.companyId };
+  next();
+}
+
+async function requireAccountAuth(req, res, next) {
+  const header = req.headers.authorization || '';
+  const token = header.startsWith('Bearer ') ? header.slice(7) : '';
+  const payload = verifyToken(token);
+  if (!payload?.userId) {
+    res.status(401).json({ error: '请先登录账户' });
+    return;
+  }
+  if (!isMongoAuthConfigured()) {
+    res.status(503).json({ error: 'MongoDB 未配置，请设置 MONGODB_URI' });
+    return;
+  }
+  const mongoUser = await findMongoUserById(payload.userId);
+  if (!mongoUser) {
+    res.status(401).json({ error: '登录已失效' });
+    return;
+  }
+  req.accountUser = toPublicMongoUser(mongoUser);
+  req.user = {
+    id: mongoUser.id,
+    username: mongoUser.username || '',
+    email: mongoUser.email,
+    name: mongoUser.name || mongoUser.username || '',
+    role: mongoUser.role || 'user',
+    companyId: mongoUser.companyId,
+    companyName: mongoUser.companyName || ''
+  };
+  req.company = { id: mongoUser.companyId, name: mongoUser.companyName || '' };
   next();
 }
 
@@ -234,7 +321,7 @@ function prepareRecord(table, record, deviceId, companyId) {
       rawName
     ].filter(Boolean).join(' '));
     const supplierNameChinese = record.supplierNameChinese || parts.supplierNameChinese || '';
-    const supplierNameEnglish = record.supplierNameEnglish || parts.supplierNameEnglish || '';
+    const supplierNameEnglish = cleanSupplierEnglishName(record.supplierNameEnglish || parts.supplierNameEnglish || '');
     const supplierDisplayName = buildSupplierDisplayName({
       supplierNameChinese,
       supplierNameEnglish,
@@ -288,13 +375,16 @@ function prepareRecord(table, record, deviceId, companyId) {
       mergedInvoiceIds: Array.isArray(record.mergedInvoiceIds) ? JSON.stringify(record.mergedInvoiceIds) : (record.mergedInvoiceIds || '[]'),
       invoiceLayoutType: record.invoiceLayoutType || 'normal_invoice',
       imagePath: record.imagePath || '',
+      imageHash: record.imageHash || '',
       ocrText: record.ocrText || '',
+      ocrTextHash: record.ocrTextHash || '',
       subtotal: Number(record.subtotal || record.totalAmount || 0),
       tax: Number(record.tax || 0),
       totalAmount: Number(record.totalAmount || 0),
       calculatedTotal: Number(record.calculatedTotal || 0),
       totalDifference: Number(record.totalDifference || 0),
       duplicateStatus: record.duplicateStatus || 'none',
+      duplicateOfInvoiceId: record.duplicateOfInvoiceId || '',
       recognitionSource: record.recognitionSource || '',
       recognitionWarnings: Array.isArray(record.recognitionWarnings) ? JSON.stringify(record.recognitionWarnings) : (record.recognitionWarnings || ''),
       status: record.status || 'saved'
@@ -1093,10 +1183,27 @@ async function saveInvoicePayloadWithLearning(payload, user, options = {}) {
   const items = applyDiscountAllocation(applyGiftAccounting(productItems), discountItems);
   const itemTotal = items.reduce((sum, item) => sum + Number(item.totalPrice || 0), 0);
   const totalAmount = Number(payload.totalAmount || 0) > 0 ? Number(payload.totalAmount) : itemTotal;
+  const duplicateCheck = await checkInvoiceDuplicateBeforeSave({
+    companyId,
+    supplier,
+    payload,
+    totalAmount,
+    items,
+    excludeInvoiceId: payload.serverId || payload.id || '',
+    batchId: payload.batchId || payload.scanBatchId || ''
+  });
+  const forceSave = Boolean(payload.forceSave || payload.force || options.forceSave);
+  if (duplicateCheck.isDuplicate && !forceSave) {
+    return duplicateBlockedResponse(duplicateCheck);
+  }
   const invoice = await prepareRecordWithReferences('invoices', {
     ...payload,
     supplierId: supplier?.serverId || supplier?.id || '',
     totalAmount,
+    imageHash: payload.imageHash || '',
+    ocrTextHash: payload.ocrTextHash || sha256Text(payload.ocrText || ''),
+    duplicateStatus: duplicateCheck.isDuplicate ? 'duplicate' : (payload.duplicateStatus || duplicateCheck.duplicateStatus || 'none'),
+    duplicateOfInvoiceId: duplicateCheck.isDuplicate ? (duplicateCheck.duplicateOfInvoiceId || duplicateCheck.duplicateInvoiceId || '') : (payload.duplicateOfInvoiceId || ''),
     pageNumber: Number(payload.pageNumber || 0),
     pageCount: Number(payload.pageCount || 0),
     invoiceGroupKey: payload.invoiceGroupKey || '',
@@ -1186,10 +1293,12 @@ async function saveInvoicePayloadWithLearning(payload, user, options = {}) {
   }
 
   return {
+    success: true,
     invoice: { ...invoice, supplierName: displaySupplierName(supplier, payload.supplierName || '') },
     items: itemRecords,
     priceAnomalies,
-    template
+    template,
+    duplicateCheck
   };
 }
 
@@ -1212,7 +1321,7 @@ async function getCloudRecord(table, incoming, companyId, client = null) {
   return null;
 }
 
-async function pushOne(table, incoming, deviceId, companyId, client = null) {
+async function pushOne(table, incoming, deviceId, companyId, client = null, syncContext = {}) {
   const existing = await getCloudRecord(table, incoming, companyId, client);
   const incomingUpdatedAt = incoming.updatedAt || nowIso();
   if (existing && existing.updatedAt && existing.updatedAt > incomingUpdatedAt) {
@@ -1220,6 +1329,32 @@ async function pushOne(table, incoming, deviceId, companyId, client = null) {
   }
 
   const record = await prepareRecordWithReferences(table, { ...incoming, serverId: existing?.serverId || existing?.id || incoming.serverId }, deviceId, companyId, client);
+  if (table === 'invoices' && !record.deletedAt) {
+    const invoiceIds = [incoming.id, incoming.localId, incoming.serverId, record.id, record.localId, record.serverId].filter(Boolean);
+    const relatedItems = (syncContext.changes?.invoice_items || [])
+      .filter((item) => invoiceIds.includes(item.invoiceId))
+      .map((item) => prepareRecord('invoice_items', item, deviceId, companyId));
+    const supplier = record.supplierId ? await getByAnyId('suppliers', record.supplierId, companyId) : null;
+    const itemTotal = relatedItems.reduce((sum, item) => sum + Number(item.totalPrice || 0), 0);
+    const totalAmount = Number(record.totalAmount || 0) > 0 ? Number(record.totalAmount) : itemTotal;
+    const duplicateCheck = await checkInvoiceDuplicateBeforeSave({
+      companyId,
+      supplier,
+      payload: { ...record, supplierName: incoming.supplierName || '' },
+      totalAmount,
+      items: relatedItems,
+      excludeInvoiceId: record.serverId || record.id || '',
+      batchId: record.batchId || record.scanBatchId || ''
+    });
+    const forceSave = Boolean(incoming.forceSave || incoming.force);
+    if (duplicateCheck.isDuplicate && !forceSave) {
+      for (const value of invoiceIds) syncContext.rejectedInvoiceIds?.add(value);
+      return { table, localId: incoming.localId || incoming.id || record.localId, serverId: '', status: 'duplicate', duplicateStatus: 'duplicate', duplicateCheck, record: null };
+    }
+    record.duplicateStatus = duplicateCheck.isDuplicate ? 'duplicate' : (record.duplicateStatus || duplicateCheck.duplicateStatus || 'none');
+    record.duplicateOfInvoiceId = duplicateCheck.isDuplicate ? (duplicateCheck.duplicateOfInvoiceId || duplicateCheck.duplicateInvoiceId || '') : (record.duplicateOfInvoiceId || '');
+    record.ocrTextHash = record.ocrTextHash || sha256Text(record.ocrText || '');
+  }
   await upsertRecord(table, record, client);
   return { table, localId: incoming.localId || incoming.id || record.localId, serverId: record.serverId, status: 'synced', record };
 }
@@ -1641,7 +1776,43 @@ async function sha256File(filePath) {
   });
 }
 
+function sha256Text(value = '') {
+  const text = String(value || '');
+  return text ? crypto.createHash('sha256').update(text).digest('hex') : '';
+}
+
+function invoiceIdentityIds(invoice = {}) {
+  return [invoice.id, invoice.serverId, invoice.localId].filter(Boolean);
+}
+
+function invoiceDuplicateSummary(invoice = {}, supplierName = '') {
+  return {
+    duplicateInvoiceId: invoice.serverId || invoice.id || '',
+    duplicateOfInvoiceId: invoice.serverId || invoice.id || '',
+    invoiceNo: invoice.invoiceNo || '',
+    supplier: supplierName || invoice.supplierName || invoice.supplierId || '',
+    invoiceDate: invoice.invoiceDate || '',
+    date: invoice.invoiceDate || '',
+    totalAmount: Number(invoice.totalAmount || 0)
+  };
+}
+
+function markDuplicateCheck(result, candidate, supplierName, reason) {
+  const summary = invoiceDuplicateSummary(candidate, supplierName);
+  return {
+    ...result,
+    ...summary,
+    isDuplicate: true,
+    duplicate: true,
+    duplicateStatus: 'duplicate',
+    duplicateReason: reason,
+    skippedSave: true
+  };
+}
+
 async function findRecognitionDuplicate(companyId, parsed, totalAmount, currentItems, excludeInvoiceId = '', batchId = '') {
+  const currentOcrTextHash = parsed.ocrTextHash || sha256Text(parsed.ocrText || '');
+  const currentImageHash = parsed.imageHash || '';
   const current = invoiceComparisonFingerprint({
     supplierId: parsed.supplierId || '',
     supplierName: parsed.supplierName || '',
@@ -1656,7 +1827,6 @@ async function findRecognitionDuplicate(companyId, parsed, totalAmount, currentI
     invoiceGroupKey: parsed.invoiceGroupKey || buildInvoiceGroupKey({ supplierName: parsed.supplierName || '', invoiceNo: parsed.invoiceNo || '', totalAmount }),
     createdAt: parsed.createdAt || ''
   });
-  if (!current.invoiceNo) return emptyDuplicateCheck();
 
   const candidates = await queryAll(`
     SELECT invoices.*, COALESCE(suppliers.${quoteIdentifier('supplierDisplayName')}, suppliers.${quoteIdentifier('displayName')}, suppliers.${quoteIdentifier('name')}) AS "supplierName"
@@ -1675,6 +1845,22 @@ async function findRecognitionDuplicate(companyId, parsed, totalAmount, currentI
     const candidateIdList = [candidate.id, candidate.localId, candidate.serverId].filter(Boolean);
     if (excludeInvoiceId && candidateIdList.includes(excludeInvoiceId)) continue;
     if (candidateIdList.length === 0) continue;
+    const candidateSupplierName = candidate.supplierName || '';
+    const sameSupplier = current.supplierId && candidate.supplierId
+      ? current.supplierId === candidate.supplierId
+      : supplierNamesNearlyEqual(current.supplierName, candidateSupplierName);
+    const sameDate = daysBetweenDates(current.invoiceDate, candidate.invoiceDate) <= 1;
+    const sameAmount = amountsNearlyEqual(current.totalAmount, candidate.totalAmount);
+    if (!current.invoiceNo && sameSupplier && sameDate && sameAmount) {
+      const candidateOcrHash = candidate.ocrTextHash || sha256Text(candidate.ocrText || '');
+      const candidateImageHash = candidate.imageHash || '';
+      if (currentOcrTextHash && candidateOcrHash && currentOcrTextHash === candidateOcrHash) {
+        return markDuplicateCheck(emptyDuplicateCheck(), candidate, candidateSupplierName, 'same supplier, close invoiceDate, totalAmount, and OCR text hash.');
+      }
+      if (currentImageHash && candidateImageHash && currentImageHash === candidateImageHash) {
+        return markDuplicateCheck(emptyDuplicateCheck(), candidate, candidateSupplierName, 'same image hash and totalAmount.');
+      }
+    }
     const items = await queryAll(`
       SELECT * FROM ${quoteTable('invoice_items')}
       WHERE ${quoteIdentifier('companyId')} = ?
@@ -1696,7 +1882,9 @@ async function findRecognitionDuplicate(companyId, parsed, totalAmount, currentI
       createdAt: candidate.createdAt || ''
     });
     const duplicateInfo = compareInvoiceForDuplicateV2(current, candidateFingerprint, 'Cloud invoice');
-    if (duplicateInfo.isDuplicate) return duplicateInfo;
+    if (duplicateInfo.isDuplicate) {
+      return markDuplicateCheck(duplicateInfo, candidate, candidateSupplierName, duplicateInfo.duplicateReason || 'duplicate invoice');
+    }
     if (duplicateInfo.possibleSameInvoicePages && batchId && candidate.batchId === batchId) {
       return {
         ...duplicateInfo,
@@ -1721,6 +1909,37 @@ async function findRecognitionDuplicate(companyId, parsed, totalAmount, currentI
   return groupInfo;
 }
 
+async function checkInvoiceDuplicateBeforeSave({ companyId, supplier, payload, totalAmount, items, excludeInvoiceId = '', batchId = '' }) {
+  const supplierName = displaySupplierName(supplier, payload.supplierName || '');
+  const duplicateCheck = await findRecognitionDuplicate(companyId, {
+    supplierId: supplier?.serverId || supplier?.id || payload.supplierId || '',
+    supplierName,
+    invoiceNo: payload.invoiceNo || '',
+    invoiceDate: payload.invoiceDate || '',
+    pageNumber: payload.pageNumber || 0,
+    pageCount: payload.pageCount || 0,
+    invoiceGroupKey: payload.invoiceGroupKey || '',
+    ocrText: payload.ocrText || '',
+    ocrTextHash: payload.ocrTextHash || sha256Text(payload.ocrText || ''),
+    imageHash: payload.imageHash || ''
+  }, totalAmount, items, excludeInvoiceId, batchId || payload.batchId || payload.scanBatchId || '');
+  duplicateCheck.calculatedTotal = items.reduce((sum, item) => sum + Number(item.totalPrice || 0), 0);
+  duplicateCheck.totalDifference = Math.abs(duplicateCheck.calculatedTotal - Number(totalAmount || 0));
+  return duplicateCheck;
+}
+
+function duplicateBlockedResponse(duplicateCheck) {
+  return {
+    success: false,
+    duplicate: true,
+    isDuplicate: true,
+    duplicateStatus: 'duplicate',
+    duplicateCheck,
+    error: '可能重复发票，是否强制保存',
+    message: '可能重复发票，是否强制保存'
+  };
+}
+
 async function saveRecognizedInvoiceFromTask(task, result, options = {}) {
   const parsed = result.parsed || {};
   const { productItems, discountItems } = splitInvoiceRows(Array.isArray(parsed.items) ? parsed.items : []);
@@ -1731,7 +1950,12 @@ async function saveRecognizedInvoiceFromTask(task, result, options = {}) {
   const itemTotal = items.reduce((sum, item) => sum + Number(item.totalPrice || 0), 0);
   const totalAmount = Number(parsed.totalAmount || 0) > 0 ? Number(parsed.totalAmount) : itemTotal;
   const imageHash = await sha256File(task.filePath);
-  const duplicateCheck = await findRecognitionDuplicate(companyId, parsed, totalAmount, items, task.invoiceId, task.batchId || '');
+  const duplicateCheck = await findRecognitionDuplicate(companyId, {
+    ...parsed,
+    ocrText: result.ocrText || parsed.ocrText || '',
+    ocrTextHash: parsed.ocrTextHash || sha256Text(result.ocrText || parsed.ocrText || ''),
+    imageHash
+  }, totalAmount, items, task.invoiceId, task.batchId || '');
   duplicateCheck.pageTotal = totalAmount;
   duplicateCheck.calculatedTotal = itemTotal;
   duplicateCheck.totalDifference = Math.abs(itemTotal - totalAmount);
@@ -1785,10 +2009,13 @@ async function saveRecognizedInvoiceFromTask(task, result, options = {}) {
     batchId: task.batchId || existingInvoice?.batchId || '',
     scanBatchId: task.batchId || existingInvoice?.scanBatchId || existingInvoice?.batchId || '',
     duplicateStatus: duplicateCheck.duplicateStatus || (duplicateCheck.isDuplicate ? 'confirmed' : duplicateCheck.sameInvoiceGroup ? 'possible' : 'none'),
+    duplicateOfInvoiceId: duplicateCheck.duplicateOfInvoiceId || '',
     recognitionSource: result.recognitionSource || result.source || task.recognitionSource || '',
     recognitionWarnings: parsed.warnings || duplicateCheck.sameInvoiceGroupReason || '',
     imagePath: existingInvoice?.imagePath || result.imagePath || task.imagePath || '',
+    imageHash: existingInvoice?.imageHash || imageHash,
     ocrText: [existingInvoice?.ocrText, result.ocrText].filter(Boolean).join('\n\n--- page ---\n\n'),
+    ocrTextHash: sha256Text([existingInvoice?.ocrText, result.ocrText].filter(Boolean).join('\n\n--- page ---\n\n')),
     totalAmount: invoiceTotal,
     calculatedTotal,
     totalDifference,
@@ -1928,11 +2155,33 @@ app.get('/ping', (req, res) => {
 
 app.post('/api/auth/register', asyncHandler(async (req, res) => {
   const email = String(req.body.email || '').trim().toLowerCase();
+  const username = String(req.body.username || req.body.name || '').trim();
   const password = String(req.body.password || '');
   const companyName = String(req.body.companyName || '').trim() || '我的门店';
   const name = String(req.body.name || '').trim();
   if (!email || !password) return res.status(400).json({ error: '邮箱和密码不能为空' });
   if (password.length < 6) return res.status(400).json({ error: '密码至少 6 位' });
+
+  if (isMongoAuthConfigured()) {
+    if (!username) return res.status(400).json({ error: '用户名不能为空' });
+    try {
+      const user = await createMongoUser({
+        id: id(),
+        username,
+        email,
+        passwordHash: hashPassword(password),
+        role: 'user',
+        companyName,
+        companyId: id(),
+        name: name || username
+      });
+      res.json({ success: true, message: '注册成功，请登录', user: toPublicMongoUser(user) });
+      return;
+    } catch (error) {
+      if (error?.code === 11000) return res.status(409).json({ error: '邮箱或用户名已被注册' });
+      throw error;
+    }
+  }
 
   const existing = await queryGet(`SELECT * FROM ${quoteTable('users')} WHERE LOWER(${quoteIdentifier('email')}) = ? LIMIT 1`, [email]);
   if (existing) return res.status(409).json({ error: '这个邮箱已经注册' });
@@ -1948,8 +2197,17 @@ app.post('/api/auth/register', asyncHandler(async (req, res) => {
 }));
 
 app.post('/api/auth/login', asyncHandler(async (req, res) => {
-  const email = String(req.body.email || '').trim().toLowerCase();
+  const login = String(req.body.login || req.body.email || req.body.username || '').trim();
+  const email = login.toLowerCase();
   const password = String(req.body.password || '');
+  if (isMongoAuthConfigured()) {
+    const mongoUser = await findMongoUserByLogin(login);
+    if (!mongoUser || !verifyPassword(password, mongoUser.passwordHash)) {
+      return res.status(401).json({ error: '邮箱/用户名或密码不正确' });
+    }
+    res.json(authResponse({ ...mongoUser, authStore: 'mongo' }, { id: mongoUser.companyId, name: mongoUser.companyName || '' }));
+    return;
+  }
   const user = await queryGet(`SELECT * FROM ${quoteTable('users')} WHERE LOWER(${quoteIdentifier('email')}) = ? LIMIT 1`, [email]);
   if (!user || !verifyPassword(password, user.passwordHash)) {
     return res.status(401).json({ error: '邮箱或密码不正确' });
@@ -1963,8 +2221,55 @@ app.get('/api/auth/me', requireAuth, asyncHandler(async (req, res) => {
     res.json({ user: DEMO_USER, company: DEMO_COMPANY, demo: true });
     return;
   }
+  if (req.company) {
+    res.json({ user: req.user, company: req.company });
+    return;
+  }
   const company = await queryGet(`SELECT * FROM ${quoteTable('companies')} WHERE ${quoteIdentifier('id')} = ? LIMIT 1`, [req.user.companyId]);
   res.json({ user: req.user, company: company || { id: req.user.companyId, name: '' } });
+}));
+
+app.get('/api/users/search', requireAccountAuth, asyncHandler(async (req, res) => {
+  const keyword = String(req.query.keyword || '').trim();
+  if (!keyword) {
+    res.json({ users: [] });
+    return;
+  }
+  const users = await searchMongoUsers(keyword, req.accountUser.id);
+  res.json({ users });
+}));
+
+app.post('/api/account-connections/request', requireAccountAuth, asyncHandler(async (req, res) => {
+  const targetUserId = String(req.body.targetUserId || '').trim();
+  const message = String(req.body.message || '').trim();
+  if (!targetUserId) return res.status(400).json({ error: '请选择要连接的账户' });
+  const request = await createConnectionRequest({
+    id: id(),
+    requesterUserId: req.accountUser.id,
+    targetUserId,
+    message
+  });
+  res.json({ success: true, request });
+}));
+
+app.get('/api/account-connections/sent', requireAccountAuth, asyncHandler(async (req, res) => {
+  const requests = await listSentConnections(req.accountUser.id);
+  res.json({ requests });
+}));
+
+app.get('/api/account-connections/received', requireAccountAuth, asyncHandler(async (req, res) => {
+  const requests = await listReceivedConnections(req.accountUser.id);
+  res.json({ requests });
+}));
+
+app.post('/api/account-connections/:id/approve', requireAccountAuth, asyncHandler(async (req, res) => {
+  const request = await decideConnection(req.params.id, req.accountUser.id, 'approved');
+  res.json({ success: true, request });
+}));
+
+app.post('/api/account-connections/:id/reject', requireAccountAuth, asyncHandler(async (req, res) => {
+  const request = await decideConnection(req.params.id, req.accountUser.id, 'rejected');
+  res.json({ success: true, request });
 }));
 
 app.use('/api/ai-invoice', requireAuth, aiInvoiceRoutes);
@@ -1974,12 +2279,24 @@ app.post('/api/sync/push', requireAuth, asyncHandler(async (req, res) => {
   const companyId = req.user.companyId;
   const changes = req.body.changes || {};
   const results = [];
+  const syncContext = { changes, rejectedInvoiceIds: new Set() };
 
   await withTransaction(async (client) => {
     for (const table of syncTables) {
       const records = Array.isArray(changes[table]) ? changes[table] : [];
       for (const record of records) {
-        results.push(await pushOne(table, record, deviceId, companyId, client));
+        if ((table === 'invoice_items' || table === 'invoice_discounts') && syncContext.rejectedInvoiceIds.has(record.invoiceId)) {
+          results.push({ table, localId: record.localId || record.id, serverId: '', status: 'skipped_duplicate_invoice', record: null });
+          continue;
+        }
+        if (table === 'price_history') {
+          const relatedItem = (changes.invoice_items || []).find((item) => (item.id && item.id === record.invoiceItemId) || (item.localId && item.localId === record.invoiceItemId) || (item.serverId && item.serverId === record.invoiceItemId));
+          if (relatedItem && syncContext.rejectedInvoiceIds.has(relatedItem.invoiceId)) {
+            results.push({ table, localId: record.localId || record.id, serverId: '', status: 'skipped_duplicate_invoice', record: null });
+            continue;
+          }
+        }
+        results.push(await pushOne(table, record, deviceId, companyId, client, syncContext));
       }
     }
   });
@@ -2250,10 +2567,28 @@ app.post('/api/invoices', requireAuth, asyncHandler(async (req, res) => {
   const items = applyDiscountAllocation(applyGiftAccounting(productItems), discountItems);
   const itemTotal = items.reduce((sum, item) => sum + Number(item.totalPrice || 0), 0);
   const totalAmount = Number(req.body.totalAmount || 0) > 0 ? Number(req.body.totalAmount) : itemTotal;
+  const duplicateCheck = await checkInvoiceDuplicateBeforeSave({
+    companyId: req.user.companyId,
+    supplier,
+    payload: req.body,
+    totalAmount,
+    items,
+    excludeInvoiceId: req.body.serverId || req.body.id || '',
+    batchId: req.body.batchId || req.body.scanBatchId || ''
+  });
+  const forceSave = Boolean(req.body.forceSave || req.body.force);
+  if (duplicateCheck.isDuplicate && !forceSave) {
+    res.status(409).json(duplicateBlockedResponse(duplicateCheck));
+    return;
+  }
   const invoice = await prepareRecordWithReferences('invoices', {
     ...req.body,
     supplierId: supplier?.serverId || supplier?.id || '',
     totalAmount,
+    imageHash: req.body.imageHash || '',
+    ocrTextHash: req.body.ocrTextHash || sha256Text(req.body.ocrText || ''),
+    duplicateStatus: duplicateCheck.isDuplicate ? 'duplicate' : (req.body.duplicateStatus || duplicateCheck.duplicateStatus || 'none'),
+    duplicateOfInvoiceId: duplicateCheck.isDuplicate ? (duplicateCheck.duplicateOfInvoiceId || duplicateCheck.duplicateInvoiceId || '') : (req.body.duplicateOfInvoiceId || ''),
     invoiceGroupKey: req.body.invoiceGroupKey || buildInvoiceGroupKey({ supplierName: displaySupplierName(supplier, req.body.supplierName || ''), invoiceNo: req.body.invoiceNo || '', totalAmount }),
     updatedAt: now
   }, deviceId, req.user.companyId);
@@ -2278,7 +2613,7 @@ app.post('/api/invoices', requireAuth, asyncHandler(async (req, res) => {
     }
     await saveInvoiceDiscounts({ discountItems, productItemRecords: itemRecords, invoice, supplier, deviceId, companyId: req.user.companyId, client });
   });
-  res.json({ ...invoice, supplierName: displaySupplierName(supplier, req.body.supplierName || '') || '未命名供应商' });
+  res.json({ ...invoice, supplierName: displaySupplierName(supplier, req.body.supplierName || '') || '未命名供应商', duplicateCheck });
 }));
 
 app.get('/api/invoices/:id', requireAuth, asyncHandler(async (req, res) => {
@@ -2449,21 +2784,62 @@ app.post('/api/invoices/:id/merge', requireAuth, asyncHandler(async (req, res) =
 
 app.delete('/api/invoices/:id', requireAuth, asyncHandler(async (req, res) => {
   const deletedAt = nowIso();
+  const invoice = await queryGet(`
+    SELECT * FROM ${quoteTable('invoices')}
+    WHERE ${quoteIdentifier('companyId')} = ? AND (${quoteIdentifier('id')} = ? OR ${quoteIdentifier('serverId')} = ? OR ${quoteIdentifier('localId')} = ?)
+    LIMIT 1
+  `, [req.user.companyId, req.params.id, req.params.id, req.params.id]);
+  const invoiceIds = invoiceIdentityIds(invoice || { id: req.params.id });
+  const placeholders = invoiceIds.map(() => '?').join(', ');
+  const itemRows = invoiceIds.length ? await queryAll(`
+    SELECT * FROM ${quoteTable('invoice_items')}
+    WHERE ${quoteIdentifier('companyId')} = ? AND ${quoteIdentifier('invoiceId')} IN (${placeholders})
+  `, [req.user.companyId, ...invoiceIds]) : [];
+  const itemIds = itemRows.flatMap(invoiceIdentityIds);
   await run(`
     UPDATE ${quoteTable('invoices')}
     SET ${quoteIdentifier('deletedAt')} = ?, ${quoteIdentifier('updatedAt')} = ?
     WHERE ${quoteIdentifier('companyId')} = ? AND (${quoteIdentifier('id')} = ? OR ${quoteIdentifier('serverId')} = ? OR ${quoteIdentifier('localId')} = ?)
   `, [deletedAt, deletedAt, req.user.companyId, req.params.id, req.params.id, req.params.id]);
-  await run(`
-    UPDATE ${quoteTable('invoice_items')}
-    SET ${quoteIdentifier('deletedAt')} = ?, ${quoteIdentifier('updatedAt')} = ?
-    WHERE ${quoteIdentifier('companyId')} = ? AND ${quoteIdentifier('invoiceId')} = ?
-  `, [deletedAt, deletedAt, req.user.companyId, req.params.id]);
-  await run(`
-    UPDATE ${quoteTable('invoice_discounts')}
-    SET ${quoteIdentifier('deletedAt')} = ?, ${quoteIdentifier('updatedAt')} = ?
-    WHERE ${quoteIdentifier('companyId')} = ? AND ${quoteIdentifier('invoiceId')} = ?
-  `, [deletedAt, deletedAt, req.user.companyId, req.params.id]);
+  if (invoiceIds.length) {
+    await run(`
+      UPDATE ${quoteTable('invoice_items')}
+      SET ${quoteIdentifier('deletedAt')} = ?, ${quoteIdentifier('updatedAt')} = ?
+      WHERE ${quoteIdentifier('companyId')} = ? AND ${quoteIdentifier('invoiceId')} IN (${placeholders})
+    `, [deletedAt, deletedAt, req.user.companyId, ...invoiceIds]);
+    await run(`
+      UPDATE ${quoteTable('invoice_discounts')}
+      SET ${quoteIdentifier('deletedAt')} = ?, ${quoteIdentifier('updatedAt')} = ?
+      WHERE ${quoteIdentifier('companyId')} = ? AND ${quoteIdentifier('invoiceId')} IN (${placeholders})
+    `, [deletedAt, deletedAt, req.user.companyId, ...invoiceIds]);
+  }
+  if (itemIds.length) {
+    await run(`
+      UPDATE ${quoteTable('price_history')}
+      SET ${quoteIdentifier('deletedAt')} = ?, ${quoteIdentifier('updatedAt')} = ?
+      WHERE ${quoteIdentifier('companyId')} = ? AND ${quoteIdentifier('invoiceItemId')} IN (${itemIds.map(() => '?').join(', ')})
+    `, [deletedAt, deletedAt, req.user.companyId, ...itemIds]);
+  }
+  if (invoice?.invoiceNo) {
+    await run(`
+      UPDATE ${quoteTable('price_history')}
+      SET ${quoteIdentifier('deletedAt')} = ?, ${quoteIdentifier('updatedAt')} = ?
+      WHERE ${quoteIdentifier('companyId')} = ? AND ${quoteIdentifier('invoiceNo')} = ? AND ${quoteIdentifier('supplierId')} = ?
+    `, [deletedAt, deletedAt, req.user.companyId, invoice.invoiceNo, invoice.supplierId || '']);
+  }
+  if (invoice?.batchId) {
+    const activeInvoices = await queryAll(`
+      SELECT * FROM ${quoteTable('invoices')}
+      WHERE ${quoteIdentifier('companyId')} = ? AND ${quoteIdentifier('batchId')} = ? AND ${quoteIdentifier('deletedAt')} IS NULL
+    `, [req.user.companyId, invoice.batchId]);
+    if (activeInvoices.length === 0) {
+      await run(`
+        UPDATE ${quoteTable('purchase_batches')}
+        SET ${quoteIdentifier('deletedAt')} = ?, ${quoteIdentifier('updatedAt')} = ?
+        WHERE ${quoteIdentifier('companyId')} = ? AND (${quoteIdentifier('id')} = ? OR ${quoteIdentifier('serverId')} = ? OR ${quoteIdentifier('localId')} = ?)
+      `, [deletedAt, deletedAt, req.user.companyId, invoice.batchId, invoice.batchId, invoice.batchId]);
+    }
+  }
   res.json({ ok: true });
 }));
 
@@ -2874,7 +3250,7 @@ app.delete('/api/dev/clear', requireAuth, asyncHandler(async (req, res) => {
 
 app.use((error, req, res, next) => {
   console.error('[server] error:', error);
-  res.status(error.status || 500).json({ error: error.message || 'Server error' });
+  res.status(error.statusCode || error.status || 500).json({ error: error.message || 'Server error' });
 });
 
 const frontendDist = path.resolve(__dirname, '..', '..', 'frontend', 'dist');
@@ -2883,10 +3259,19 @@ if (fs.existsSync(frontendDist)) {
   app.get('*', (req, res) => res.sendFile(path.join(frontendDist, 'index.html')));
 }
 
-setTimeout(() => {
-  resumeRecognitionTasks().catch((error) => console.error('[recognition-task] resume failed:', error));
-}, 500);
+export function startServer(port = PORT) {
+  setTimeout(() => {
+    resumeRecognitionTasks().catch((error) => console.error('[recognition-task] resume failed:', error));
+  }, 500);
 
-app.listen(PORT, '0.0.0.0', () => {
-  console.log(`Server running on 0.0.0.0:${PORT}`);
-});
+  return app.listen(port, '0.0.0.0', () => {
+    console.log(`Server running on 0.0.0.0:${port}`);
+  });
+}
+
+const isDirectRun = process.argv[1]
+  && import.meta.url === pathToFileURL(path.resolve(process.argv[1])).href;
+
+if (isDirectRun) {
+  startServer();
+}

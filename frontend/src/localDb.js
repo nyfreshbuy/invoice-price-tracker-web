@@ -117,12 +117,15 @@ function titleCaseEnglishCompany(value = '') {
 }
 
 function collapseRepeatedWordSequence(words = []) {
-  const clean = words.filter(Boolean);
+  const clean = words.map((word) => String(word || '').replace(/[^\w&.'-]/g, '').toUpperCase()).filter(Boolean);
   if (clean.length < 2) return clean;
-  for (let size = 1; size <= Math.floor(clean.length / 2); size += 1) {
-    if (clean.length % size !== 0) continue;
-    const base = clean.slice(0, size);
-    if (clean.every((word, index) => word === base[index % size])) return base;
+  for (let offset = 0; offset < clean.length - 1; offset += 1) {
+    const tail = clean.slice(offset);
+    for (let size = 1; size <= Math.floor(tail.length / 2); size += 1) {
+      if (tail.length % size !== 0) continue;
+      const base = tail.slice(0, size);
+      if (tail.every((word, index) => word === base[index % size])) return base;
+    }
   }
   const output = [];
   for (const word of clean) {
@@ -558,7 +561,7 @@ export const localDb = {
       supplier.name
     ].filter(Boolean).join(' '));
     const supplierNameChinese = supplier.supplierNameChinese || parts.supplierNameChinese || '';
-    const supplierNameEnglish = supplier.supplierNameEnglish || parts.supplierNameEnglish || '';
+    const supplierNameEnglish = cleanSupplierEnglishName(supplier.supplierNameEnglish || parts.supplierNameEnglish || '');
     const displayName = buildSupplierDisplayName({
       supplierNameChinese,
       supplierNameEnglish,
@@ -752,6 +755,32 @@ export const localDb = {
     const items = applyGiftAccounting(productItems);
     const itemTotal = items.reduce((sum, item) => sum + Number(item.totalPrice || 0), 0);
     const totalAmount = Number(payload.totalAmount || 0) > 0 ? Number(payload.totalAmount) : itemTotal;
+    const existingInvoices = (await localDb.getInvoices()).filter((invoice) => idsFor(invoice).every((idValue) => idValue !== invoiceId));
+    const duplicateInvoice = existingInvoices.find((invoice) => {
+      const sameSupplier = supplier?.id && invoice.supplierId
+        ? invoice.supplierId === supplier.id
+        : normalizeSupplierName(invoice.supplierName || '') === normalizeSupplierName(payload.supplierName || supplierDisplayName(supplier));
+      const sameInvoiceNo = payload.invoiceNo && invoice.invoiceNo && String(invoice.invoiceNo).trim().toLowerCase() === String(payload.invoiceNo).trim().toLowerCase();
+      const sameDate = (invoice.invoiceDate || '') === (invoiceDate || '');
+      const sameAmount = Math.abs(Number(invoice.totalAmount || 0) - totalAmount) < 0.01;
+      return sameSupplier && sameInvoiceNo && sameDate && sameAmount;
+    });
+    if (duplicateInvoice && !payload.forceSave) {
+      const error = new Error('可能重复发票，是否强制保存');
+      error.duplicateStatus = 'duplicate';
+      error.duplicateCheck = {
+        isDuplicate: true,
+        duplicate: true,
+        duplicateStatus: 'duplicate',
+        duplicateOfInvoiceId: duplicateInvoice.id,
+        duplicateInvoiceId: duplicateInvoice.id,
+        invoiceNo: duplicateInvoice.invoiceNo || '',
+        supplier: duplicateInvoice.supplierName || '',
+        invoiceDate: duplicateInvoice.invoiceDate || '',
+        totalAmount: Number(duplicateInvoice.totalAmount || 0)
+      };
+      throw error;
+    }
     const invoice = syncFields({
       id: invoiceId,
       batchId: payload.batchId || '',
@@ -771,6 +800,8 @@ export const localDb = {
       totalAmount,
       calculatedTotal: itemTotal,
       totalDifference: Math.abs(itemTotal - totalAmount),
+      duplicateStatus: duplicateInvoice ? 'duplicate' : (payload.duplicateStatus || 'none'),
+      duplicateOfInvoiceId: duplicateInvoice?.id || payload.duplicateOfInvoiceId || '',
       isMultiPage: payload.isMultiPage ? 1 : 0,
       mergedInvoiceIds: payload.mergedInvoiceIds || '[]',
       status: 'APPROVED'
@@ -937,6 +968,18 @@ export const localDb = {
     await put('invoices', syncFields({ ...detail.invoice, deletedAt }, 'deleted'));
     await putMany('invoice_items', detail.items.map((item) => syncFields({ ...item, deletedAt }, 'deleted')));
     await putMany('invoice_discounts', (detail.discounts || []).map((discount) => syncFields({ ...discount, deletedAt }, 'deleted')));
+    const itemIds = detail.items.flatMap(idsFor);
+    const priceRows = (await all('price_history')).filter((row) => itemIds.includes(row.invoiceItemId) || (detail.invoice.invoiceNo && row.invoiceNo === detail.invoice.invoiceNo && row.supplierId === detail.invoice.supplierId));
+    if (priceRows.length) {
+      await putMany('price_history', priceRows.map((row) => syncFields({ ...row, deletedAt }, 'deleted')));
+    }
+    if (detail.invoice.batchId) {
+      const activeBatchInvoices = (await all('invoices')).filter((invoice) => active(invoice) && invoice.batchId === detail.invoice.batchId && !idsFor(invoice).includes(detail.invoice.id));
+      if (activeBatchInvoices.length === 0) {
+        const batch = resolveByAnyId(await all('purchase_batches'), detail.invoice.batchId);
+        if (batch) await put('purchase_batches', syncFields({ ...batch, deletedAt }, 'deleted'));
+      }
+    }
   },
 
   async updateInvoiceItems(invoiceId, nextItems, beforeItems = []) {

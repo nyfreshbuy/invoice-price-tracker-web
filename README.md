@@ -177,10 +177,14 @@ http://YOUR_COMPUTER_LAN_IP:5173
 
 Local SQLite development can run with no required env vars.
 
+User registration, login, and account connection requests use MongoDB when `MONGODB_URI` is configured. Invoice business data can still use SQLite locally or PostgreSQL through `DATABASE_URL`.
+
 Render production should use:
 
 ```text
 DATABASE_URL=PostgreSQL connection string
+MONGODB_URI=MongoDB connection string
+MONGODB_DB=invoice_price_tracker
 OPENAI_API_KEY=your OpenAI key
 OPENAI_MODEL=gpt-4.1-mini
 CORS_ORIGIN=https://your-frontend-name.onrender.com
@@ -196,6 +200,30 @@ DEMO_NO_AUTH=true
 - Present: PostgreSQL
 
 OpenAI keys must only be configured in backend environment variables. Never put `OPENAI_API_KEY` in the frontend.
+
+Account connection APIs require a real JWT login token and do not use the anonymous demo session. For testing account connections, set:
+
+```text
+# backend
+MONGODB_URI=your MongoDB connection string
+AUTH_SECRET=generate-a-long-random-secret
+
+# frontend
+VITE_DEMO_NO_AUTH=false
+```
+
+Account APIs:
+
+```text
+POST /api/auth/register
+POST /api/auth/login
+GET /api/users/search?keyword=
+POST /api/account-connections/request
+GET /api/account-connections/sent
+GET /api/account-connections/received
+POST /api/account-connections/:id/approve
+POST /api/account-connections/:id/reject
+```
 
 ## Frontend Environment Variables
 

@@ -78,6 +78,12 @@ export const api = {
   login: (payload) => request('/api/auth/login', { method: 'POST', body: JSON.stringify(payload) }),
   register: (payload) => request('/api/auth/register', { method: 'POST', body: JSON.stringify(payload) }),
   me: () => request('/api/auth/me'),
+  searchUsers: (keyword) => request(`/api/users/search?keyword=${encodeURIComponent(keyword)}`),
+  requestAccountConnection: (payload) => request('/api/account-connections/request', { method: 'POST', body: JSON.stringify(payload) }),
+  getSentConnections: () => request('/api/account-connections/sent'),
+  getReceivedConnections: () => request('/api/account-connections/received'),
+  approveConnection: (id) => request(`/api/account-connections/${encodeURIComponent(id)}/approve`, { method: 'POST' }),
+  rejectConnection: (id) => request(`/api/account-connections/${encodeURIComponent(id)}/reject`, { method: 'POST' }),
 
   getInvoices: () => request('/api/invoices'),
   getInvoice: (id) => request(`/api/invoices/${id}`),
