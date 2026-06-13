@@ -92,10 +92,26 @@ async function request(path, options = {}) {
   }
   const headers = options.body instanceof FormData ? {} : { 'Content-Type': 'application/json' };
   if (token) headers.Authorization = `Bearer ${token}`;
-  const response = await fetch(`${API_BASE}${path}`, {
-    headers,
-    ...options
-  });
+  const timeoutMs = Number(options.timeoutMs || 0);
+  const controller = timeoutMs > 0 ? new AbortController() : null;
+  const timeoutId = controller
+    ? window.setTimeout(() => controller.abort(), timeoutMs)
+    : null;
+  let response;
+  try {
+    response = await fetch(`${API_BASE}${path}`, {
+      headers,
+      ...options,
+      signal: controller?.signal || options.signal
+    });
+  } catch (error) {
+    if (error?.name === 'AbortError') {
+      throw new Error('请求超时，请稍后重试');
+    }
+    throw error;
+  } finally {
+    if (timeoutId) window.clearTimeout(timeoutId);
+  }
 
   if (!response.ok) {
     let message = '请求失败';
@@ -128,7 +144,7 @@ async function download(path, filename) {
 
 export const api = {
   login: (payload) => request('/api/auth/login', { method: 'POST', body: JSON.stringify(payload) }),
-  register: (payload) => request('/api/auth/register', { method: 'POST', body: JSON.stringify(payload) }),
+  register: (payload) => request('/api/auth/register', { method: 'POST', body: JSON.stringify(payload), timeoutMs: 15000 }),
   me: () => request('/api/auth/me'),
   searchUsers: (keyword) => request(`/api/users/search?keyword=${encodeURIComponent(keyword)}`),
   requestAccountConnection: (payload) => request('/api/account-connections/request', { method: 'POST', body: JSON.stringify(payload) }),

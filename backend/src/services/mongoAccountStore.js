@@ -39,8 +39,24 @@ async function getClient() {
     throw new Error('MongoDB is not configured. Set MONGODB_URI.');
   }
   if (!clientPromise || activeMongoUri !== mongoUri) {
-    const client = new MongoClient(mongoUri);
-    clientPromise = client.connect();
+    console.info('[mongo] connecting to MongoDB');
+    const client = new MongoClient(mongoUri, {
+      connectTimeoutMS: 10000,
+      serverSelectionTimeoutMS: 10000,
+      socketTimeoutMS: 15000
+    });
+    clientPromise = client.connect()
+      .then((connectedClient) => {
+        console.info('[mongo] connected');
+        return connectedClient;
+      })
+      .catch((error) => {
+        console.error('[mongo] connection failed:', error?.stack || error);
+        clientPromise = null;
+        activeMongoUri = '';
+        indexesReady = false;
+        throw error;
+      });
     activeMongoUri = mongoUri;
     indexesReady = false;
   }
@@ -51,6 +67,7 @@ export async function getMongoDb() {
   const client = await getClient();
   const db = client.db(getMongoDbName());
   if (!indexesReady) {
+    console.info('[mongo] ensuring indexes');
     await Promise.all([
       db.collection('users').createIndex({ email: 1 }, { unique: true }),
       db.collection('users').createIndex({ username: 1 }, { unique: true }),
@@ -59,11 +76,13 @@ export async function getMongoDb() {
       db.collection('account_connections').createIndex({ targetUserId: 1, status: 1 })
     ]);
     indexesReady = true;
+    console.info('[mongo] indexes ready');
   }
   return db;
 }
 
 export async function createMongoUser({ id, username, email, passwordHash, role = 'user', companyName, companyId, name }) {
+  console.info('[mongo] create user start', { email, username, companyName });
   const db = await getMongoDb();
   const now = new Date().toISOString();
   const user = {
@@ -81,6 +100,7 @@ export async function createMongoUser({ id, username, email, passwordHash, role 
     updatedAt: now
   };
   await db.collection('users').insertOne(user);
+  console.info('[mongo] create user success', { userId: user.id, companyId: user.companyId });
   return user;
 }
 

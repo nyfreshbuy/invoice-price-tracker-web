@@ -278,6 +278,21 @@ function describeOcrError(error) {
   return message;
 }
 
+function describeAuthRegisterError(error) {
+  const message = error?.message || String(error);
+  if (/timeout/i.test(message)) return `注册超时：${message}`;
+  if (/ssl|tls|alert internal error|MongoServerSelectionError/i.test(message)) {
+    return `数据库连接失败：MongoDB TLS/网络连接异常，请检查 MONGODB_URI、MongoDB 网络白名单和 TLS 配置。`;
+  }
+  if (/authentication failed|auth failed|bad auth/i.test(message)) {
+    return '数据库认证失败：请检查 MongoDB 用户名、密码和权限。';
+  }
+  if (/ENOTFOUND|ECONNREFUSED|ECONNRESET|ETIMEDOUT/i.test(message)) {
+    return `数据库连接失败：${message}`;
+  }
+  return message || '注册失败，请稍后重试';
+}
+
 function prepareRecord(table, record, deviceId, companyId) {
   const now = nowIso();
   const serverId = record.serverId || record.id || id();
@@ -2137,18 +2152,26 @@ app.get('/ping', (req, res) => {
 });
 
 app.post('/api/auth/register', asyncHandler(async (req, res) => {
+  const requestId = crypto.randomBytes(4).toString('hex');
   const email = String(req.body.email || '').trim().toLowerCase();
   const username = String(req.body.username || req.body.name || '').trim();
   const password = String(req.body.password || '');
   const companyName = String(req.body.companyName || '').trim() || '我的门店';
   const name = String(req.body.name || '').trim();
+  console.info(`[auth-register:${requestId}] received`, {
+    email,
+    username,
+    companyName,
+    mongoConfigured: isMongoAuthConfigured()
+  });
   if (!email || !password) return res.status(400).json({ error: '邮箱和密码不能为空' });
   if (password.length < 6) return res.status(400).json({ error: '密码至少 6 位' });
 
   if (isMongoAuthConfigured()) {
     if (!username) return res.status(400).json({ error: '用户名不能为空' });
     try {
-      const user = await createMongoUser({
+      console.info(`[auth-register:${requestId}] creating Mongo user`);
+      const user = await withTimeout(createMongoUser({
         id: id(),
         username,
         email,
@@ -2157,15 +2180,18 @@ app.post('/api/auth/register', asyncHandler(async (req, res) => {
         companyName,
         companyId: id(),
         name: name || username
-      });
+      }), 15000, 'MongoDB create user');
+      console.info(`[auth-register:${requestId}] success`, { userId: user.id, companyId: user.companyId });
       res.json({ success: true, message: '注册成功，请登录', user: toPublicMongoUser(user) });
       return;
     } catch (error) {
       if (error?.code === 11000) return res.status(409).json({ error: '邮箱或用户名已被注册' });
-      throw error;
+      console.error(`[auth-register:${requestId}] failed:`, error?.stack || error);
+      return res.status(error.statusCode || 500).json({ success: false, error: describeAuthRegisterError(error) });
     }
   }
 
+  console.info(`[auth-register:${requestId}] using SQL fallback`);
   const existing = await queryGet(`SELECT * FROM ${quoteTable('users')} WHERE LOWER(${quoteIdentifier('email')}) = ? LIMIT 1`, [email]);
   if (existing) return res.status(409).json({ error: '这个邮箱已经注册' });
 
@@ -2176,6 +2202,7 @@ app.post('/api/auth/register', asyncHandler(async (req, res) => {
     await upsertRecord('companies', company, client);
     await upsertRecord('users', user, client);
   });
+  console.info(`[auth-register:${requestId}] SQL fallback success`, { userId: user.id, companyId: company.id });
   res.json(authResponse(user, company));
 }));
 

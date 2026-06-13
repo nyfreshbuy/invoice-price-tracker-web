@@ -160,11 +160,11 @@ export default function App() {
   }
 
   if (window.location.hostname.includes('invoice-frontend-ufq4.onrender.com') && !localStorage.getItem('authToken')) {
-    return <AuthPage onAuthenticated={setAuthState} />;
+    return <AuthPageFixed onAuthenticated={setAuthState} />;
   }
 
   if (!authSession?.token) {
-    return <AuthPage onAuthenticated={setAuthState} />;
+    return <AuthPageFixed onAuthenticated={setAuthState} />;
   }
 
   return (
@@ -191,6 +191,76 @@ export default function App() {
         </Routes>
       </main>
       <BottomNav />
+    </div>
+  );
+}
+
+function AuthPageFixed({ onAuthenticated }) {
+  const [mode, setMode] = useState('login');
+  const [form, setForm] = useState({ companyName: '', username: '', email: '', password: '', confirmPassword: '' });
+  const [message, setMessage] = useState('');
+  const [loading, setLoading] = useState(false);
+
+  async function submit(event) {
+    event.preventDefault();
+    setLoading(true);
+    setMessage('');
+    try {
+      if (mode === 'register') {
+        console.info('[auth:register] submit clicked', {
+          email: form.email,
+          username: form.username,
+          companyName: form.companyName
+        });
+        if (form.password !== form.confirmPassword) {
+          console.warn('[auth:register] password confirmation mismatch');
+          setMessage('两次输入的密码不一致');
+          return;
+        }
+        console.info('[auth:register] POST /api/auth/register start');
+        const result = await api.register(form);
+        console.info('[auth:register] POST /api/auth/register success', result);
+        setMode('login');
+        setMessage('注册成功，请登录');
+        return;
+      }
+      console.info('[auth:login] POST /api/auth/login start', { login: form.email });
+      const session = await api.login({ login: form.email, password: form.password });
+      console.info('[auth:login] POST /api/auth/login success', { userId: session.user?.id, companyId: session.company?.id });
+      setAuthSession(session);
+      onAuthenticated(getAuthSession());
+      window.dispatchEvent(new Event('auth-change'));
+      syncNow();
+    } catch (error) {
+      console.error(`[auth:${mode}] failed`, error);
+      setMessage(error.message || (mode === 'register' ? '注册失败' : '登录失败'));
+    } finally {
+      console.info(`[auth:${mode}] loading=false`);
+      setLoading(false);
+    }
+  }
+
+  return (
+    <div className="auth-shell">
+      <form className="auth-card" onSubmit={submit}>
+        <h1>InvoicePriceTracker</h1>
+        <p>云端储存、离线可用、自动同步。</p>
+        <div className="segmented">
+          <button type="button" className={mode === 'login' ? 'active' : ''} onClick={() => setMode('login')}>登录</button>
+          <button type="button" className={mode === 'register' ? 'active' : ''} onClick={() => setMode('register')}>注册账号</button>
+        </div>
+        {mode === 'register' && (
+          <>
+            <label className="field"><span>公司/门店名称</span><input value={form.companyName} onChange={(event) => setForm({ ...form, companyName: event.target.value })} /></label>
+            <label className="field"><span>用户名</span><input autoComplete="username" value={form.username} onChange={(event) => setForm({ ...form, username: event.target.value })} /></label>
+          </>
+        )}
+        <label className="field"><span>{mode === 'login' ? '邮箱/用户名' : '邮箱'}</span><input type={mode === 'login' ? 'text' : 'email'} autoComplete={mode === 'login' ? 'username' : 'email'} value={form.email} onChange={(event) => setForm({ ...form, email: event.target.value })} /></label>
+        <label className="field"><span>密码</span><input type="password" autoComplete={mode === 'login' ? 'current-password' : 'new-password'} value={form.password} onChange={(event) => setForm({ ...form, password: event.target.value })} /></label>
+        {mode === 'register' && <label className="field"><span>确认密码</span><input type="password" autoComplete="new-password" value={form.confirmPassword} onChange={(event) => setForm({ ...form, confirmPassword: event.target.value })} /></label>}
+        {message && <p className="error">{message}</p>}
+        <button className="primary-button" disabled={loading}>{loading ? '处理中...' : mode === 'login' ? '登录' : '注册'}</button>
+      </form>
     </div>
   );
 }
@@ -330,7 +400,7 @@ function InvoiceListPage() {
 
 function RequireAuth({ session, children }) {
   if (!session?.token || !localStorage.getItem('authToken')) {
-    return <AuthPage onAuthenticated={() => {}} />;
+    return <AuthPageFixed onAuthenticated={() => {}} />;
   }
   return children;
 }
