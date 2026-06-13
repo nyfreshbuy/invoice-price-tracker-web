@@ -38,7 +38,7 @@ export function sanitizeAuthStorage() {
   const authToken = localStorage.getItem(AUTH_TOKEN_KEY) || '';
   const session = parseStoredSession();
   if (!session) {
-    for (const key of LEGACY_AUTH_KEYS) localStorage.removeItem(key);
+    clearAuthStorage();
     return null;
   }
   if (!authToken || session.token !== authToken || isLegacyDemoSession(session)) {

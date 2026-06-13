@@ -28,6 +28,9 @@
           const legacyCompanyName = '\u6d4b\u8bd5\u516c\u53f8';
           const legacyMojibakeCompanyName = '\u5a34\u5b2d\u762f\u934f\ue100\u5f83';
           const authToken = localStorage.getItem(authTokenKey) || '';
+          if (!session && authToken) {
+            localStorage.removeItem(authTokenKey);
+          }
           const invalidSession = session && (
             !session.token ||
             session.token !== authToken ||

@@ -1,4 +1,4 @@
-const CACHE_NAME = 'invoice-price-tracker-auth-required-v5';
+const CACHE_NAME = 'invoice-price-tracker-auth-required-v6';
 const APP_SHELL = [
   '/',
   '/index.html',
