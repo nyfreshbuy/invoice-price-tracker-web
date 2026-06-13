@@ -18,7 +18,7 @@ import {
   Upload,
   UserPlus
 } from 'lucide-react';
-import { api, getAuthSession, setAuthSession } from './api.js';
+import { api, getAuthSession, REGISTRATION_ENABLED, setAuthSession } from './api.js';
 import { generateId, localDb, today } from './localDb.js';
 import { getSyncSnapshot, startAutoSync, syncNow } from './syncService.js';
 
@@ -172,6 +172,10 @@ function AuthPage({ onAuthenticated }) {
     setMessage('');
     try {
       if (mode === 'register') {
+        if (!REGISTRATION_ENABLED) {
+          setMessage('当前系统暂未开放注册');
+          return;
+        }
         if (form.password !== form.confirmPassword) {
           setMessage('两次输入的密码不一致');
           return;
@@ -200,20 +204,20 @@ function AuthPage({ onAuthenticated }) {
         <p>云端储存、离线可用、自动同步。</p>
         <div className="segmented">
           <button type="button" className={mode === 'login' ? 'active' : ''} onClick={() => setMode('login')}>登录</button>
-          <button type="button" className={mode === 'register' ? 'active' : ''} onClick={() => setMode('register')}>注册门店</button>
+          <button type="button" className={mode === 'register' ? 'active' : ''} onClick={() => setMode('register')}>注册账号</button>
         </div>
+        {!REGISTRATION_ENABLED && <p className="warning-text">当前系统暂未开放注册。</p>}
         {mode === 'register' && (
           <>
             <label className="field"><span>公司/门店名称</span><input value={form.companyName} onChange={(event) => setForm({ ...form, companyName: event.target.value })} /></label>
             <label className="field"><span>用户名</span><input autoComplete="username" value={form.username} onChange={(event) => setForm({ ...form, username: event.target.value })} /></label>
-            <label className="field"><span>姓名</span><input value={form.name} onChange={(event) => setForm({ ...form, name: event.target.value })} /></label>
           </>
         )}
         <label className="field"><span>{mode === 'login' ? '邮箱/用户名' : '邮箱'}</span><input type={mode === 'login' ? 'text' : 'email'} autoComplete={mode === 'login' ? 'username' : 'email'} value={form.email} onChange={(event) => setForm({ ...form, email: event.target.value })} /></label>
         <label className="field"><span>密码</span><input type="password" autoComplete={mode === 'login' ? 'current-password' : 'new-password'} value={form.password} onChange={(event) => setForm({ ...form, password: event.target.value })} /></label>
         {mode === 'register' && <label className="field"><span>确认密码</span><input type="password" autoComplete="new-password" value={form.confirmPassword} onChange={(event) => setForm({ ...form, confirmPassword: event.target.value })} /></label>}
         {message && <p className="error">{message}</p>}
-        <button className="primary-button" disabled={loading}>{loading ? '处理中...' : mode === 'login' ? '登录' : '注册'}</button>
+        <button className="primary-button" disabled={loading || (mode === 'register' && !REGISTRATION_ENABLED)}>{loading ? '处理中...' : mode === 'login' ? '登录' : '注册'}</button>
       </form>
     </div>
   );
@@ -2087,6 +2091,7 @@ function connectionStatusLabel(status) {
 
 function SettingsPage() {
   const [stats, setStats] = useState({});
+  const session = getAuthSession();
   const load = () => localDb.getStats().then(setStats);
   useLocalReload(load);
 
@@ -2099,6 +2104,12 @@ function SettingsPage() {
 
   return (
     <Page title="设置/导出">
+      <Section title="账户">
+        <Info label="当前公司" value={session?.company?.name || session?.user?.companyName || '-'} />
+        <Info label="当前用户" value={session?.user?.username || session?.user?.email || session?.user?.name || 'demo'} />
+        <button className="secondary-button" type="button" onClick={() => setAuthSession(null)}>退出到登录/注册页面</button>
+        <p className="hint">退出会清除本机保存的 token、user 和 company 信息。若当前是测试公司 demo，也会强制显示登录/注册页。</p>
+      </Section>
       <Section title="导出">
         <a className="primary-button" href={api.exportUrl()}><Upload size={18} />导出云端 CSV</a>
         <a className="secondary-button" href={api.exportExcelUrl()}><Upload size={18} />导出云端 Excel</a>

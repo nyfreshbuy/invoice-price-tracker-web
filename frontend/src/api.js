@@ -1,7 +1,9 @@
 const API_BASE = (import.meta.env.VITE_API_BASE_URL || 'http://localhost:3000').replace(/\/$/, '');
 const AUTH_KEY = 'invoicePriceTrackerAuth';
+const AUTH_LOGGED_OUT_KEY = 'invoicePriceTrackerLoggedOut';
 export const AUTO_LOGIN = import.meta.env.VITE_AUTO_LOGIN === 'true';
 export const DEMO_NO_AUTH = AUTO_LOGIN || import.meta.env.VITE_DEMO_NO_AUTH !== 'false';
+export const REGISTRATION_ENABLED = import.meta.env.VITE_REGISTRATION_ENABLED !== 'false';
 export const DEMO_SESSION = {
   token: '',
   user: {
@@ -20,17 +22,23 @@ export const DEMO_SESSION = {
 
 export function getAuthSession() {
   try {
-    return JSON.parse(localStorage.getItem(AUTH_KEY) || 'null') || (DEMO_NO_AUTH ? DEMO_SESSION : null);
+    const storedSession = JSON.parse(localStorage.getItem(AUTH_KEY) || 'null');
+    if (storedSession) return storedSession;
+    const userLoggedOut = localStorage.getItem(AUTH_LOGGED_OUT_KEY) === 'true';
+    return DEMO_NO_AUTH && !userLoggedOut ? DEMO_SESSION : null;
   } catch {
-    return DEMO_NO_AUTH ? DEMO_SESSION : null;
+    const userLoggedOut = localStorage.getItem(AUTH_LOGGED_OUT_KEY) === 'true';
+    return DEMO_NO_AUTH && !userLoggedOut ? DEMO_SESSION : null;
   }
 }
 
 export function setAuthSession(session) {
   if (session?.token) {
     localStorage.setItem(AUTH_KEY, JSON.stringify(session));
+    localStorage.removeItem(AUTH_LOGGED_OUT_KEY);
   } else {
     localStorage.removeItem(AUTH_KEY);
+    localStorage.setItem(AUTH_LOGGED_OUT_KEY, 'true');
   }
   window.dispatchEvent(new Event('auth-change'));
 }

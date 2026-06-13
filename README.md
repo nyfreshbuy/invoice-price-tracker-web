@@ -192,6 +192,7 @@ DATA_DIR=/var/data
 UPLOAD_DIR=/var/data/uploads
 AUTH_SECRET=generate-a-long-random-secret
 DEMO_NO_AUTH=true
+REGISTRATION_ENABLED=true
 ```
 
 `DATABASE_URL` controls database mode:
@@ -210,7 +211,20 @@ AUTH_SECRET=generate-a-long-random-secret
 
 # frontend
 VITE_DEMO_NO_AUTH=false
+VITE_REGISTRATION_ENABLED=true
 ```
+
+If registration is not open yet, set:
+
+```text
+# backend
+REGISTRATION_ENABLED=false
+
+# frontend
+VITE_REGISTRATION_ENABLED=false
+```
+
+The login page will show "当前系统暂未开放注册" instead of silently hiding the feature.
 
 Account APIs:
 

@@ -90,6 +90,7 @@ const OCR_TIMEOUT_MS = Number(process.env.OCR_TIMEOUT_MS || 120000);
 const AUTH_SECRET = process.env.AUTH_SECRET || 'dev-only-change-me';
 const AUTO_LOGIN = process.env.AUTO_LOGIN === 'true';
 const DEMO_NO_AUTH = AUTO_LOGIN || process.env.DEMO_NO_AUTH !== 'false';
+const REGISTRATION_ENABLED = process.env.REGISTRATION_ENABLED !== 'false';
 const DEMO_COMPANY = { id: 'demo-company', name: '测试公司' };
 const DEMO_USER = {
   id: 'demo-user',
@@ -101,6 +102,7 @@ const DEMO_USER = {
 
 console.log(`[database] mode: ${usingPostgres ? 'PostgreSQL' : 'SQLite'}`);
 console.log(`[auth] demo no auth mode: ${DEMO_NO_AUTH ? 'enabled' : 'disabled'}`);
+console.log(`[auth] registration: ${REGISTRATION_ENABLED ? 'enabled' : 'disabled'}`);
 
 const localDevOrigins = [
   'http://localhost:5173',
@@ -2154,6 +2156,9 @@ app.get('/ping', (req, res) => {
 });
 
 app.post('/api/auth/register', asyncHandler(async (req, res) => {
+  if (!REGISTRATION_ENABLED) {
+    return res.status(403).json({ error: '当前系统暂未开放注册' });
+  }
   const email = String(req.body.email || '').trim().toLowerCase();
   const username = String(req.body.username || req.body.name || '').trim();
   const password = String(req.body.password || '');
