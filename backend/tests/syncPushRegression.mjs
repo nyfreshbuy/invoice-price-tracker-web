@@ -15,7 +15,9 @@ function parseStatus(raw) {
   return match ? Number(match[1]) : 0;
 }
 
-async function invoke(method, url, body) {
+let authToken = '';
+
+async function invoke(method, url, body, options = {}) {
   const requestBody = body === undefined ? '' : JSON.stringify(body);
   const chunks = [];
   const socket = new Duplex({
@@ -33,7 +35,8 @@ async function invoke(method, url, body) {
   req.headers = {
     host: 'localhost',
     'content-type': 'application/json',
-    'content-length': Buffer.byteLength(requestBody)
+    'content-length': Buffer.byteLength(requestBody),
+    ...(options.auth === false || !authToken ? {} : { authorization: `Bearer ${authToken}` })
   };
   req.socket = socket;
   req.connection = socket;
@@ -73,6 +76,23 @@ async function json(method, url, body) {
   return response.data;
 }
 
+async function loginRegressionUser() {
+  const suffix = `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+  const email = `sync-regression-${suffix}@example.com`;
+  const password = 'regression-pass';
+  await json('POST', '/api/auth/register', {
+    username: `sync-regression-${suffix}`,
+    email,
+    password,
+    companyName: `Sync Regression ${suffix}`
+  });
+  const session = await json('POST', '/api/auth/login', { login: email, password });
+  assert.ok(session.token);
+  authToken = session.token;
+  const me = await json('GET', '/api/auth/me');
+  assert.equal(me.company?.name, `Sync Regression ${suffix}`);
+}
+
 async function cleanup(ids) {
   for (const invoiceId of ids) {
     await invoke('DELETE', `/api/invoices/${encodeURIComponent(invoiceId)}`);
@@ -91,6 +111,11 @@ const invoiceA = {
     { productNameOriginal: '香蕉 Banana', productNameNormalized: '香蕉 banana', quantity: 3, unit: 'case', unitPrice: 5, totalPrice: 15 }
   ]
 };
+
+const unauthorized = await invoke('GET', '/api/invoices');
+assert.equal(unauthorized.status, 401);
+
+await loginRegressionUser();
 
 await cleanup(['reg-a-sync-base', 'reg-a-sync-dup']);
 

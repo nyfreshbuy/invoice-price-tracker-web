@@ -16,7 +16,7 @@ This is the PWA version of InvoicePriceTracker.
 - Batch controls are available: pause, continue, and cancel remaining waiting tasks.
 - Failed tasks support retry, image re-upload, and manual entry.
 - Original uploaded images remain under `UPLOAD_DIR` and can be viewed from the task list.
-- Testing can skip login with `AUTO_LOGIN=true` on the backend and `VITE_AUTO_LOGIN=true` on the frontend.
+- Authentication is required. The frontend must have a valid JWT token and backend business APIs require `Authorization: Bearer <token>`.
 - Template strategy: match `invoice_templates` from `supplierHint` or filename first; if matched, use template parsing and do not call AI Vision.
 - If no template is matched, AI Vision is used and the successful result updates/creates a supplier template.
 - AI product names preserve Chinese and English through `nameCn`, `nameEn`, and `standardName`.
@@ -29,27 +29,14 @@ This is the PWA version of InvoicePriceTracker.
 - Same-batch multi-page invoices are merged automatically when supplier and invoice number match but page totals/items differ.
 - Invoice bottom/page total is the source of truth. Item sum is stored as `calculatedTotal` for validation only.
 
-## Current Testing Mode
+## Authentication
 
-The project currently supports `DEMO_NO_AUTH` mode for testing.
+The old demo/no-auth mode has been removed.
 
-- Frontend skips login when `VITE_DEMO_NO_AUTH=true`
-- Backend allows requests without `Authorization` when `DEMO_NO_AUTH=true`
-- Default company: `demo-company` / `测试公司`
-- Default user: `demo-user` / `demo`
-- IndexedDB records are written under `demo-company`
-- Sync, invoice, supplier, OCR, AI invoice, and recognition task APIs use `demo-company` when no token is provided
-- Login and registration code is still present and can be restored later
-
-To restore normal login:
-
-```text
-# backend
-DEMO_NO_AUTH=false
-
-# frontend
-VITE_DEMO_NO_AUTH=false
-```
+- No valid token: frontend shows the login/register page.
+- Valid token: frontend calls `GET /api/auth/me` and uses the returned user/company.
+- Business APIs reject requests without `Authorization: Bearer <token>`.
+- There is no mock company, guest user, default test company, skipAuth, or bypassAuth path.
 
 ## Background Invoice Recognition
 
@@ -111,7 +98,7 @@ Every synced record includes:
 - `updatedAt`
 - `deletedAt`
 
-The backend ignores client-provided `companyId` for authorization decisions. `/api/sync/push` and `/api/sync/pull` use the authenticated user's company, or `demo-company` in `DEMO_NO_AUTH` mode.
+The backend ignores client-provided `companyId` for authorization decisions. `/api/sync/push` and `/api/sync/pull` use only the authenticated user's company.
 
 Supported sync tables:
 
@@ -191,7 +178,6 @@ CORS_ORIGIN=https://your-frontend-name.onrender.com
 DATA_DIR=/var/data
 UPLOAD_DIR=/var/data/uploads
 AUTH_SECRET=generate-a-long-random-secret
-DEMO_NO_AUTH=true
 REGISTRATION_ENABLED=true
 ```
 
@@ -202,7 +188,7 @@ REGISTRATION_ENABLED=true
 
 OpenAI keys must only be configured in backend environment variables. Never put `OPENAI_API_KEY` in the frontend.
 
-Account connection APIs require a real JWT login token and do not use the anonymous demo session. For testing account connections, set:
+Account connection APIs require a real JWT login token. For testing account connections, set:
 
 ```text
 # backend
@@ -210,7 +196,6 @@ MONGODB_URI=your MongoDB connection string
 AUTH_SECRET=generate-a-long-random-secret
 
 # frontend
-VITE_DEMO_NO_AUTH=false
 VITE_REGISTRATION_ENABLED=true
 ```
 
@@ -245,7 +230,7 @@ Render Static Site:
 
 ```text
 VITE_API_BASE_URL=https://your-backend-name.onrender.com
-VITE_DEMO_NO_AUTH=true
+VITE_REGISTRATION_ENABLED=true
 ```
 
 ## Render Deployment
@@ -273,7 +258,7 @@ CORS_ORIGIN=https://your-frontend-name.onrender.com
 DATA_DIR=/var/data
 UPLOAD_DIR=/var/data/uploads
 AUTH_SECRET=generate-a-long-random-secret
-DEMO_NO_AUTH=true
+REGISTRATION_ENABLED=true
 ```
 
 Optional Render Disk:
@@ -300,7 +285,7 @@ Environment variable:
 
 ```text
 VITE_API_BASE_URL=https://your-backend-name.onrender.com
-VITE_DEMO_NO_AUTH=true
+VITE_REGISTRATION_ENABLED=true
 ```
 
 After the frontend deploys, update backend:

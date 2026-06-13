@@ -88,20 +88,9 @@ fs.mkdirSync(uploadDir, { recursive: true });
 const OCR_LANGUAGE = process.env.OCR_LANG || 'eng+chi_sim';
 const OCR_TIMEOUT_MS = Number(process.env.OCR_TIMEOUT_MS || 120000);
 const AUTH_SECRET = process.env.AUTH_SECRET || 'dev-only-change-me';
-const AUTO_LOGIN = process.env.AUTO_LOGIN === 'true';
-const DEMO_NO_AUTH = AUTO_LOGIN || process.env.DEMO_NO_AUTH !== 'false';
 const REGISTRATION_ENABLED = process.env.REGISTRATION_ENABLED !== 'false';
-const DEMO_COMPANY = { id: 'demo-company', name: '测试公司' };
-const DEMO_USER = {
-  id: 'demo-user',
-  email: 'demo@example.com',
-  username: 'demo',
-  name: 'demo',
-  companyId: DEMO_COMPANY.id
-};
 
 console.log(`[database] mode: ${usingPostgres ? 'PostgreSQL' : 'SQLite'}`);
-console.log(`[auth] demo no auth mode: ${DEMO_NO_AUTH ? 'enabled' : 'disabled'}`);
 console.log(`[auth] registration: ${REGISTRATION_ENABLED ? 'enabled' : 'disabled'}`);
 
 const localDevOrigins = [
@@ -208,13 +197,7 @@ function authResponse(user, company) {
 
 async function requireAuth(req, res, next) {
   const header = req.headers.authorization || '';
-  const token = header.startsWith('Bearer ') ? header.slice(7) : String(req.query.token || '');
-  if (!token && DEMO_NO_AUTH) {
-    req.user = DEMO_USER;
-    req.company = DEMO_COMPANY;
-    next();
-    return;
-  }
+  const token = header.startsWith('Bearer ') ? header.slice(7) : '';
   const payload = verifyToken(token);
   if (!payload?.userId || !payload?.companyId) {
     res.status(401).json({ error: '请先登录' });
@@ -2222,10 +2205,6 @@ app.post('/api/auth/login', asyncHandler(async (req, res) => {
 }));
 
 app.get('/api/auth/me', requireAuth, asyncHandler(async (req, res) => {
-  if (DEMO_NO_AUTH && req.user.id === DEMO_USER.id) {
-    res.json({ user: DEMO_USER, company: DEMO_COMPANY, demo: true });
-    return;
-  }
   if (req.company) {
     res.json({ user: req.user, company: req.company });
     return;

@@ -1,44 +1,20 @@
 const API_BASE = (import.meta.env.VITE_API_BASE_URL || 'http://localhost:3000').replace(/\/$/, '');
 const AUTH_KEY = 'invoicePriceTrackerAuth';
-const AUTH_LOGGED_OUT_KEY = 'invoicePriceTrackerLoggedOut';
-export const AUTO_LOGIN = import.meta.env.VITE_AUTO_LOGIN === 'true';
-export const DEMO_NO_AUTH = AUTO_LOGIN || import.meta.env.VITE_DEMO_NO_AUTH !== 'false';
 export const REGISTRATION_ENABLED = import.meta.env.VITE_REGISTRATION_ENABLED !== 'false';
-export const DEMO_SESSION = {
-  token: '',
-  user: {
-    id: 'demo-user',
-    username: 'demo',
-    email: 'demo@example.com',
-    name: 'demo',
-    companyId: 'demo-company'
-  },
-  company: {
-    id: 'demo-company',
-    name: '测试公司'
-  },
-  demo: true
-};
 
 export function getAuthSession() {
   try {
-    const storedSession = JSON.parse(localStorage.getItem(AUTH_KEY) || 'null');
-    if (storedSession) return storedSession;
-    const userLoggedOut = localStorage.getItem(AUTH_LOGGED_OUT_KEY) === 'true';
-    return DEMO_NO_AUTH && !userLoggedOut ? DEMO_SESSION : null;
+    return JSON.parse(localStorage.getItem(AUTH_KEY) || 'null');
   } catch {
-    const userLoggedOut = localStorage.getItem(AUTH_LOGGED_OUT_KEY) === 'true';
-    return DEMO_NO_AUTH && !userLoggedOut ? DEMO_SESSION : null;
+    return null;
   }
 }
 
 export function setAuthSession(session) {
   if (session?.token) {
     localStorage.setItem(AUTH_KEY, JSON.stringify(session));
-    localStorage.removeItem(AUTH_LOGGED_OUT_KEY);
   } else {
     localStorage.removeItem(AUTH_KEY);
-    localStorage.setItem(AUTH_LOGGED_OUT_KEY, 'true');
   }
   window.dispatchEvent(new Event('auth-change'));
 }
@@ -59,6 +35,11 @@ export function fileUrl(path) {
 
 async function request(path, options = {}) {
   const token = getAuthToken();
+  const pathname = path.split('?')[0];
+  const publicPaths = ['/api/auth/login', '/api/auth/register'];
+  if (!token && !publicPaths.includes(pathname)) {
+    throw new Error('请先登录');
+  }
   const headers = options.body instanceof FormData ? {} : { 'Content-Type': 'application/json' };
   if (token) headers.Authorization = `Bearer ${token}`;
   const response = await fetch(`${API_BASE}${path}`, {
@@ -80,6 +61,19 @@ async function request(path, options = {}) {
   const contentType = response.headers.get('content-type') || '';
   if (contentType.includes('application/json')) return response.json();
   return response;
+}
+
+async function download(path, filename) {
+  const response = await request(path);
+  const blob = await response.blob();
+  const url = URL.createObjectURL(blob);
+  const link = document.createElement('a');
+  link.href = url;
+  link.download = filename;
+  document.body.appendChild(link);
+  link.click();
+  link.remove();
+  URL.revokeObjectURL(url);
 }
 
 export const api = {
@@ -112,13 +106,13 @@ export const api = {
     const query = new URLSearchParams(Object.entries(params).filter(([, value]) => value !== '' && value !== false && value !== null && value !== undefined)).toString();
     return request(`/api/suppliers/${supplierId}/invoices${query ? `?${query}` : ''}`);
   },
-  supplierInvoicesExportUrl: (supplierId, params = {}) => {
-    const query = new URLSearchParams({ ...Object.fromEntries(Object.entries(params).filter(([, value]) => value !== '' && value !== false && value !== null && value !== undefined)), token: getAuthToken() }).toString();
-    return `${API_BASE}/api/suppliers/${supplierId}/invoices.csv?${query}`;
+  downloadSupplierInvoicesCsv: (supplierId, params = {}) => {
+    const query = new URLSearchParams(Object.fromEntries(Object.entries(params).filter(([, value]) => value !== '' && value !== false && value !== null && value !== undefined))).toString();
+    return download(`/api/suppliers/${supplierId}/invoices.csv${query ? `?${query}` : ''}`, `supplier-${supplierId}-invoices.csv`);
   },
-  supplierInvoicesExcelUrl: (supplierId, params = {}) => {
-    const query = new URLSearchParams({ ...Object.fromEntries(Object.entries(params).filter(([, value]) => value !== '' && value !== false && value !== null && value !== undefined)), token: getAuthToken() }).toString();
-    return `${API_BASE}/api/suppliers/${supplierId}/invoices.xls?${query}`;
+  downloadSupplierInvoicesExcel: (supplierId, params = {}) => {
+    const query = new URLSearchParams(Object.fromEntries(Object.entries(params).filter(([, value]) => value !== '' && value !== false && value !== null && value !== undefined))).toString();
+    return download(`/api/suppliers/${supplierId}/invoices.xls${query ? `?${query}` : ''}`, `supplier-${supplierId}-invoices.xls`);
   },
 
   searchProducts: (q) => request(`/api/products/search?q=${encodeURIComponent(q)}`),
@@ -126,8 +120,8 @@ export const api = {
 
   getStats: () => request('/api/stats'),
   clearData: () => request('/api/dev/clear', { method: 'DELETE' }),
-  exportUrl: () => `${API_BASE}/api/export.csv?token=${encodeURIComponent(getAuthToken())}`,
-  exportExcelUrl: () => `${API_BASE}/api/export.xls?token=${encodeURIComponent(getAuthToken())}`,
+  downloadExportCsv: () => download('/api/export.csv', 'invoice-export.csv'),
+  downloadExportExcel: () => download('/api/export.xls', 'invoice-export.xls'),
   ocrUpload: (formData) => {
     console.log('OCR upload URL:', `${API_BASE}/api/ocr`);
     return request('/api/ocr', { method: 'POST', body: formData });

@@ -91,6 +91,7 @@ const emptyTemplate = (supplierName = '') => ({
 
 export default function App() {
   const [authSession, setAuthState] = useState(() => getAuthSession());
+  const [authReady, setAuthReady] = useState(() => !getAuthSession()?.token);
   const [syncState, setSyncState] = useState({ label: '已同步', pendingCount: 0, online: navigator.onLine, syncing: false });
 
   useEffect(() => {
@@ -120,6 +121,32 @@ export default function App() {
     return () => window.removeEventListener('auth-change', refreshAuth);
   }, []);
 
+  useEffect(() => {
+    let cancelled = false;
+    async function verifyCurrentToken() {
+      if (!authSession?.token) {
+        setAuthReady(true);
+        return;
+      }
+      setAuthReady(false);
+      try {
+        const data = await api.me();
+        if (cancelled) return;
+        const verifiedSession = { token: authSession.token, user: data.user, company: data.company };
+        localStorage.setItem('invoicePriceTrackerAuth', JSON.stringify(verifiedSession));
+        setAuthState(verifiedSession);
+      } catch {
+        if (!cancelled) setAuthSession(null);
+      } finally {
+        if (!cancelled) setAuthReady(true);
+      }
+    }
+    verifyCurrentToken();
+    return () => {
+      cancelled = true;
+    };
+  }, [authSession?.token]);
+
   async function handleSyncNow() {
     setSyncState(await syncNow());
   }
@@ -128,7 +155,11 @@ export default function App() {
     setAuthSession(null);
   }
 
-  if (!authSession) {
+  if (!authReady) {
+    return <div className="auth-shell"><div className="auth-card">正在验证登录状态...</div></div>;
+  }
+
+  if (!authSession?.token) {
     return <AuthPage onAuthenticated={setAuthState} />;
   }
 
@@ -1928,8 +1959,8 @@ function SupplierInvoiceHistoryPage() {
           <label><input type="checkbox" checked={filters.hasDiscounts} onChange={(event) => updateFilter('hasDiscounts', event.target.checked)} /> 有折扣</label>
           <label><input type="checkbox" checked={filters.hasWarnings} onChange={(event) => updateFilter('hasWarnings', event.target.checked)} /> 有异常</label>
           <label><input type="checkbox" checked={filters.isMultipage} onChange={(event) => updateFilter('isMultipage', event.target.checked)} /> 多页发票</label>
-          <a className="secondary-button" href={api.supplierInvoicesExportUrl(id, filters)}>导出 CSV</a>
-          <a className="secondary-button" href={api.supplierInvoicesExcelUrl(id, filters)}>导出 Excel</a>
+          <button className="secondary-button" type="button" onClick={() => api.downloadSupplierInvoicesCsv(id, filters)}>导出 CSV</button>
+          <button className="secondary-button" type="button" onClick={() => api.downloadSupplierInvoicesExcel(id, filters)}>导出 Excel</button>
         </div>
       </Section>
       <Section title="发票">
@@ -2017,7 +2048,7 @@ function AccountConnectionPage() {
   if (!session?.token) {
     return (
       <Page title="账户连接" subtitle="搜索账户并建立连接关系">
-        <p className="warning-text">当前是免登录 DEMO 模式。账户连接需要先注册并登录真实账户。</p>
+        <p className="warning-text">请先登录后再使用账户连接功能。</p>
       </Page>
     );
   }
@@ -2106,13 +2137,13 @@ function SettingsPage() {
     <Page title="设置/导出">
       <Section title="账户">
         <Info label="当前公司" value={session?.company?.name || session?.user?.companyName || '-'} />
-        <Info label="当前用户" value={session?.user?.username || session?.user?.email || session?.user?.name || 'demo'} />
+        <Info label="当前用户" value={session?.user?.username || session?.user?.email || session?.user?.name || '-'} />
         <button className="secondary-button" type="button" onClick={() => setAuthSession(null)}>退出到登录/注册页面</button>
-        <p className="hint">退出会清除本机保存的 token、user 和 company 信息。若当前是测试公司 demo，也会强制显示登录/注册页。</p>
+        <p className="hint">退出会清除本机保存的 token、user 和 company 信息。</p>
       </Section>
       <Section title="导出">
-        <a className="primary-button" href={api.exportUrl()}><Upload size={18} />导出云端 CSV</a>
-        <a className="secondary-button" href={api.exportExcelUrl()}><Upload size={18} />导出云端 Excel</a>
+        <button className="primary-button" type="button" onClick={() => api.downloadExportCsv()}><Upload size={18} />导出云端 CSV</button>
+        <button className="secondary-button" type="button" onClick={() => api.downloadExportExcel()}><Upload size={18} />导出云端 Excel</button>
         <p className="hint">CSV 导出来自后端云端数据库；离线时请先同步后再导出。</p>
       </Section>
       <Section title="本地数据库统计">
