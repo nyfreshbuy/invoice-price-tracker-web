@@ -9,7 +9,7 @@ sanitizeAuthStorage();
 if ('caches' in window) {
   caches.keys()
     .then((keys) => Promise.all(keys
-      .filter((key) => key.startsWith('invoice-price-tracker-') && key !== 'invoice-price-tracker-auth-required-v4')
+      .filter((key) => key.startsWith('invoice-price-tracker-') && key !== 'invoice-price-tracker-auth-required-v5')
       .map((key) => caches.delete(key))))
     .catch(() => {});
 }
@@ -30,7 +30,7 @@ if ('serviceWorker' in navigator) {
         if ('caches' in window) {
           caches.keys()
             .then((keys) => Promise.all(keys
-              .filter((key) => key.startsWith('invoice-price-tracker-') && key !== 'invoice-price-tracker-auth-required-v4')
+              .filter((key) => key.startsWith('invoice-price-tracker-') && key !== 'invoice-price-tracker-auth-required-v5')
               .map((key) => caches.delete(key))))
             .catch(() => {});
         }

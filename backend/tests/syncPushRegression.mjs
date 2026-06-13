@@ -114,6 +114,8 @@ const invoiceA = {
 
 const unauthorized = await invoke('GET', '/api/invoices');
 assert.equal(unauthorized.status, 401);
+const unauthorizedMe = await invoke('GET', '/api/auth/me');
+assert.equal(unauthorizedMe.status, 401);
 
 await loginRegressionUser();
 

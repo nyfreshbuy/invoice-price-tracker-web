@@ -159,6 +159,10 @@ export default function App() {
     return <div className="auth-shell"><div className="auth-card">正在验证登录状态...</div></div>;
   }
 
+  if (window.location.hostname.includes('invoice-frontend-ufq4.onrender.com') && !localStorage.getItem('authToken')) {
+    return <AuthPage onAuthenticated={setAuthState} />;
+  }
+
   if (!authSession?.token) {
     return <AuthPage onAuthenticated={setAuthState} />;
   }
@@ -168,22 +172,22 @@ export default function App() {
       <SyncBar state={syncState} session={authSession} onSyncNow={handleSyncNow} onLogout={handleLogout} />
       <main className="main">
         <Routes>
-          <Route path="/" element={<HomeDashboardPage />} />
-          <Route path="/invoices" element={<InvoiceListPage />} />
-          <Route path="/invoices/new" element={<InvoiceFormPage />} />
-          <Route path="/invoices/batch" element={<BatchImportPage />} />
-          <Route path="/recognition-tasks" element={<RecognitionTaskListPage />} />
-          <Route path="/invoices/:id" element={<InvoiceDetailPageWithGifts />} />
-          <Route path="/products" element={<ProductSearchPage />} />
-          <Route path="/products/:name" element={<ProductDetailPage />} />
-          <Route path="/supplier-center" element={<SupplierCenterPage />} />
-          <Route path="/suppliers/:id" element={<SupplierDetailPage />} />
-          <Route path="/suppliers/:id/products" element={<SupplierProductsPage />} />
-          <Route path="/suppliers" element={<SupplierPage />} />
-          <Route path="/suppliers/:id/invoices" element={<SupplierInvoiceHistoryPage />} />
-          <Route path="/account-connections" element={<AccountConnectionPage />} />
-          <Route path="/analytics" element={<PurchaseAnalysisPage />} />
-          <Route path="/settings" element={<SettingsPage />} />
+          <Route path="/" element={<RequireAuth session={authSession}><HomeDashboardPage /></RequireAuth>} />
+          <Route path="/invoices" element={<RequireAuth session={authSession}><InvoiceListPage /></RequireAuth>} />
+          <Route path="/invoices/new" element={<RequireAuth session={authSession}><InvoiceFormPage /></RequireAuth>} />
+          <Route path="/invoices/batch" element={<RequireAuth session={authSession}><BatchImportPage /></RequireAuth>} />
+          <Route path="/recognition-tasks" element={<RequireAuth session={authSession}><RecognitionTaskListPage /></RequireAuth>} />
+          <Route path="/invoices/:id" element={<RequireAuth session={authSession}><InvoiceDetailPageWithGifts /></RequireAuth>} />
+          <Route path="/products" element={<RequireAuth session={authSession}><ProductSearchPage /></RequireAuth>} />
+          <Route path="/products/:name" element={<RequireAuth session={authSession}><ProductDetailPage /></RequireAuth>} />
+          <Route path="/supplier-center" element={<RequireAuth session={authSession}><SupplierCenterPage /></RequireAuth>} />
+          <Route path="/suppliers/:id" element={<RequireAuth session={authSession}><SupplierDetailPage /></RequireAuth>} />
+          <Route path="/suppliers/:id/products" element={<RequireAuth session={authSession}><SupplierProductsPage /></RequireAuth>} />
+          <Route path="/suppliers" element={<RequireAuth session={authSession}><SupplierPage /></RequireAuth>} />
+          <Route path="/suppliers/:id/invoices" element={<RequireAuth session={authSession}><SupplierInvoiceHistoryPage /></RequireAuth>} />
+          <Route path="/account-connections" element={<RequireAuth session={authSession}><AccountConnectionPage /></RequireAuth>} />
+          <Route path="/analytics" element={<RequireAuth session={authSession}><PurchaseAnalysisPage /></RequireAuth>} />
+          <Route path="/settings" element={<RequireAuth session={authSession}><SettingsPage /></RequireAuth>} />
         </Routes>
       </main>
       <BottomNav />
@@ -322,6 +326,13 @@ function InvoiceListPage() {
       )}
     </Page>
   );
+}
+
+function RequireAuth({ session, children }) {
+  if (!session?.token || !localStorage.getItem('authToken')) {
+    return <AuthPage onAuthenticated={() => {}} />;
+  }
+  return children;
 }
 
 function MergeInvoiceDialog({ invoice, onClose, onMerged }) {

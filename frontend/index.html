@@ -16,7 +16,8 @@
     <script>
       (() => {
         const authKey = 'invoicePriceTrackerAuth';
-        const legacyKeys = ['authToken', 'token', 'user', 'company', 'companyId', 'invoicePriceTrackerLoggedOut'];
+        const authTokenKey = 'authToken';
+        const legacyKeys = ['token', 'user', 'company', 'companyId', 'invoicePriceTrackerLoggedOut'];
         try {
           const session = JSON.parse(localStorage.getItem(authKey) || 'null');
           const company = session && session.company ? session.company : {};
@@ -26,8 +27,10 @@
           const legacyUsername = ['de', 'mo'].join('');
           const legacyCompanyName = '\u6d4b\u8bd5\u516c\u53f8';
           const legacyMojibakeCompanyName = '\u5a34\u5b2d\u762f\u934f\ue100\u5f83';
-          const legacyDemo = session && (
+          const authToken = localStorage.getItem(authTokenKey) || '';
+          const invalidSession = session && (
             !session.token ||
+            session.token !== authToken ||
             company.id === legacyCompanyId ||
             user.companyId === legacyCompanyId ||
             user.id === legacyUserId ||
@@ -35,10 +38,14 @@
             company.name === legacyMojibakeCompanyName ||
             user.username === legacyUsername
           );
-          if (legacyDemo) localStorage.removeItem(authKey);
+          if (invalidSession) {
+            localStorage.removeItem(authKey);
+            localStorage.removeItem(authTokenKey);
+          }
           for (const key of legacyKeys) localStorage.removeItem(key);
         } catch {
           localStorage.removeItem(authKey);
+          localStorage.removeItem(authTokenKey);
           for (const key of legacyKeys) localStorage.removeItem(key);
         }
       })();

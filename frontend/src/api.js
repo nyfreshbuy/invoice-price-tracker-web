@@ -1,6 +1,7 @@
 const API_BASE = (import.meta.env.VITE_API_BASE_URL || 'http://localhost:3000').replace(/\/$/, '');
 const AUTH_KEY = 'invoicePriceTrackerAuth';
-const LEGACY_AUTH_KEYS = ['authToken', 'token', 'user', 'company', 'companyId', 'invoicePriceTrackerLoggedOut'];
+const AUTH_TOKEN_KEY = 'authToken';
+const LEGACY_AUTH_KEYS = ['token', 'user', 'company', 'companyId', 'invoicePriceTrackerLoggedOut'];
 
 function parseStoredSession() {
   try {
@@ -29,16 +30,18 @@ function isLegacyDemoSession(session) {
 
 export function clearAuthStorage() {
   localStorage.removeItem(AUTH_KEY);
+  localStorage.removeItem(AUTH_TOKEN_KEY);
   for (const key of LEGACY_AUTH_KEYS) localStorage.removeItem(key);
 }
 
 export function sanitizeAuthStorage() {
+  const authToken = localStorage.getItem(AUTH_TOKEN_KEY) || '';
   const session = parseStoredSession();
   if (!session) {
     for (const key of LEGACY_AUTH_KEYS) localStorage.removeItem(key);
     return null;
   }
-  if (isLegacyDemoSession(session)) {
+  if (!authToken || session.token !== authToken || isLegacyDemoSession(session)) {
     clearAuthStorage();
     return null;
   }
@@ -58,6 +61,7 @@ export function setAuthSession(session) {
       window.dispatchEvent(new Event('auth-change'));
       return;
     }
+    localStorage.setItem(AUTH_TOKEN_KEY, session.token);
     localStorage.setItem(AUTH_KEY, JSON.stringify(session));
   } else {
     clearAuthStorage();
@@ -66,7 +70,7 @@ export function setAuthSession(session) {
 }
 
 export function getAuthToken() {
-  return getAuthSession()?.token || '';
+  return localStorage.getItem(AUTH_TOKEN_KEY) || '';
 }
 
 export function getCompanyId() {

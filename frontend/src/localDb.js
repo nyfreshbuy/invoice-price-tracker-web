@@ -388,7 +388,7 @@ export function getCurrentCompanyId() {
 
 function belongsToCurrentCompany(record) {
   const companyId = getCurrentCompanyId();
-  return !companyId || !record.companyId || record.companyId === companyId;
+  return Boolean(companyId) && record.companyId === companyId;
 }
 
 function active(record) {
@@ -436,10 +436,12 @@ function currentMonth() {
 function syncFields(record, status = 'pending') {
   const timestamp = nowIso();
   const generatedId = record.id || record.localId || generateId();
+  const companyId = getCurrentCompanyId();
+  if (!companyId) throw new Error('请先登录');
   return {
     ...record,
     id: record.id || generatedId,
-    companyId: record.companyId || getCurrentCompanyId(),
+    companyId: record.companyId || companyId,
     localId: record.localId || generatedId,
     serverId: record.serverId || null,
     syncStatus: status,
@@ -642,10 +644,12 @@ export const localDb = {
 
   async saveInvoiceImage({ id: imageId, invoiceId, file, source = 'IndexedDB' }) {
     if (!file) throw new Error('图片保存失败，请重新上传。');
+    const companyId = getCurrentCompanyId();
+    if (!companyId) throw new Error('请先登录');
     const idValue = imageId || generateId();
     const record = {
       id: idValue,
-      companyId: getCurrentCompanyId(),
+      companyId,
       invoiceId,
       imageBlob: file,
       mimeType: file.type || 'image/jpeg',
