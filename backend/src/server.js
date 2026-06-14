@@ -5,6 +5,7 @@ import path from 'node:path';
 import fs from 'node:fs';
 import crypto from 'node:crypto';
 import { fileURLToPath, pathToFileURL } from 'node:url';
+import { promisify } from 'node:util';
 import {
   getByAnyId,
   id,
@@ -157,15 +158,35 @@ function verifyToken(token) {
   return payload;
 }
 
-function hashPassword(password, salt = crypto.randomBytes(16).toString('hex')) {
-  const hash = crypto.pbkdf2Sync(String(password), salt, 120000, 32, 'sha256').toString('hex');
-  return `${salt}:${hash}`;
+const pbkdf2Async = promisify(crypto.pbkdf2);
+const LEGACY_PASSWORD_ITERATIONS = 120000;
+const PASSWORD_HASH_ITERATIONS = Number(process.env.PASSWORD_HASH_ITERATIONS || 60000);
+
+async function pbkdf2Hex(password, salt, iterations) {
+  const buffer = await pbkdf2Async(String(password), salt, iterations, 32, 'sha256');
+  return buffer.toString('hex');
 }
 
-function verifyPassword(password, stored) {
-  const [salt] = String(stored || '').split(':');
-  if (!salt) return false;
-  return hashPassword(password, salt) === stored;
+async function hashPasswordAsync(password, salt = crypto.randomBytes(16).toString('hex'), iterations = PASSWORD_HASH_ITERATIONS) {
+  const hash = await pbkdf2Hex(password, salt, iterations);
+  return `v2:${iterations}:${salt}:${hash}`;
+}
+
+async function verifyPasswordAsync(password, stored) {
+  const parts = String(stored || '').split(':');
+  if (parts[0] === 'v2') {
+    const [, iterationText, salt, expectedHash] = parts;
+    const iterations = Number(iterationText || 0);
+    if (!iterations || !salt || !expectedHash) return false;
+    const actualHash = await pbkdf2Hex(password, salt, iterations);
+    if (actualHash.length !== expectedHash.length) return false;
+    return crypto.timingSafeEqual(Buffer.from(actualHash), Buffer.from(expectedHash));
+  }
+  const [salt, expectedHash] = parts;
+  if (!salt || !expectedHash) return false;
+  const actualHash = await pbkdf2Hex(password, salt, LEGACY_PASSWORD_ITERATIONS);
+  if (actualHash.length !== expectedHash.length) return false;
+  return crypto.timingSafeEqual(Buffer.from(actualHash), Buffer.from(expectedHash));
 }
 
 function authResponse(user, company) {
@@ -280,17 +301,17 @@ function describeOcrError(error) {
 
 function describeAuthRegisterError(error) {
   const message = error?.message || String(error);
-  if (/timeout/i.test(message)) return `注册超时：${message}`;
+  if (/timeout/i.test(message)) return `Registration timed out: ${message}`;
   if (/ssl|tls|alert internal error|MongoServerSelectionError/i.test(message)) {
-    return `数据库连接失败：MongoDB TLS/网络连接异常，请检查 MONGODB_URI、MongoDB 网络白名单和 TLS 配置。`;
+    return 'Database connection failed: MongoDB TLS/network error. Please check MONGODB_URI, MongoDB network access list, and TLS settings.';
   }
   if (/authentication failed|auth failed|bad auth/i.test(message)) {
-    return '数据库认证失败：请检查 MongoDB 用户名、密码和权限。';
+    return 'Database authentication failed: please check MongoDB username, password, and permissions.';
   }
   if (/ENOTFOUND|ECONNREFUSED|ECONNRESET|ETIMEDOUT/i.test(message)) {
-    return `数据库连接失败：${message}`;
+    return `Database connection failed: ${message}`;
   }
-  return message || '注册失败，请稍后重试';
+  return message || 'Registration failed. Please try again later.';
 }
 
 function prepareRecord(table, record, deviceId, companyId) {
@@ -2158,11 +2179,11 @@ app.post('/api/auth/register', asyncHandler(async (req, res) => {
   const password = String(req.body.password || '');
   const companyName = String(req.body.companyName || '').trim() || '我的门店';
   const name = String(req.body.name || '').trim();
-  console.info(`[auth-register:${requestId}] received`, {
+  console.info(`[auth/register:${requestId}] request received`, {
     email,
     username,
     companyName,
-    mongoConfigured: isMongoAuthConfigured()
+    mode: isMongoAuthConfigured() ? 'Mongo' : 'SQLite'
   });
   if (!email || !password) return res.status(400).json({ error: '邮箱和密码不能为空' });
   if (password.length < 6) return res.status(400).json({ error: '密码至少 6 位' });
@@ -2170,40 +2191,42 @@ app.post('/api/auth/register', asyncHandler(async (req, res) => {
   if (isMongoAuthConfigured()) {
     if (!username) return res.status(400).json({ error: '用户名不能为空' });
     try {
-      console.info(`[auth-register:${requestId}] creating Mongo user`);
+      console.info(`[auth/register:${requestId}] mode Mongo`);
+      console.info(`[auth/register:${requestId}] creating Mongo user`);
       const user = await withTimeout(createMongoUser({
         id: id(),
         username,
         email,
-        passwordHash: hashPassword(password),
+        passwordHash: await withTimeout(hashPasswordAsync(password), 15000, 'Password hash'),
         role: 'user',
         companyName,
         companyId: id(),
         name: name || username
       }), 15000, 'MongoDB create user');
-      console.info(`[auth-register:${requestId}] success`, { userId: user.id, companyId: user.companyId });
+      console.info(`[auth/register:${requestId}] success`, { userId: user.id, companyId: user.companyId });
       res.json({ success: true, message: '注册成功，请登录', user: toPublicMongoUser(user) });
       return;
     } catch (error) {
       if (error?.code === 11000) return res.status(409).json({ error: '邮箱或用户名已被注册' });
-      console.error(`[auth-register:${requestId}] failed:`, error?.stack || error);
+      console.error(`[auth/register:${requestId}] error:`, error?.stack || error);
       return res.status(error.statusCode || 500).json({ success: false, error: describeAuthRegisterError(error) });
     }
   }
 
-  console.info(`[auth-register:${requestId}] using SQL fallback`);
+  console.info(`[auth/register:${requestId}] mode SQLite`);
   const existing = await queryGet(`SELECT * FROM ${quoteTable('users')} WHERE LOWER(${quoteIdentifier('email')}) = ? LIMIT 1`, [email]);
   if (existing) return res.status(409).json({ error: '这个邮箱已经注册' });
 
   const now = nowIso();
   const company = { id: id(), name: companyName, createdAt: now, updatedAt: now };
-  const user = { id: id(), companyId: company.id, email, passwordHash: hashPassword(password), name, createdAt: now, updatedAt: now };
+  const passwordHash = await withTimeout(hashPasswordAsync(password), 15000, 'Password hash');
+  const user = { id: id(), companyId: company.id, email, passwordHash, name, createdAt: now, updatedAt: now };
   await withTransaction(async (client) => {
     await upsertRecord('companies', company, client);
     await upsertRecord('users', user, client);
   });
-  console.info(`[auth-register:${requestId}] SQL fallback success`, { userId: user.id, companyId: company.id });
-  res.json(authResponse(user, company));
+  console.info(`[auth/register:${requestId}] success`, { userId: user.id, companyId: company.id });
+  res.json({ success: true, message: '注册成功，请登录', user: { id: user.id, email: user.email, companyId: user.companyId }, company });
 }));
 
 app.post('/api/auth/login', asyncHandler(async (req, res) => {
@@ -2212,14 +2235,14 @@ app.post('/api/auth/login', asyncHandler(async (req, res) => {
   const password = String(req.body.password || '');
   if (isMongoAuthConfigured()) {
     const mongoUser = await findMongoUserByLogin(login);
-    if (!mongoUser || !verifyPassword(password, mongoUser.passwordHash)) {
+    if (!mongoUser || !(await verifyPasswordAsync(password, mongoUser.passwordHash))) {
       return res.status(401).json({ error: '邮箱/用户名或密码不正确' });
     }
     res.json(authResponse({ ...mongoUser, authStore: 'mongo' }, { id: mongoUser.companyId, name: mongoUser.companyName || '' }));
     return;
   }
   const user = await queryGet(`SELECT * FROM ${quoteTable('users')} WHERE LOWER(${quoteIdentifier('email')}) = ? LIMIT 1`, [email]);
-  if (!user || !verifyPassword(password, user.passwordHash)) {
+  if (!user || !(await verifyPasswordAsync(password, user.passwordHash))) {
     return res.status(401).json({ error: '邮箱或密码不正确' });
   }
   const company = await queryGet(`SELECT * FROM ${quoteTable('companies')} WHERE ${quoteIdentifier('id')} = ? LIMIT 1`, [user.companyId]);
