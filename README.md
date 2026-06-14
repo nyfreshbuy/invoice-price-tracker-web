@@ -7,7 +7,7 @@ This is the PWA version of InvoicePriceTracker.
 - `frontend/`: React + Vite + PWA
 - `backend/`: Node.js + Express API
 - Local development database: SQLite
-- Render production database: PostgreSQL through `DATABASE_URL`
+- Render production cloud sync/account database: MongoDB Atlas through `MONGODB_URI`
 
 ## Current High-Priority Behavior
 
@@ -93,6 +93,7 @@ Every synced record includes:
 - `serverId`
 - `deviceId`
 - `syncStatus`
+- `version`
 - `updatedAt`
 - `deletedAt`
 
@@ -106,9 +107,16 @@ Supported sync tables:
 - `invoice_items`
 - `products`
 - `price_history`
+- `invoice_discounts`
+- `gift_allocation_rules`
 - `supplier_templates`
+- `product_aliases`
+- `product_learning_rules`
+- `recognition_corrections`
+- `price_anomalies`
 
 Recognition task history is stored in the backend table `invoice_recognition_tasks`.
+When `MONGODB_URI` is configured, `/api/sync/push`, `/api/sync/pull`, and `/api/sync/status` use MongoDB Atlas and filter every collection by the JWT `companyId`. Local SQLite remains available for development and tests.
 
 ## Run Locally
 
@@ -162,13 +170,12 @@ http://YOUR_COMPUTER_LAN_IP:5173
 
 Local SQLite development can run with no required env vars.
 
-User registration, login, and account connection requests use MongoDB when `MONGODB_URI` is configured. Invoice business data can still use SQLite locally or PostgreSQL through `DATABASE_URL`.
+User registration, login, invitations, account connection requests, and sync data use MongoDB when `MONGODB_URI` is configured. SQLite remains the no-config local fallback.
 
 Render production should use:
 
 ```text
-DATABASE_URL=PostgreSQL connection string
-MONGODB_URI=MongoDB connection string
+MONGODB_URI=MongoDB Atlas connection string
 MONGODB_DB=invoice_price_tracker
 OPENAI_API_KEY=your OpenAI key
 OPENAI_MODEL=gpt-4.1-mini
@@ -178,10 +185,15 @@ UPLOAD_DIR=/var/data/uploads
 AUTH_SECRET=generate-a-long-random-secret
 ```
 
-`DATABASE_URL` controls database mode:
+Startup logs should include:
 
-- Missing: SQLite
-- Present: PostgreSQL
+```text
+[database] mode: MongoDB
+[sync] enabled (MongoDB)
+```
+
+`DATABASE_URL` is optional and only keeps the older PostgreSQL/SQL fallback available. If `MONGODB_URI` is present, sync endpoints use MongoDB unless `USE_MONGO_SYNC=false`.
+Mongo authentication is enabled by default when `MONGODB_URI` is present. To force local SQL auth for development, set `AUTH_STORE=sqlite` or `USE_MONGO_AUTH=false`.
 
 OpenAI keys must only be configured in backend environment variables. Never put `OPENAI_API_KEY` in the frontend.
 
@@ -218,9 +230,9 @@ VITE_API_BASE_URL=https://your-backend-name.onrender.com
 
 Deploy the backend first, then the frontend.
 
-### 1. PostgreSQL
+### 1. MongoDB Atlas
 
-Create a Render PostgreSQL database and copy its connection string into the backend `DATABASE_URL`.
+Create a MongoDB Atlas database and copy its connection string into the backend `MONGODB_URI`.
 
 ### 2. Backend: Render Web Service
 
@@ -232,7 +244,8 @@ Create a Render PostgreSQL database and copy its connection string into the back
 Environment variables:
 
 ```text
-DATABASE_URL=PostgreSQL connection string
+MONGODB_URI=MongoDB Atlas connection string
+MONGODB_DB=invoice_price_tracker
 OPENAI_API_KEY=your OpenAI key
 OPENAI_MODEL=gpt-4.1-mini
 CORS_ORIGIN=https://your-frontend-name.onrender.com
@@ -247,7 +260,7 @@ Optional Render Disk:
 /var/data
 ```
 
-The disk is useful for uploaded invoice images. PostgreSQL stores the business data and recognition task history.
+The disk is useful for uploaded invoice images. MongoDB stores users, invitations, account relationships, and synchronized invoice/business records. SQLite is still used when MongoDB is not configured for local development.
 
 Health check:
 

@@ -20,7 +20,7 @@ import {
 } from 'lucide-react';
 import { api, getAuthSession, setAuthSession } from './api.js';
 import { generateId, localDb, today } from './localDb.js';
-import { getSyncSnapshot, startAutoSync, syncNow } from './syncService.js';
+import { getSyncSnapshot, pullFromCloud, resetLocalCacheAndPull, startAutoSync, syncNow } from './syncService.js';
 
 const emptyItem = () => ({
   rawName: '',
@@ -2334,15 +2334,47 @@ function InviteMembersPanel() {
 
 function SettingsPage() {
   const [stats, setStats] = useState({});
+  const [syncMessage, setSyncMessage] = useState('');
+  const [cloudStatus, setCloudStatus] = useState(null);
   const session = getAuthSession();
   const isAdmin = (session?.user?.role || 'admin') === 'admin';
   const load = () => localDb.getStats().then(setStats);
   useLocalReload(load);
 
+  useEffect(() => {
+    if (!navigator.onLine) return;
+    api.syncStatus().then(setCloudStatus).catch(() => setCloudStatus(null));
+  }, []);
+
   async function clearData() {
     if (!confirm('确认清空本地测试数据并同步删除到云端？')) return;
     await localDb.softDeleteAll();
     syncNow();
+    load();
+  }
+
+  async function runSyncNow() {
+    setSyncMessage('正在同步...');
+    const snapshot = await syncNow();
+    setSyncMessage(snapshot.lastError ? `同步失败：${snapshot.lastError}` : '同步完成');
+    api.syncStatus().then(setCloudStatus).catch(() => {});
+    load();
+  }
+
+  async function restoreFromCloud() {
+    setSyncMessage('正在从云端恢复...');
+    const snapshot = await pullFromCloud({ full: true });
+    setSyncMessage(snapshot.lastError ? `恢复失败：${snapshot.lastError}` : '云端资料已恢复到本机');
+    api.syncStatus().then(setCloudStatus).catch(() => {});
+    load();
+  }
+
+  async function clearCacheAndRestore() {
+    if (!confirm('这只会清空本机 IndexedDB 缓存，不会删除云端数据。确认重新拉取云端资料？')) return;
+    setSyncMessage('正在清空本地缓存并重新拉取...');
+    const snapshot = await resetLocalCacheAndPull();
+    setSyncMessage(snapshot.lastError ? `重新拉取失败：${snapshot.lastError}` : '已清空本地缓存并从云端重新拉取');
+    api.syncStatus().then(setCloudStatus).catch(() => {});
     load();
   }
 
@@ -2355,6 +2387,23 @@ function SettingsPage() {
         <p className="hint">退出会清除本机保存的 token、user 和 company 信息。</p>
       </Section>
       {isAdmin && <InviteMembersPanel />}
+      <Section title="同步">
+        <div className="row-actions">
+          <button className="primary-button" type="button" onClick={runSyncNow}><RefreshCw size={16} />立即同步</button>
+          <button className="secondary-button" type="button" onClick={restoreFromCloud}>从云端恢复</button>
+          <button className="secondary-button" type="button" onClick={clearCacheAndRestore}>清空本地缓存后重新拉取</button>
+        </div>
+        {syncMessage && <p className={syncMessage.includes('失败') ? 'error' : 'success-text'}>{syncMessage}</p>}
+        {cloudStatus && (
+          <div className="grid-2">
+            <Info label="云端同步库" value={cloudStatus.backend || '-'} />
+            <Info label="云端发票" value={cloudStatus.counts?.invoices ?? 0} />
+            <Info label="云端供应商" value={cloudStatus.counts?.suppliers ?? 0} />
+            <Info label="云端价格历史" value={cloudStatus.counts?.price_history ?? 0} />
+          </div>
+        )}
+        <p className="hint">所有新增、修改和删除都会先写入本机 IndexedDB；联网后自动同步到云端。</p>
+      </Section>
       <Section title="导出">
         <button className="primary-button" type="button" onClick={() => api.downloadExportCsv()}><Upload size={18} />导出云端 CSV</button>
         <button className="secondary-button" type="button" onClick={() => api.downloadExportExcel()}><Upload size={18} />导出云端 Excel</button>
@@ -2729,7 +2778,7 @@ function useLocalReload(loader, deps = []) {
 function statusText(status) {
   if (status === 'pending') return '待同步';
   if (status === 'deleted') return '待删除同步';
-  if (status === 'conflict') return '鍐茬獊';
+  if (status === 'conflict') return '需要人工确认';
   return '已同步';
 }
 

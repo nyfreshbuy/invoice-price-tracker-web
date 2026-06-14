@@ -73,7 +73,11 @@ export async function getMongoDb() {
       db.collection('users').createIndex({ username: 1 }, { unique: true }),
       db.collection('users').createIndex({ companyName: 'text', username: 'text', email: 'text' }),
       db.collection('account_connections').createIndex({ requesterUserId: 1, targetUserId: 1 }),
-      db.collection('account_connections').createIndex({ targetUserId: 1, status: 1 })
+      db.collection('account_connections').createIndex({ targetUserId: 1, status: 1 }),
+      db.collection('companies').createIndex({ id: 1 }, { unique: true }),
+      db.collection('company_invitations').createIndex({ token: 1 }, { unique: true }),
+      db.collection('company_invitations').createIndex({ company_id: 1, created_at: -1 }),
+      db.collection('company_invitations').createIndex({ email: 1, status: 1 })
     ]);
     indexesReady = true;
     console.info('[mongo] indexes ready');
@@ -100,8 +104,26 @@ export async function createMongoUser({ id, username, email, passwordHash, role 
     updatedAt: now
   };
   await db.collection('users').insertOne(user);
+  await db.collection('companies').updateOne(
+    { id: user.companyId },
+    {
+      $setOnInsert: {
+        _id: user.companyId,
+        id: user.companyId,
+        name: user.companyName || companyName || '',
+        createdAt: now
+      },
+      $set: { updatedAt: now }
+    },
+    { upsert: true }
+  );
   console.info('[mongo] create user success', { userId: user.id, companyId: user.companyId });
   return user;
+}
+
+export async function findMongoCompanyById(companyId) {
+  const db = await getMongoDb();
+  return db.collection('companies').findOne({ id: String(companyId || '') });
 }
 
 export async function findMongoUserByLogin(login) {
@@ -251,6 +273,108 @@ export async function decideConnection(connectionId, targetUserId, status) {
     ]);
   }
   return hydrateConnection({ ...connection, ...update });
+}
+
+export async function createMongoInvitation({ id, companyId, companyName, email, role, token, createdBy, expiresAt }) {
+  const db = await getMongoDb();
+  const now = new Date().toISOString();
+  const invitation = {
+    _id: id,
+    id,
+    company_id: companyId,
+    companyId,
+    companyName: companyName || '',
+    email: String(email || '').trim().toLowerCase(),
+    role: role === 'admin' ? 'admin' : 'user',
+    token,
+    status: 'pending',
+    created_by: createdBy,
+    createdBy,
+    created_at: now,
+    createdAt: now,
+    accepted_at: '',
+    acceptedAt: '',
+    expires_at: expiresAt,
+    expiresAt
+  };
+  await db.collection('company_invitations').insertOne(invitation);
+  return invitation;
+}
+
+export async function listMongoInvitations(companyId) {
+  const db = await getMongoDb();
+  return db.collection('company_invitations')
+    .find({ company_id: companyId })
+    .sort({ created_at: -1 })
+    .toArray();
+}
+
+export async function findMongoInvitationByToken(token) {
+  const db = await getMongoDb();
+  return db.collection('company_invitations').findOne({ token: String(token || '') });
+}
+
+export async function expireMongoInvitation(invitationId) {
+  const db = await getMongoDb();
+  await db.collection('company_invitations').updateOne(
+    { id: invitationId },
+    { $set: { status: 'expired', updatedAt: new Date().toISOString() } }
+  );
+}
+
+export async function acceptMongoInvitation({ invitation, userId, username, passwordHash }) {
+  const db = await getMongoDb();
+  const now = new Date().toISOString();
+  const email = String(invitation.email || '').trim().toLowerCase();
+  let user = await db.collection('users').findOne({ email });
+  if (!user) {
+    user = {
+      _id: userId,
+      id: userId,
+      username: String(username || email).trim(),
+      email,
+      passwordHash,
+      role: invitation.role || 'user',
+      companyName: invitation.companyName || '',
+      companyId: invitation.company_id || invitation.companyId,
+      name: String(username || email).trim(),
+      connectedUserIds: [],
+      createdAt: now,
+      updatedAt: now
+    };
+    await db.collection('users').insertOne(user);
+  } else {
+    await db.collection('users').updateOne(
+      { id: user.id },
+      {
+        $set: {
+          companyId: invitation.company_id || invitation.companyId,
+          companyName: invitation.companyName || user.companyName || '',
+          role: invitation.role || 'user',
+          updatedAt: now
+        }
+      }
+    );
+    user = { ...user, companyId: invitation.company_id || invitation.companyId, companyName: invitation.companyName || user.companyName || '', role: invitation.role || 'user', updatedAt: now };
+  }
+  await db.collection('companies').updateOne(
+    { id: invitation.company_id || invitation.companyId },
+    {
+      $setOnInsert: {
+        _id: invitation.company_id || invitation.companyId,
+        id: invitation.company_id || invitation.companyId,
+        name: invitation.companyName || '',
+        createdAt: now
+      },
+      $set: { updatedAt: now }
+    },
+    { upsert: true }
+  );
+  await db.collection('company_invitations').updateOne(
+    { id: invitation.id },
+    { $set: { status: 'accepted', accepted_at: now, acceptedAt: now, updatedAt: now } }
+  );
+  return user;
 }
 
 export function toPublicMongoUser(user) {

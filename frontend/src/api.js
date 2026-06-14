@@ -209,5 +209,6 @@ export const api = {
   cancelRecognitionBatch: (batchId) => request(`/api/invoice-recognition/batches/${encodeURIComponent(batchId)}/cancel`, { method: 'POST' }),
   fileUrl,
   syncPush: (payload) => request('/api/sync/push', { method: 'POST', body: JSON.stringify(payload) }),
-  syncPull: (since) => request(`/api/sync/pull${since ? `?since=${encodeURIComponent(since)}` : ''}`)
+  syncPull: (since) => request(`/api/sync/pull${since ? `?since=${encodeURIComponent(since)}` : ''}`),
+  syncStatus: () => request('/api/sync/status')
 };

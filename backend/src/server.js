@@ -51,16 +51,23 @@ import {
 import { buildInvoiceGroupKey } from './services/handwrittenInvoiceService.js';
 import {
   createConnectionRequest,
+  acceptMongoInvitation,
+  createMongoInvitation,
   createMongoUser,
   decideConnection,
+  expireMongoInvitation,
+  findMongoCompanyById,
+  findMongoInvitationByToken,
   findMongoUserById,
   findMongoUserByLogin,
   isMongoAuthConfigured,
+  listMongoInvitations,
   listReceivedConnections,
   listSentConnections,
   searchMongoUsers,
   toPublicMongoUser
 } from './services/mongoAccountStore.js';
+import { mongoSyncPull, mongoSyncPush, mongoSyncStatus } from './services/mongoSyncStore.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
@@ -91,11 +98,23 @@ const OCR_TIMEOUT_MS = Number(process.env.OCR_TIMEOUT_MS || 120000);
 const AUTH_SECRET = process.env.AUTH_SECRET || 'dev-only-change-me';
 const AUTH_STORE = String(process.env.AUTH_STORE || process.env.AUTH_DB || '').trim().toLowerCase();
 
-console.log(`[database] mode: ${usingPostgres ? 'PostgreSQL' : 'SQLite'}`);
+const hasMongoUri = Boolean(process.env.MONGODB_URI || process.env.MONGO_URL);
+const syncBackend = hasMongoUri ? 'MongoDB' : (usingPostgres ? 'PostgreSQL' : 'SQLite');
+console.log(`[database] mode: ${syncBackend}`);
+console.log(`[sync] enabled (${syncBackend})`);
 
 function useMongoAuth() {
-  return isMongoAuthConfigured()
-    && (AUTH_STORE === 'mongo' || AUTH_STORE === 'mongodb' || process.env.USE_MONGO_AUTH === 'true');
+  if (!isMongoAuthConfigured()) return false;
+  if (['sqlite', 'sql', 'postgres', 'postgresql'].includes(AUTH_STORE)) return false;
+  if (process.env.USE_MONGO_AUTH === 'false') return false;
+  return AUTH_STORE === ''
+    || AUTH_STORE === 'mongo'
+    || AUTH_STORE === 'mongodb'
+    || process.env.USE_MONGO_AUTH === 'true';
+}
+
+function useMongoSync() {
+  return hasMongoUri && process.env.USE_MONGO_SYNC !== 'false';
 }
 
 const localDevOrigins = [
@@ -337,6 +356,7 @@ function prepareRecord(table, record, deviceId, companyId) {
     localId: record.localId || record.id || serverId,
     serverId,
     syncStatus: 'synced',
+    version: Math.max(1, Number(record.version || 0)),
     createdAt: record.createdAt || now,
     updatedAt: record.updatedAt || now,
     deletedAt: record.deletedAt || null,
@@ -2302,6 +2322,22 @@ app.post('/api/invitations', requireAuth, requireAdmin, asyncHandler(async (req,
     return;
   }
   const now = nowIso();
+  const expiresAt = new Date(Date.now() + 7 * 24 * 60 * 60 * 1000).toISOString();
+  if (useMongoAuth()) {
+    const invitation = await createMongoInvitation({
+      id: id(),
+      companyId: req.user.companyId,
+      companyName: req.company?.name || req.user.companyName || '',
+      email,
+      role,
+      token: crypto.randomBytes(32).toString('hex'),
+      createdBy: req.user.id,
+      expiresAt
+    });
+    const inviteLink = `${frontendBaseUrl(req)}/invite/${invitation.token}`;
+    res.json({ success: true, invitation: { ...invitation, inviteLink } });
+    return;
+  }
   const invitation = {
     id: id(),
     company_id: req.user.companyId,
@@ -2312,7 +2348,7 @@ app.post('/api/invitations', requireAuth, requireAdmin, asyncHandler(async (req,
     created_by: req.user.id,
     created_at: now,
     accepted_at: '',
-    expires_at: new Date(Date.now() + 7 * 24 * 60 * 60 * 1000).toISOString()
+    expires_at: expiresAt
   };
   await upsertRecord('company_invitations', invitation);
   const inviteLink = `${frontendBaseUrl(req)}/invite/${invitation.token}`;
@@ -2320,6 +2356,12 @@ app.post('/api/invitations', requireAuth, requireAdmin, asyncHandler(async (req,
 }));
 
 app.get('/api/invitations', requireAuth, requireAdmin, asyncHandler(async (req, res) => {
+  if (useMongoAuth()) {
+    const baseUrl = frontendBaseUrl(req);
+    const invitations = await listMongoInvitations(req.user.companyId);
+    res.json({ invitations: invitations.map((entry) => ({ ...entry, inviteLink: `${baseUrl}/invite/${entry.token}` })) });
+    return;
+  }
   const invitations = await queryAll(`
     SELECT invitations.*, users.${quoteIdentifier('email')} AS "createdByEmail"
     FROM ${quoteTable('company_invitations')} invitations
@@ -2333,14 +2375,19 @@ app.get('/api/invitations', requireAuth, requireAdmin, asyncHandler(async (req, 
 }));
 
 app.get('/api/invitations/:token', asyncHandler(async (req, res) => {
-  const invitation = await invitationByToken(String(req.params.token || '').trim());
+  const token = String(req.params.token || '').trim();
+  const invitation = useMongoAuth()
+    ? await findMongoInvitationByToken(token)
+    : await invitationByToken(token);
   if (!invitation) {
     res.status(404).json({ error: 'Invitation not found.' });
     return;
   }
-  const expired = invitation.status === 'pending' && invitation.expires_at && new Date(invitation.expires_at).getTime() < Date.now();
+  const expiresAt = invitation.expires_at || invitation.expiresAt || '';
+  const expired = invitation.status === 'pending' && expiresAt && new Date(expiresAt).getTime() < Date.now();
   if (expired) {
-    await run(`UPDATE ${quoteTable('company_invitations')} SET ${quoteIdentifier('status')} = 'expired' WHERE ${quoteIdentifier('id')} = ?`, [invitation.id]);
+    if (useMongoAuth()) await expireMongoInvitation(invitation.id);
+    else await run(`UPDATE ${quoteTable('company_invitations')} SET ${quoteIdentifier('status')} = 'expired' WHERE ${quoteIdentifier('id')} = ?`, [invitation.id]);
     invitation.status = 'expired';
   }
   res.json({
@@ -2349,14 +2396,16 @@ app.get('/api/invitations/:token', asyncHandler(async (req, res) => {
       role: invitation.role,
       status: invitation.status,
       companyName: invitation.companyName || '',
-      expiresAt: invitation.expires_at
+      expiresAt
     }
   });
 }));
 
 app.post('/api/invitations/accept', asyncHandler(async (req, res) => {
   const token = String(req.body.token || '').trim();
-  const invitation = await invitationByToken(token);
+  const invitation = useMongoAuth()
+    ? await findMongoInvitationByToken(token)
+    : await invitationByToken(token);
   if (!invitation) {
     res.status(404).json({ error: 'Invitation not found.' });
     return;
@@ -2365,13 +2414,36 @@ app.post('/api/invitations/accept', asyncHandler(async (req, res) => {
     res.status(409).json({ error: `Invitation is ${invitation.status}.` });
     return;
   }
-  if (invitation.expires_at && new Date(invitation.expires_at).getTime() < Date.now()) {
-    await run(`UPDATE ${quoteTable('company_invitations')} SET ${quoteIdentifier('status')} = 'expired' WHERE ${quoteIdentifier('id')} = ?`, [invitation.id]);
+  const expiresAt = invitation.expires_at || invitation.expiresAt || '';
+  if (expiresAt && new Date(expiresAt).getTime() < Date.now()) {
+    if (useMongoAuth()) await expireMongoInvitation(invitation.id);
+    else await run(`UPDATE ${quoteTable('company_invitations')} SET ${quoteIdentifier('status')} = 'expired' WHERE ${quoteIdentifier('id')} = ?`, [invitation.id]);
     res.status(410).json({ error: 'Invitation has expired.' });
     return;
   }
 
   const now = nowIso();
+  if (useMongoAuth()) {
+    let existingUser = await findMongoUserByLogin(invitation.email);
+    let passwordHash = existingUser?.passwordHash || '';
+    const password = String(req.body.password || '');
+    if (!existingUser) {
+      if (password.length < 6) {
+        res.status(400).json({ error: 'Password must be at least 6 characters for a new account.' });
+        return;
+      }
+      passwordHash = await withTimeout(hashPasswordAsync(password), 15000, 'Password hash');
+    }
+    const user = await acceptMongoInvitation({
+      invitation,
+      userId: id(),
+      username: String(req.body.username || req.body.name || invitation.email).trim(),
+      passwordHash
+    });
+    const company = await findMongoCompanyById(user.companyId);
+    res.json({ success: true, message: 'Invitation accepted.', ...authResponse({ ...user, authStore: 'mongo' }, company || { id: user.companyId, name: user.companyName || invitation.companyName || '' }) });
+    return;
+  }
   let user = await queryGet(`SELECT * FROM ${quoteTable('users')} WHERE LOWER(${quoteIdentifier('email')}) = ? LIMIT 1`, [String(invitation.email || '').toLowerCase()]);
   if (!user) {
     const password = String(req.body.password || '');
@@ -2461,6 +2533,10 @@ app.post('/api/sync/push', requireAuth, asyncHandler(async (req, res) => {
   const deviceId = req.body.deviceId || 'unknown';
   const companyId = req.user.companyId;
   const changes = req.body.changes || {};
+  if (useMongoSync()) {
+    res.json(await mongoSyncPush({ companyId, deviceId, changes }));
+    return;
+  }
   const results = [];
   const syncContext = { changes, rejectedInvoiceIds: new Set() };
 
@@ -2488,7 +2564,29 @@ app.post('/api/sync/push', requireAuth, asyncHandler(async (req, res) => {
 }));
 
 app.get('/api/sync/pull', requireAuth, asyncHandler(async (req, res) => {
+  if (useMongoSync()) {
+    res.json(await mongoSyncPull({ companyId: req.user.companyId, since: req.query.since || '' }));
+    return;
+  }
   res.json({ companyId: req.user.companyId, serverTime: nowIso(), data: await allSyncData(req.user.companyId, req.query.since || '') });
+}));
+
+app.get('/api/sync/status', requireAuth, asyncHandler(async (req, res) => {
+  if (useMongoSync()) {
+    res.json(await mongoSyncStatus(req.user.companyId));
+    return;
+  }
+  const counts = {};
+  for (const table of syncTables) {
+    const row = await queryGet(`
+      SELECT COUNT(*) AS "count"
+      FROM ${quoteTable(table)}
+      WHERE ${quoteIdentifier('companyId')} = ?
+        AND ${quoteIdentifier('deletedAt')} IS NULL
+    `, [req.user.companyId]);
+    counts[table] = Number(row?.count || 0);
+  }
+  res.json({ ok: true, enabled: true, backend: usingPostgres ? 'postgres' : 'sqlite', companyId: req.user.companyId, counts, serverTime: nowIso() });
 }));
 
 app.get('/api/suppliers', requireAuth, asyncHandler(async (req, res) => {

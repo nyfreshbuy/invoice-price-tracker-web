@@ -1,7 +1,7 @@
 import { getCompanyId as getAuthCompanyId } from './api.js';
 
 const DB_NAME = 'InvoicePriceTrackerLocal';
-const DB_VERSION = 8;
+const DB_VERSION = 9;
 
 export const syncTables = ['purchase_batches', 'suppliers', 'invoices', 'invoice_items', 'products', 'price_history', 'invoice_discounts', 'gift_allocation_rules', 'supplier_templates', 'product_aliases', 'product_learning_rules', 'recognition_corrections', 'price_anomalies'];
 const localOnlyTables = ['invoice_images', 'meta'];
@@ -438,6 +438,7 @@ function syncFields(record, status = 'pending') {
   const generatedId = record.id || record.localId || generateId();
   const companyId = getCurrentCompanyId();
   if (!companyId) throw new Error('请先登录');
+  const nextVersion = Math.max(0, Number(record.version || 0)) + (status === 'synced' ? 0 : 1);
   return {
     ...record,
     id: record.id || generatedId,
@@ -445,6 +446,7 @@ function syncFields(record, status = 'pending') {
     localId: record.localId || generatedId,
     serverId: record.serverId || null,
     syncStatus: status,
+    version: nextVersion || 1,
     createdAt: record.createdAt || timestamp,
     updatedAt: timestamp,
     deletedAt: record.deletedAt || null,
@@ -510,6 +512,11 @@ export const localDb = {
     return groups.reduce((sum, count) => sum + count, 0);
   },
 
+  async getConflictCount() {
+    const groups = await Promise.all(syncTables.map(async (table) => (await all(table)).filter((record) => belongsToCurrentCompany(record) && record.syncStatus === 'conflict').length));
+    return groups.reduce((sum, count) => sum + count, 0);
+  },
+
   async getPendingChanges() {
     const entries = await Promise.all(syncTables.map(async (table) => [
       table,
@@ -519,6 +526,13 @@ export const localDb = {
   },
 
   async markSynced(table, result) {
+    if (result.status === 'conflict') {
+      const records = await all(table);
+      const local = records.find((record) => record.localId === result.localId || record.id === result.localId || record.serverId === result.serverId);
+      if (local) await put(table, { ...local, syncStatus: 'conflict', conflictRecord: JSON.stringify(result.record || {}) });
+      return;
+    }
+    if (result.status === 'duplicate' || result.status === 'skipped_duplicate_invoice') return;
     const records = await all(table);
     const local = records.find((record) => record.localId === result.localId || record.id === result.localId || record.serverId === result.serverId);
     if (!local) return;
@@ -528,7 +542,8 @@ export const localDb = {
       id: local.id,
       localId: local.localId || result.localId || local.id,
       serverId: result.serverId || serverRecord.serverId || serverRecord.id,
-      syncStatus: 'synced'
+      syncStatus: 'synced',
+      version: Number(serverRecord.version || local.version || 1)
     });
   },
 
@@ -537,13 +552,18 @@ export const localDb = {
     const records = await all(table);
     const local = records.find((record) => record.serverId === remote.serverId || record.serverId === remote.id || record.id === remote.serverId || record.id === remote.id);
     if (local && local.syncStatus === 'pending' && local.updatedAt > remote.updatedAt) return;
+    if (local && local.syncStatus === 'pending' && local.updatedAt <= remote.updatedAt && ['invoices', 'invoice_items'].includes(table)) {
+      await put(table, { ...local, syncStatus: 'conflict', conflictRecord: JSON.stringify(remote) });
+      return;
+    }
     const id = local?.id || remote.serverId || remote.id || generateId();
     await put(table, {
       ...remote,
       id,
       localId: local?.localId || remote.localId || id,
       serverId: remote.serverId || remote.id,
-      syncStatus: 'synced'
+      syncStatus: remote.deletedAt ? 'deleted' : 'synced',
+      version: Number(remote.version || local?.version || 1)
     });
   },
 
@@ -1443,5 +1463,30 @@ export const localDb = {
       const records = await all(table);
       await putMany(table, records.filter(active).map((record) => syncFields({ ...record, deletedAt }, 'deleted')));
     }
+  },
+
+  async clearLocalCacheForCurrentCompany() {
+    const companyId = getCurrentCompanyId();
+    if (!companyId) throw new Error('请先登录');
+    const db = await openDb();
+    const tableNames = [...syncTables, 'meta'];
+    await Promise.all(tableNames.map((table) => new Promise((resolve, reject) => {
+      const tx = db.transaction(table, 'readwrite');
+      const objectStore = tx.objectStore(table);
+      const request = objectStore.openCursor();
+      request.onsuccess = () => {
+        const cursor = request.result;
+        if (!cursor) return;
+        const value = cursor.value || {};
+        if ((table === 'meta' && String(value.id || '').includes(companyId)) || value.companyId === companyId) {
+          cursor.delete();
+        }
+        cursor.continue();
+      };
+      request.onerror = () => reject(request.error);
+      tx.oncomplete = resolve;
+      tx.onerror = () => reject(tx.error);
+    })));
+    window.dispatchEvent(new Event('local-db-change'));
   }
 };
