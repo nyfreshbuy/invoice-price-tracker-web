@@ -20,7 +20,16 @@ import {
 } from 'lucide-react';
 import { api, getAuthSession, setAuthSession } from './api.js';
 import { generateId, localDb, today } from './localDb.js';
-import { getSyncSnapshot, pullFromCloud, resetLocalCacheAndPull, startAutoSync, syncNow } from './syncService.js';
+import {
+  getSyncPreferences,
+  getSyncSnapshot,
+  markSyncPending,
+  pullFromCloud,
+  resetLocalCacheAndPull,
+  setSyncPreferences,
+  startAutoSync,
+  syncNow
+} from './syncService.js';
 
 const emptyItem = () => ({
   rawName: '',
@@ -97,7 +106,7 @@ export default function App() {
     return navigator.onLine ? 'checkingAuth' : 'offlineMode';
   });
   const [authNotice, setAuthNotice] = useState('');
-  const [syncState, setSyncState] = useState({ label: '已同步', pendingCount: 0, online: navigator.onLine, syncing: false });
+  const [syncState, setSyncState] = useState({ label: '☁ 已同步', pendingCount: 0, online: navigator.onLine, syncing: false });
 
   useEffect(() => {
     let mounted = true;
@@ -156,7 +165,7 @@ export default function App() {
         setAuthState(getAuthSession());
         setAuthStatus('authenticated');
         setAuthNotice('');
-        pullFromCloud({ full: false });
+        markSyncPending();
       } catch (error) {
         if (cancelled) return;
         if (error?.status === 401 || error?.status === 403) {
@@ -200,7 +209,7 @@ export default function App() {
   }, []);
 
   async function handleSyncNow() {
-    setSyncState(await syncNow());
+    setSyncState(await syncNow({ force: true, reason: 'manual' }));
   }
 
   async function handleRetryAuth() {
@@ -220,7 +229,7 @@ export default function App() {
       setAuthState(getAuthSession());
       setAuthStatus('authenticated');
       setAuthNotice('');
-      await pullFromCloud({ full: false });
+      await syncNow({ reason: 'startup' });
     } catch (error) {
       if (error?.status === 401 || error?.status === 403) {
         setAuthSession(null);
@@ -332,7 +341,7 @@ function AuthPageFixed({ onAuthenticated }) {
       setAuthSession(session);
       onAuthenticated(getAuthSession());
       window.dispatchEvent(new Event('auth-change'));
-      syncNow();
+      markSyncPending();
     } catch (error) {
       console.error(`[auth:${mode}] failed`, error);
       setMessage(error.message || (mode === 'register' ? '注册失败' : '登录失败'));
@@ -445,7 +454,7 @@ function AuthPage({ onAuthenticated }) {
       setAuthSession(session);
       onAuthenticated(getAuthSession());
       window.dispatchEvent(new Event('auth-change'));
-      syncNow();
+      markSyncPending();
     } catch (error) {
       setMessage(error.message || '登录失败');
     } finally {
@@ -606,7 +615,7 @@ function MergeInvoiceDialog({ invoice, onClose, onMerged }) {
     setMessage('合并中...');
     try {
       const result = await api.mergeInvoice(invoice.id, selectedIds);
-      await syncNow();
+      await pullFromCloud({ full: true });
       onMerged?.(result.message || '✓ 已合并');
       navigate(`/invoices/${encodeURIComponent(result.invoiceId || invoice.id)}`);
     } catch (error) {
@@ -691,21 +700,23 @@ function BatchImportPage() {
         }));
         const completedTasks = tasks.filter((task) => task.status === 'completed');
         if (completedTasks.length) {
-          console.log('[recognition] completed tasks detected, pulling cloud data:', completedTasks.map((task) => ({
+          console.log('[recognition] completed tasks detected:', completedTasks.map((task) => ({
             taskId: task.id,
             invoiceId: task.invoiceId || '',
             supplierName: task.result?.parsed?.supplierName || '',
             invoiceNo: task.result?.parsed?.invoiceNo || '',
             totalAmount: task.result?.parsed?.totalAmount || 0
           })));
-          await pullFromCloud({ full: true });
+          markSyncPending();
         }
       } catch (error) {
         console.error('Refresh recognition tasks failed:', error);
       }
     }
     refreshTasks();
-    const timer = window.setInterval(refreshTasks, 3000);
+    const timer = window.setInterval(() => {
+      if (!document.hidden) refreshTasks();
+    }, 15000);
     return () => {
       cancelled = true;
       window.clearInterval(timer);
@@ -762,7 +773,7 @@ function BatchImportPage() {
   }
 
   async function saveBatch() {
-    syncNow();
+    markSyncPending();
     navigate('/recognition-tasks');
   }
 
@@ -803,7 +814,7 @@ function BatchImportPage() {
     const invoiceIds = selected.map((entry) => entry.task?.invoiceId || entry.result?.invoiceId).filter(Boolean);
     try {
       const result = await api.mergeInvoice(invoiceIds[0], invoiceIds.slice(1));
-      await syncNow();
+      await pullFromCloud({ full: true });
       setMessage(result.message || '合并成功');
       navigate(`/invoices/${encodeURIComponent(result.invoiceId || invoiceIds[0])}`);
     } catch (error) {
@@ -891,7 +902,8 @@ function BatchImportPage() {
                   <p>识别来源：{entry.result.recognitionSource || sourceLabel(entry.result.source)} · 商品 {entry.parsed.items?.length || 0} 行</p>
                   {(entry.duplicateStatus === 'confirmed' || entry.isDuplicate) && <p className="error">检测到重复发票：{entry.duplicateReason}</p>}
                   {entry.duplicateStatus === 'possible' && !entry.isDuplicate && <p className="warning-text">{entry.possibleDuplicateReason || '疑似重复，请确认。'}</p>}
-                  {entry.sameInvoiceGroup && !entry.isDuplicate && <p className="warning-text">{entry.sameInvoiceGroupReason}</p>}
+              {entry.autoMerged && <p className="success-text">{entry.autoMergeMessage || `已自动合并：发票号 ${entry.parsed.invoiceNo || '-'}，总金额 ${money(entry.result?.duplicateCheck?.invoiceTotal || entry.parsed.totalAmount)}`}</p>}
+              {entry.sameInvoiceGroup && !entry.isDuplicate && !entry.autoMerged && <p className="warning-text">{entry.sameInvoiceGroupReason}</p>}
                   {entry.sequenceNote && <p className="hint">{entry.sequenceNote}</p>}
                 </>
               )}
@@ -933,14 +945,14 @@ function RecognitionTaskListPage() {
       const newCompletedTasks = data.filter((task) => task.status === 'completed' && !pulledCompletedTaskIds.current.has(task.id));
       if (newCompletedTasks.length) {
         newCompletedTasks.forEach((task) => pulledCompletedTaskIds.current.add(task.id));
-        console.log('[recognition] task list completed tasks, pulling cloud data:', newCompletedTasks.map((task) => ({
+        console.log('[recognition] task list completed tasks:', newCompletedTasks.map((task) => ({
           taskId: task.id,
           invoiceId: task.invoiceId || '',
           supplierName: task.result?.parsed?.supplierName || '',
           invoiceNo: task.result?.parsed?.invoiceNo || '',
           totalAmount: task.result?.parsed?.totalAmount || 0
         })));
-        await pullFromCloud({ full: true });
+        markSyncPending();
       }
     } catch (error) {
       setMessage(error.message || '读取识别任务失败');
@@ -955,7 +967,9 @@ function RecognitionTaskListPage() {
       });
     };
     run();
-    const timer = window.setInterval(run, 4000);
+    const timer = window.setInterval(() => {
+      if (!document.hidden) run();
+    }, 15000);
     return () => {
       cancelled = true;
       window.clearInterval(timer);
@@ -1040,11 +1054,12 @@ function RecognitionTaskListPage() {
               {task.result?.parsed?.totalDifference > 0.05 && <p className="warning-text">商品明细与发票总额不一致，请检查。差额：{money(task.result.parsed.totalDifference)}</p>}
               {(task.result?.duplicateCheck?.duplicateStatus === 'confirmed' || task.result?.duplicateCheck?.isDuplicate) && <p className="error">重复发票：{task.result.duplicateCheck.duplicateReason}</p>}
               {task.result?.duplicateCheck?.duplicateStatus === 'possible' && !task.result?.duplicateCheck?.isDuplicate && <p className="warning-text">{task.result.duplicateCheck.possibleDuplicateReason || '疑似重复，请确认。'}</p>}
-              {task.result?.duplicateCheck?.sameInvoiceGroup && !task.result?.duplicateCheck?.isDuplicate && <p className="warning-text">{task.result.duplicateCheck.sameInvoiceGroupReason}</p>}
+              {task.result?.duplicateCheck?.autoMerged && <p className="success-text">{task.result.duplicateCheck.autoMergeMessage || `已自动合并：发票号 ${task.result?.parsed?.invoiceNo || '-'}，总金额 ${money(task.result.duplicateCheck.invoiceTotal || task.result?.parsed?.totalAmount)}`}</p>}
+              {task.result?.duplicateCheck?.sameInvoiceGroup && !task.result?.duplicateCheck?.isDuplicate && !task.result?.duplicateCheck?.autoMerged && <p className="warning-text">{task.result.duplicateCheck.sameInvoiceGroupReason}</p>}
               {task.error && <p className="error">{task.error}</p>}
             </div>
             <div className="row-actions">
-              {task.invoiceId && <Link className="icon-button" to={`/invoices/${task.invoiceId}`}>发票</Link>}
+              {task.invoiceId && <Link className="icon-button" to={`/invoices/${task.invoiceId}`}>{task.result?.duplicateCheck?.autoMerged ? '查看合并明细' : '发票'}</Link>}
               {task.status === 'failed' && <button disabled={Boolean(action)} onClick={() => retry(task.id)}>{action === 'retry' ? '处理中...' : '重新识别'}</button>}
               {task.status === 'failed' && (
                 <label className="icon-button">
@@ -1062,7 +1077,7 @@ function RecognitionTaskListPage() {
               )}
               {task.status === 'failed' && <Link className="icon-button" to="/invoices/new">手动编辑</Link>}
               {task.status === 'completed' && task.result?.duplicateCheck?.isDuplicate && !task.invoiceId && <button disabled={Boolean(action)} onClick={() => forceSave(task.id)}>{action === 'force' ? '处理中...' : '强制保存'}</button>}
-              {task.status === 'completed' && task.result?.duplicateCheck?.sameInvoiceGroup && (
+              {task.status === 'completed' && task.result?.duplicateCheck?.sameInvoiceGroup && !task.result?.duplicateCheck?.autoMerged && (
                 <>
                   <button className={action === 'merged' ? 'success-button' : ''} disabled={handled || Boolean(action)} onClick={() => decideTask(task.id, 'merge')}>{action === 'merge' ? '合并中...' : action === 'merged' ? '✓ 已合并' : '合并'}</button>
                   <button className={action === 'duplicated' ? 'danger-button' : ''} disabled={handled || Boolean(action)} onClick={() => decideTask(task.id, 'duplicate')}>{action === 'duplicate' ? '标记中...' : action === 'duplicated' ? '✓ 已标记重复' : '标记重复'}</button>
@@ -1126,14 +1141,14 @@ function InvoiceFormPage() {
         if (task.status === 'completed') {
           applyRecognitionTaskToForm(task);
           setMessage(task.invoiceId ? '识别完成，后端已保存发票。' : '识别完成。');
-          console.log('[recognition] single task completed, pulling cloud data:', {
+          console.log('[recognition] single task completed:', {
             taskId: task.id,
             invoiceId: task.invoiceId || '',
             supplierName: task.result?.parsed?.supplierName || '',
             invoiceNo: task.result?.parsed?.invoiceNo || '',
             totalAmount: task.result?.parsed?.totalAmount || 0
           });
-          await pullFromCloud({ full: true });
+          markSyncPending();
         }
         if (task.status === 'failed') {
           setMessage(task.error || '识别失败');
@@ -1143,7 +1158,9 @@ function InvoiceFormPage() {
       }
     }
     refreshTask();
-    const timer = window.setInterval(refreshTask, 3000);
+    const timer = window.setInterval(() => {
+      if (!document.hidden) refreshTask();
+    }, 15000);
     return () => {
       cancelled = true;
       window.clearInterval(timer);
@@ -1239,11 +1256,6 @@ function InvoiceFormPage() {
   }
 
   async function save() {
-    if (recognitionTask?.status === 'completed' && recognitionTask.invoiceId) {
-      await pullFromCloud({ full: true });
-      navigate(`/invoices/${recognitionTask.invoiceId}`);
-      return;
-    }
     setSaving(true);
     setMessage('');
     try {
@@ -1253,29 +1265,8 @@ function InvoiceFormPage() {
           throw new Error(imageCheck.message || '图片保存失败，请重新上传。');
         }
       }
-      if (navigator.onLine) {
-        const result = await api.confirmAndLearnInvoice({
-          finalInvoice: form,
-          beforeResult: recognitionTask?.result?.parsed || null,
-          invoiceTemplateId: recognitionTask?.result?.templateId || '',
-          sampleImageHash: recognitionTask?.result?.sampleImageHash || ''
-        });
-        if (String(form.imagePath || '').startsWith('indexeddb:') || form.imageId) {
-          const image = await localDb.getInvoiceImage(form);
-          if (image?.imageBlob) {
-            const imageData = new FormData();
-            imageData.append('image', image.imageBlob, image.fileName || 'invoice.jpg');
-            await api.uploadInvoiceImage(result.invoiceId || form.id, imageData);
-          }
-        }
-        if (result.priceAnomalies?.length) {
-          setMessage(`已保存并学习，但发现 ${result.priceAnomalies.length} 个价格异常，请检查。`);
-        }
-        await syncNow();
-      } else {
-        await localDb.createInvoice(form);
-        syncNow();
-      }
+      await localDb.createInvoice(form);
+      markSyncPending();
       navigate('/invoices');
     } catch (error) {
       setMessage(error.message);
@@ -1413,7 +1404,7 @@ function InvoiceDetailPage() {
   async function remove() {
     if (!confirm('确认删除这张发票？')) return;
     await localDb.deleteInvoice(id);
-    syncNow();
+    markSyncPending();
     navigate('/invoices');
   }
 
@@ -1518,7 +1509,7 @@ function InvoiceDetailPageWithGifts() {
   async function remove() {
     if (!confirm('确认删除这张发票？')) return;
     await localDb.deleteInvoice(id);
-    syncNow();
+    markSyncPending();
     navigate('/invoices');
   }
 
@@ -1528,7 +1519,7 @@ function InvoiceDetailPageWithGifts() {
       const updated = await localDb.updateInvoiceItems(id, nextItems, detail?.items || []);
       setDetail(updated);
       setDetailMessage('✓ 商品已保存');
-      syncNow();
+      markSyncPending();
       return updated;
     } catch (error) {
       alert(`操作失败：${error.message || '保存商品失败'}`);
@@ -1551,7 +1542,7 @@ function InvoiceDetailPageWithGifts() {
       setDetail(updated);
       setEditingPromoGroups(false);
       setDetailMessage('✓ 赠品分摊已保存');
-      syncNow();
+      markSyncPending();
     } catch (error) {
       alert(`操作失败：${error.message || '保存分摊失败'}`);
     } finally {
@@ -1566,7 +1557,7 @@ function InvoiceDetailPageWithGifts() {
       setDetail(updated);
       setEditingInvoice(false);
       setDetailMessage('✓ 发票已保存');
-      syncNow();
+      markSyncPending();
     } catch (error) {
       alert(`操作失败：${error.message || '保存发票失败'}`);
     } finally {
@@ -1580,7 +1571,7 @@ function InvoiceDetailPageWithGifts() {
       const updated = await localDb.confirmInvoice(id, status);
       setDetail(updated);
       setDetailMessage(status === 'ABNORMAL_HANDLED' ? '✓ 异常已处理' : '✓ 发票已确认');
-      syncNow();
+      markSyncPending();
     } catch (error) {
       alert(`操作失败：${error.message || '确认发票失败'}`);
     } finally {
@@ -1594,7 +1585,7 @@ function InvoiceDetailPageWithGifts() {
       const updated = await localDb.updateInvoiceDuplicateStatus(id, 'duplicate', 'DUPLICATE');
       setDetail(updated);
       setDetailMessage('✓ 已标记重复');
-      syncNow();
+      markSyncPending();
     } catch (error) {
       alert(`操作失败：${error.message || '标记重复失败'}`);
     } finally {
@@ -1608,7 +1599,7 @@ function InvoiceDetailPageWithGifts() {
       const updated = await localDb.updateInvoiceDuplicateStatus(id, 'none', 'CONFIRMED');
       setDetail(updated);
       setDetailMessage('✓ 已保留为独立发票');
-      syncNow();
+      markSyncPending();
     } catch (error) {
       alert(`操作失败：${error.message || '保留独立发票失败'}`);
     } finally {
@@ -2127,7 +2118,7 @@ function SupplierDetailPage() {
   async function saveSupplier(data) {
     await localDb.saveSupplier(data);
     setEditing(null);
-    syncNow();
+    markSyncPending();
     load();
   }
 
@@ -2280,14 +2271,14 @@ function SupplierPage() {
   async function saveSupplier(data) {
     await localDb.saveSupplier(data);
     setEditing(null);
-    syncNow();
+    markSyncPending();
     load();
   }
 
   async function deleteSupplier(supplier) {
     if (!confirm(`删除供应商「${supplier.supplierDisplayName || supplier.displayName || supplier.name}」？`)) return;
     await localDb.deleteSupplier(supplier);
-    syncNow();
+    markSyncPending();
     load();
   }
 
@@ -2338,7 +2329,7 @@ function MergeSupplierDialog({ supplier, suppliers, onClose, onMerged }) {
       } else {
         await localDb.mergeSuppliers(supplier.id, targetId);
       }
-      await syncNow();
+      markSyncPending();
       setMessage('合并成功');
       onMerged?.();
     } catch (error) {
@@ -2736,9 +2727,16 @@ function SettingsPage() {
   const [stats, setStats] = useState({});
   const [syncMessage, setSyncMessage] = useState('');
   const [cloudStatus, setCloudStatus] = useState(null);
+  const [syncSnapshot, setSyncSnapshot] = useState(null);
+  const [syncPrefs, setSyncPrefs] = useState({ autoSync: true, wifiOnly: false, allowCellular: false });
   const session = getAuthSession();
   const isAdmin = isAdminRole(session?.user?.role || '');
-  const load = () => localDb.getStats().then(setStats);
+  const loadSyncCenter = async () => {
+    const [snapshot, preferences] = await Promise.all([getSyncSnapshot(), getSyncPreferences()]);
+    setSyncSnapshot(snapshot);
+    setSyncPrefs(preferences);
+  };
+  const load = () => Promise.all([localDb.getStats().then(setStats), loadSyncCenter()]);
   useLocalReload(load);
 
   useEffect(() => {
@@ -2746,16 +2744,22 @@ function SettingsPage() {
     api.syncStatus().then(setCloudStatus).catch(() => setCloudStatus(null));
   }, []);
 
+  async function updateSyncPreference(patch) {
+    const next = await setSyncPreferences({ ...syncPrefs, ...patch });
+    setSyncPrefs(next);
+    await loadSyncCenter();
+  }
+
   async function clearData() {
     if (!confirm('确认清空本地测试数据并同步删除到云端？')) return;
     await localDb.softDeleteAll();
-    syncNow();
+    markSyncPending();
     load();
   }
 
   async function runSyncNow() {
     setSyncMessage('正在同步...');
-    const snapshot = await syncNow();
+    const snapshot = await syncNow({ force: true, reason: 'manual' });
     setSyncMessage(snapshot.lastError ? `同步失败：${snapshot.lastError}` : '同步完成');
     api.syncStatus().then(setCloudStatus).catch(() => {});
     load();
@@ -2778,6 +2782,12 @@ function SettingsPage() {
     load();
   }
 
+  async function cleanupSyncedCache() {
+    const removed = await localDb.cleanupSyncedDeletedCache();
+    setSyncMessage(`已清理 ${removed} 条已同步删除缓存`);
+    load();
+  }
+
   return (
     <Page title="设置/导出">
       <Section title="账户">
@@ -2788,9 +2798,25 @@ function SettingsPage() {
       </Section>
       {isAdmin && <MemberManagementPanel />}
       <Section title="同步">
+        <div className="grid-2">
+          <Info label="同步状态" value={syncSnapshot?.label || '-'} />
+          <Info label="待同步总数" value={syncSnapshot?.pendingCount ?? 0} />
+          <Info label="最后同步时间" value={syncSnapshot?.lastSyncAt || '-'} />
+          <Info label="网络类型" value={syncSnapshot?.connection?.type || syncSnapshot?.connection?.effectiveType || 'unknown'} />
+          <Info label="待同步发票" value={syncSnapshot?.pendingByTable?.invoices ?? 0} />
+          <Info label="待同步商品明细" value={syncSnapshot?.pendingByTable?.invoice_items ?? 0} />
+          <Info label="待同步商品" value={syncSnapshot?.pendingByTable?.products ?? 0} />
+          <Info label="待同步价格历史" value={syncSnapshot?.pendingByTable?.price_history ?? 0} />
+          <Info label="待同步供应商" value={syncSnapshot?.pendingByTable?.suppliers ?? 0} />
+          <Info label="待同步模板" value={syncSnapshot?.pendingByTable?.supplier_templates ?? 0} />
+        </div>
+        <SwitchField label="自动同步" checked={Boolean(syncPrefs.autoSync)} onChange={(checked) => updateSyncPreference({ autoSync: checked })} />
+        <SwitchField label="仅 WiFi 同步" checked={Boolean(syncPrefs.wifiOnly)} onChange={(checked) => updateSyncPreference({ wifiOnly: checked, allowCellular: checked ? false : syncPrefs.allowCellular })} />
+        <SwitchField label="允许蜂窝网络同步" checked={Boolean(syncPrefs.allowCellular)} onChange={(checked) => updateSyncPreference({ allowCellular: checked, wifiOnly: checked ? false : syncPrefs.wifiOnly })} />
         <div className="row-actions">
           <button className="primary-button" type="button" onClick={runSyncNow}><RefreshCw size={16} />立即同步</button>
           <button className="secondary-button" type="button" onClick={restoreFromCloud}>从云端恢复</button>
+          <button className="secondary-button" type="button" onClick={cleanupSyncedCache}>清理已同步缓存</button>
           <button className="secondary-button" type="button" onClick={clearCacheAndRestore}>清空本地缓存后重新拉取</button>
         </div>
         {syncMessage && <p className={syncMessage.includes('失败') ? 'error' : 'success-text'}>{syncMessage}</p>}
@@ -2848,7 +2874,7 @@ function TemplateDialog({ supplier, onClose }) {
 
   async function save() {
     await localDb.saveTemplate(supplier.id, template);
-    syncNow();
+    markSyncPending();
     onClose();
   }
 
@@ -3005,7 +3031,7 @@ function InvoiceImageViewer({ invoice, onUpdated }) {
           imageId: '',
           imageUrl: ''
         });
-        await syncNow();
+        markSyncPending();
       } else {
         const image = await localDb.saveInvoiceImage({ invoiceId: invoice.id, file, source: 'IndexedDB' });
         await localDb.updateInvoiceImageFields(invoice.id, {
@@ -3242,6 +3268,7 @@ function duplicateStatusLabel(status) {
 function batchStatusText(entry) {
   if (entry.status === 'recognizing') return '🔄 识别中';
   if (entry.status === 'failed') return '❌ 失败';
+  if (entry.status === 'success' && entry.autoMerged) return '✅ 已自动合并';
   if (entry.status === 'success' && (entry.duplicateStatus === 'confirmed' || entry.isDuplicate)) return '重复发票';
   if (entry.status === 'success' && entry.duplicateStatus === 'possible') return '疑似重复，请确认';
   if (entry.status === 'success' && entry.sameInvoiceGroup) return '同发票号不同金额，可能是多页/同批次';

@@ -382,6 +382,12 @@ async function get(table, id) {
   return promisify(objectStore.get(id));
 }
 
+async function remove(table, id) {
+  const { objectStore } = await store(table, 'readwrite');
+  await promisify(objectStore.delete(id));
+  window.dispatchEvent(new CustomEvent('local-db-change', { detail: { table } }));
+}
+
 export function getCurrentCompanyId() {
   return getAuthCompanyId();
 }
@@ -507,6 +513,7 @@ export const localDb = {
   put,
   putMany,
   get,
+  remove,
 
   async getMeta(key) {
     return get('meta', key);
@@ -1599,5 +1606,18 @@ export const localDb = {
       tx.onerror = () => reject(tx.error);
     })));
     window.dispatchEvent(new Event('local-db-change'));
+  },
+
+  async cleanupSyncedDeletedCache() {
+    let removed = 0;
+    for (const table of syncTables) {
+      const records = (await all(table)).filter((record) => belongsToCurrentCompany(record) && record.deletedAt && ['synced', 'deleted'].includes(record.syncStatus));
+      for (const record of records) {
+        await remove(table, record.id);
+        removed += 1;
+      }
+    }
+    window.dispatchEvent(new Event('local-db-change'));
+    return removed;
   }
 };

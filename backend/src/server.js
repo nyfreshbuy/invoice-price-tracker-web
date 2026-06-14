@@ -1900,6 +1900,9 @@ function emptyDuplicateCheck() {
     sameSupplierBatch: false,
     duplicateStatus: 'none',
     possibleDuplicateReason: '',
+    autoMerged: false,
+    autoMergeMessage: '',
+    mergeTotalMode: '',
     skippedSave: false
   };
 }
@@ -2061,8 +2064,11 @@ function compareInvoiceForDuplicateV2(current, candidate, label) {
     result.sameInvoiceGroup = true;
     result.possibleSameInvoicePages = true;
     result.multiPageInvoice = true;
+    result.autoMerged = true;
+    result.mergeTotalMode = 'sum';
     result.duplicateStatus = 'none';
-    result.sameInvoiceGroupReason = '同供应商同发票号同日期，已按同一张多页发票自动合并。';
+    result.autoMergeMessage = `已自动合并：发票号 ${current.invoiceNo}，检测到同一张多页发票。`;
+    result.sameInvoiceGroupReason = result.autoMergeMessage;
     return result;
   }
 
@@ -2171,6 +2177,18 @@ async function findRecognitionDuplicate(companyId, parsed, totalAmount, currentI
       : supplierNamesNearlyEqual(current.supplierName, candidateSupplierName);
     const sameDate = daysBetweenDates(current.invoiceDate, candidate.invoiceDate) <= 1;
     const sameAmount = amountsNearlyEqual(current.totalAmount, candidate.totalAmount);
+    const sameInvoiceNo = Boolean(current.invoiceNo && normalizeComparisonText(candidate.invoiceNo || '') === current.invoiceNo);
+    if (sameInvoiceNo && !sameSupplier && !groupInfo.sameInvoiceGroup) {
+      groupInfo = {
+        ...emptyDuplicateCheck(),
+        duplicateStatus: 'possible',
+        sameInvoiceGroup: true,
+        possibleSameInvoicePages: false,
+        possibleDuplicateReason: 'Same invoice number but supplier is different. Please review before saving.',
+        sameInvoiceGroupReason: '发票号相同，但供应商不同或相似度不足，已进入待确认发票。'
+      };
+      continue;
+    }
     if (!current.invoiceNo && sameSupplier && sameDate && sameAmount) {
       const candidateOcrHash = candidate.ocrTextHash || sha256Text(candidate.ocrText || '');
       const candidateImageHash = candidate.imageHash || '';
@@ -2316,7 +2334,7 @@ async function saveRecognizedInvoiceFromTask(task, result, options = {}) {
   const existingMergedIds = existingInvoice ? parseAliases(existingInvoice.mergedInvoiceIds) : [];
   const mergedInvoiceIds = existingInvoice ? [...new Set([...existingMergedIds, pageInvoiceId].filter(Boolean))] : [];
   const invoiceTotal = existingInvoice
-    ? Math.max(Number(existingInvoice.totalAmount || 0), totalAmount)
+    ? Number(existingInvoice.totalAmount || 0) + totalAmount
     : totalAmount;
   const calculatedTotal = Number(existingInvoice?.calculatedTotal || 0) + itemTotal;
   const totalDifference = Math.abs(calculatedTotal - invoiceTotal);
@@ -2326,7 +2344,11 @@ async function saveRecognizedInvoiceFromTask(task, result, options = {}) {
     || !parsed.invoiceDate;
   if (existingInvoice) {
     duplicateCheck.mergedIntoInvoiceId = existingInvoice.serverId || existingInvoice.id;
+    duplicateCheck.pageInvoiceId = pageInvoiceId;
     duplicateCheck.invoiceTotal = invoiceTotal;
+    duplicateCheck.autoMerged = true;
+    duplicateCheck.mergeTotalMode = 'sum';
+    duplicateCheck.autoMergeMessage = `已自动合并：发票号 ${parsed.invoiceNo || existingInvoice.invoiceNo || '-'}，共 ${mergedInvoiceIds.length + 1} 页，总金额 $${invoiceTotal.toFixed(2)}`;
   }
   const invoice = await prepareRecordWithReferences('invoices', {
     id: invoiceId,
@@ -2347,7 +2369,7 @@ async function saveRecognizedInvoiceFromTask(task, result, options = {}) {
     duplicateStatus: duplicateCheck.duplicateStatus || (duplicateCheck.isDuplicate ? 'confirmed' : duplicateCheck.sameInvoiceGroup ? 'possible' : 'none'),
     duplicateOfInvoiceId: duplicateCheck.duplicateOfInvoiceId || '',
     recognitionSource: result.recognitionSource || result.source || task.recognitionSource || '',
-    recognitionWarnings: parsed.warnings || duplicateCheck.sameInvoiceGroupReason || '',
+    recognitionWarnings: needsReview ? (parsed.warnings || duplicateCheck.sameInvoiceGroupReason || '') : '',
     imagePath: existingInvoice?.imagePath || result.imagePath || task.imagePath || '',
     imageHash: existingInvoice?.imageHash || imageHash,
     ocrText: [existingInvoice?.ocrText, result.ocrText].filter(Boolean).join('\n\n--- page ---\n\n'),
@@ -2442,7 +2464,7 @@ async function saveRecognizedInvoiceFromTask(task, result, options = {}) {
         isCircled: item.isCircled ? 1 : 0,
         isChecked: item.isChecked ? 1 : 0,
         freeReason: item.freeReason || '',
-        notes: [item.notes, duplicateCheck.multiPageInvoice ? `pageTotal=${totalAmount.toFixed(2)}` : ''].filter(Boolean).join(' | '),
+        notes: [item.notes, duplicateCheck.multiPageInvoice ? `pageTotal=${totalAmount.toFixed(2)}` : '', task.id ? `taskId=${task.id}` : ''].filter(Boolean).join(' | '),
         invoiceId: invoice.serverId,
         supplierId: invoice.supplierId,
         invoiceDate: invoice.invoiceDate,
@@ -3575,15 +3597,9 @@ app.post('/api/invoices/:id/merge', requireAuth, asyncHandler(async (req, res) =
   const invoiceNoConflict = new Set(allInvoices.map((invoice) => invoice.invoiceNo || '')).size > 1;
   const invoiceDateConflict = new Set(allInvoices.map((invoice) => invoice.invoiceDate || '')).size > 1;
   const sameInvoiceIdentity = !supplierConflict && !invoiceNoConflict && !invoiceDateConflict;
-  const totalAmount = sameInvoiceIdentity
-    ? Math.max(...allInvoices.map((invoice) => Number(invoice.totalAmount || 0)))
-    : allInvoices.reduce((sum, invoice) => sum + Number(invoice.totalAmount || 0), 0);
-  const subtotal = sameInvoiceIdentity
-    ? Math.max(...allInvoices.map((invoice) => Number(invoice.subtotal || invoice.totalAmount || 0)))
-    : allInvoices.reduce((sum, invoice) => sum + Number(invoice.subtotal || invoice.totalAmount || 0), 0);
-  const tax = sameInvoiceIdentity
-    ? Math.max(...allInvoices.map((invoice) => Number(invoice.tax || 0)))
-    : allInvoices.reduce((sum, invoice) => sum + Number(invoice.tax || 0), 0);
+  const totalAmount = allInvoices.reduce((sum, invoice) => sum + Number(invoice.totalAmount || 0), 0);
+  const subtotal = allInvoices.reduce((sum, invoice) => sum + Number(invoice.subtotal || invoice.totalAmount || 0), 0);
+  const tax = allInvoices.reduce((sum, invoice) => sum + Number(invoice.tax || 0), 0);
   const amountConflict = new Set(allInvoices.map((invoice) => Number(invoice.totalAmount || 0).toFixed(2))).size > 1;
   const warnings = [
     supplierConflict ? '供应商不同' : '',
