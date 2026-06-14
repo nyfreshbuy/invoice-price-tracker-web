@@ -89,8 +89,14 @@ fs.mkdirSync(uploadDir, { recursive: true });
 const OCR_LANGUAGE = process.env.OCR_LANG || 'eng+chi_sim';
 const OCR_TIMEOUT_MS = Number(process.env.OCR_TIMEOUT_MS || 120000);
 const AUTH_SECRET = process.env.AUTH_SECRET || 'dev-only-change-me';
+const AUTH_STORE = String(process.env.AUTH_STORE || process.env.AUTH_DB || '').trim().toLowerCase();
 
 console.log(`[database] mode: ${usingPostgres ? 'PostgreSQL' : 'SQLite'}`);
+
+function useMongoAuth() {
+  return isMongoAuthConfigured()
+    && (AUTH_STORE === 'mongo' || AUTH_STORE === 'mongodb' || process.env.USE_MONGO_AUTH === 'true');
+}
 
 const localDevOrigins = [
   'http://localhost:5173',
@@ -222,7 +228,7 @@ async function requireAuth(req, res, next) {
     res.status(401).json({ error: '请先登录' });
     return;
   }
-  if (payload.authStore === 'mongo' && isMongoAuthConfigured()) {
+  if (payload.authStore === 'mongo' && useMongoAuth()) {
     const mongoUser = await findMongoUserById(payload.userId);
     if (!mongoUser || mongoUser.companyId !== payload.companyId) {
       res.status(401).json({ error: '登录已失效' });
@@ -258,7 +264,7 @@ async function requireAccountAuth(req, res, next) {
     res.status(401).json({ error: '请先登录账户' });
     return;
   }
-  if (!isMongoAuthConfigured()) {
+  if (!useMongoAuth()) {
     res.status(503).json({ error: 'MongoDB 未配置，请设置 MONGODB_URI' });
     return;
   }
@@ -2183,12 +2189,12 @@ app.post('/api/auth/register', asyncHandler(async (req, res) => {
     email,
     username,
     companyName,
-    mode: isMongoAuthConfigured() ? 'Mongo' : 'SQLite'
+    mode: useMongoAuth() ? 'Mongo' : 'SQLite'
   });
   if (!email || !password) return res.status(400).json({ error: '邮箱和密码不能为空' });
   if (password.length < 6) return res.status(400).json({ error: '密码至少 6 位' });
 
-  if (isMongoAuthConfigured()) {
+  if (useMongoAuth()) {
     if (!username) return res.status(400).json({ error: '用户名不能为空' });
     try {
       console.info(`[auth/register:${requestId}] mode Mongo`);
@@ -2233,7 +2239,7 @@ app.post('/api/auth/login', asyncHandler(async (req, res) => {
   const login = String(req.body.login || req.body.email || req.body.username || '').trim();
   const email = login.toLowerCase();
   const password = String(req.body.password || '');
-  if (isMongoAuthConfigured()) {
+  if (useMongoAuth()) {
     const mongoUser = await findMongoUserByLogin(login);
     if (!mongoUser || !(await verifyPasswordAsync(password, mongoUser.passwordHash))) {
       return res.status(401).json({ error: '邮箱/用户名或密码不正确' });
