@@ -1437,6 +1437,14 @@ async function saveInvoicePayloadWithLearning(payload, user, options = {}) {
   const items = applyDiscountAllocation(applyGiftAccounting(productItems), discountItems);
   const itemTotal = items.reduce((sum, item) => sum + Number(item.totalPrice || 0), 0);
   const totalAmount = Number(payload.totalAmount || 0) > 0 ? Number(payload.totalAmount) : itemTotal;
+  console.log('[invoice-save] confirm-invoice start:', {
+    companyId,
+    supplierName: payload.supplierName || '',
+    invoiceNo: payload.invoiceNo || '',
+    invoiceDate: payload.invoiceDate || '',
+    totalAmount,
+    itemCount: items.length
+  });
   const duplicateCheck = await checkInvoiceDuplicateBeforeSave({
     companyId,
     supplier,
@@ -1448,6 +1456,7 @@ async function saveInvoicePayloadWithLearning(payload, user, options = {}) {
   });
   const forceSave = Boolean(payload.forceSave || payload.force || options.forceSave);
   if (duplicateCheck.isDuplicate && !forceSave) {
+    console.warn('[invoice-save] confirm-invoice duplicate blocked:', { companyId, invoiceNo: payload.invoiceNo || '', totalAmount, duplicateCheck });
     return duplicateBlockedResponse(duplicateCheck);
   }
   const invoice = await prepareRecordWithReferences('invoices', {
@@ -1541,6 +1550,16 @@ async function saveInvoicePayloadWithLearning(payload, user, options = {}) {
     }
   });
 
+  console.log('[invoice-save] confirm-invoice saved:', {
+    companyId,
+    invoiceId: invoice.serverId || invoice.id,
+    supplierId: invoice.supplierId,
+    invoiceNo: invoice.invoiceNo,
+    totalAmount: invoice.totalAmount,
+    status: invoice.status
+  });
+  await mirrorSqlSyncDataToMongo(companyId, 'confirm-invoice');
+
   let template = null;
   if (options.learnTemplate !== false) {
     template = await saveOrUpdateTemplateFromResult(resultFromFinalPayload(payload), payload.sampleImageHash || '', companyId);
@@ -1632,6 +1651,31 @@ async function allSyncData(companyId, since) {
   return result;
 }
 
+function countSyncRecords(changes = {}) {
+  return Object.fromEntries(syncTables.map((table) => [table, Array.isArray(changes[table]) ? changes[table].length : 0]));
+}
+
+async function mirrorSqlSyncDataToMongo(companyId, reason = 'server-save', since = '') {
+  if (!useMongoSync()) return null;
+  try {
+    const changes = await allSyncData(companyId, since);
+    const counts = countSyncRecords(changes);
+    const total = Object.values(counts).reduce((sum, value) => sum + Number(value || 0), 0);
+    console.log('[sync/mirror] start:', { reason, companyId, since, total, counts });
+    if (!total) return { ok: true, skipped: true, counts };
+    const result = await mongoSyncPush({ companyId, deviceId: `server-${reason}`, changes });
+    console.log('[sync/mirror] completed:', {
+      reason,
+      companyId,
+      resultCount: Array.isArray(result.results) ? result.results.length : 0
+    });
+    return result;
+  } catch (error) {
+    console.error('[sync/mirror] failed:', { reason, companyId, since, error: error?.stack || error?.message || String(error) });
+    return null;
+  }
+}
+
 async function invoiceWithSupplierRows(companyId) {
   return queryAll(`
     SELECT invoices.*, COALESCE(suppliers.${quoteIdentifier('supplierDisplayName')}, suppliers.${quoteIdentifier('displayName')}, suppliers.${quoteIdentifier('name')}) AS "supplierName"
@@ -1707,6 +1751,13 @@ async function createRecognitionTask(file, user, deviceId = 'web', options = {})
     deviceId
   };
   await upsertRecord('invoice_recognition_tasks', task);
+  console.log('[recognition-task] created:', {
+    taskId: task.id,
+    companyId: task.companyId,
+    batchId: task.batchId,
+    imagePath: task.imagePath,
+    fileSize: task.fileSize
+  });
   enqueueRecognitionTask();
   return parseTaskRow(task);
 }
@@ -1770,6 +1821,15 @@ async function processRecognitionTask(taskId) {
       supplierHint: task.supplierHint || '',
       batchId: task.batchId || ''
     }), OCR_TIMEOUT_MS, 'Invoice recognition');
+    console.log('[recognition-task] ai/ocr completed:', {
+      taskId,
+      companyId: task.companyId,
+      recognitionSource: rawResult?.recognitionSource || rawResult?.source || '',
+      supplierName: rawResult?.parsed?.supplierName || '',
+      invoiceNo: rawResult?.parsed?.invoiceNo || '',
+      totalAmount: Number(rawResult?.parsed?.totalAmount || 0),
+      itemCount: Array.isArray(rawResult?.parsed?.items) ? rawResult.parsed.items.length : 0
+    });
     const result = await enhanceRecognizedResultWithLearning(rawResult, task.companyId);
     const saveResult = await saveRecognizedInvoiceFromTask(task, result);
     const completedResult = {
@@ -1804,7 +1864,13 @@ async function processRecognitionTask(taskId) {
       completedAt,
       taskId
     ]);
-    console.log('[recognition-task] completed:', taskId, saveResult.invoiceId || 'duplicate-skipped');
+    console.log('[recognition-task] completed:', {
+      taskId,
+      companyId: task.companyId,
+      invoiceId: saveResult.invoiceId || '',
+      duplicateStatus: saveResult.duplicateCheck?.duplicateStatus || '',
+      skippedSave: Boolean(saveResult.duplicateCheck?.skippedSave)
+    });
   } catch (error) {
     await markRecognitionTaskFailed(taskId, describeOcrError(error));
   }
@@ -2203,6 +2269,15 @@ async function saveRecognizedInvoiceFromTask(task, result, options = {}) {
   const now = nowIso();
   const itemTotal = items.reduce((sum, item) => sum + Number(item.totalPrice || 0), 0);
   const totalAmount = Number(parsed.totalAmount || 0) > 0 ? Number(parsed.totalAmount) : itemTotal;
+  console.log('[invoice-save] recognition-task start:', {
+    taskId: task.id,
+    companyId,
+    supplierName: parsed.supplierName || '',
+    invoiceNo: parsed.invoiceNo || '',
+    invoiceDate: parsed.invoiceDate || '',
+    totalAmount,
+    itemCount: items.length
+  });
   const imageHash = await sha256File(task.filePath);
   const duplicateCheck = await findRecognitionDuplicate(companyId, {
     ...parsed,
@@ -2215,6 +2290,13 @@ async function saveRecognizedInvoiceFromTask(task, result, options = {}) {
   duplicateCheck.totalDifference = Math.abs(itemTotal - totalAmount);
   duplicateCheck.priceAnomalies = [];
   if (duplicateCheck.isDuplicate && !options.force) {
+    console.warn('[invoice-save] recognition-task duplicate skipped:', {
+      taskId: task.id,
+      companyId,
+      invoiceNo: parsed.invoiceNo || '',
+      totalAmount,
+      duplicateCheck
+    });
     return { invoiceId: '', duplicateCheck, imageHash };
   }
   if (options.force) {
@@ -2380,6 +2462,17 @@ async function saveRecognizedInvoiceFromTask(task, result, options = {}) {
     }
     await saveInvoiceDiscounts({ discountItems, productItemRecords: itemRecords, invoice, supplier, deviceId, companyId, client });
   });
+
+  console.log('[invoice-save] recognition-task saved:', {
+    taskId: task.id,
+    companyId,
+    invoiceId: invoice.serverId || invoice.id,
+    supplierId: invoice.supplierId,
+    invoiceNo: invoice.invoiceNo,
+    totalAmount: invoice.totalAmount,
+    status: invoice.status
+  });
+  await mirrorSqlSyncDataToMongo(companyId, 'recognition-task-save');
 
   return { invoiceId: invoice.serverId || invoice.id, duplicateCheck, imageHash };
 }
@@ -2988,8 +3081,11 @@ app.post('/api/sync/push', requireAuth, asyncHandler(async (req, res) => {
   const deviceId = req.body.deviceId || 'unknown';
   const companyId = req.user.companyId;
   const changes = req.body.changes || {};
+  console.log('[sync/push] received:', { companyId, deviceId, backend: syncBackend, counts: countSyncRecords(changes) });
   if (useMongoSync()) {
-    res.json(await mongoSyncPush({ companyId, deviceId, changes }));
+    const result = await mongoSyncPush({ companyId, deviceId, changes });
+    console.log('[sync/push] completed:', { companyId, backend: 'mongodb', resultCount: Array.isArray(result.results) ? result.results.length : 0 });
+    res.json(result);
     return;
   }
   const results = [];
@@ -3015,15 +3111,21 @@ app.post('/api/sync/push', requireAuth, asyncHandler(async (req, res) => {
     }
   });
 
+  console.log('[sync/push] completed:', { companyId, backend: usingPostgres ? 'postgres' : 'sqlite', resultCount: results.length });
   res.json({ ok: true, companyId, serverTime: nowIso(), results });
 }));
 
 app.get('/api/sync/pull', requireAuth, asyncHandler(async (req, res) => {
   if (useMongoSync()) {
-    res.json(await mongoSyncPull({ companyId: req.user.companyId, since: req.query.since || '' }));
+    await mirrorSqlSyncDataToMongo(req.user.companyId, 'sync-pull', req.query.since || '');
+    const result = await mongoSyncPull({ companyId: req.user.companyId, since: req.query.since || '' });
+    console.log('[sync/pull] completed:', { companyId: req.user.companyId, backend: 'mongodb', since: req.query.since || '', counts: countSyncRecords(result.data || {}) });
+    res.json(result);
     return;
   }
-  res.json({ companyId: req.user.companyId, serverTime: nowIso(), data: await allSyncData(req.user.companyId, req.query.since || '') });
+  const data = await allSyncData(req.user.companyId, req.query.since || '');
+  console.log('[sync/pull] completed:', { companyId: req.user.companyId, backend: usingPostgres ? 'postgres' : 'sqlite', since: req.query.since || '', counts: countSyncRecords(data) });
+  res.json({ companyId: req.user.companyId, serverTime: nowIso(), data });
 }));
 
 app.get('/api/sync/status', requireAuth, asyncHandler(async (req, res) => {
@@ -3267,7 +3369,10 @@ app.get('/api/suppliers/:id/invoices.xls', requireAuth, asyncHandler(async (req,
 }));
 
 app.get('/api/invoices', requireAuth, asyncHandler(async (req, res) => {
-  res.json(await invoiceWithSupplierRows(req.user.companyId));
+  if (useMongoSync()) await mirrorSqlSyncDataToMongo(req.user.companyId, 'invoice-list-query');
+  const invoices = await invoiceWithSupplierRows(req.user.companyId);
+  console.log('[invoices] list query:', { companyId: req.user.companyId, backend: usingPostgres ? 'postgres/sql' : 'sqlite/sql', count: invoices.length });
+  res.json(invoices);
 }));
 
 app.get('/api/purchase-batches', requireAuth, asyncHandler(async (req, res) => {
@@ -3303,6 +3408,14 @@ app.post('/api/invoices', requireAuth, asyncHandler(async (req, res) => {
   const items = applyDiscountAllocation(applyGiftAccounting(productItems), discountItems);
   const itemTotal = items.reduce((sum, item) => sum + Number(item.totalPrice || 0), 0);
   const totalAmount = Number(req.body.totalAmount || 0) > 0 ? Number(req.body.totalAmount) : itemTotal;
+  console.log('[invoice-save] api-invoices start:', {
+    companyId: req.user.companyId,
+    supplierName: req.body.supplierName || '',
+    invoiceNo: req.body.invoiceNo || '',
+    invoiceDate: req.body.invoiceDate || '',
+    totalAmount,
+    itemCount: items.length
+  });
   const duplicateCheck = await checkInvoiceDuplicateBeforeSave({
     companyId: req.user.companyId,
     supplier,
@@ -3314,6 +3427,12 @@ app.post('/api/invoices', requireAuth, asyncHandler(async (req, res) => {
   });
   const forceSave = Boolean(req.body.forceSave || req.body.force);
   if (duplicateCheck.isDuplicate && !forceSave) {
+    console.warn('[invoice-save] api-invoices duplicate blocked:', {
+      companyId: req.user.companyId,
+      invoiceNo: req.body.invoiceNo || '',
+      totalAmount,
+      duplicateCheck
+    });
     res.status(409).json(duplicateBlockedResponse(duplicateCheck));
     return;
   }
@@ -3349,6 +3468,15 @@ app.post('/api/invoices', requireAuth, asyncHandler(async (req, res) => {
     }
     await saveInvoiceDiscounts({ discountItems, productItemRecords: itemRecords, invoice, supplier, deviceId, companyId: req.user.companyId, client });
   });
+  console.log('[invoice-save] api-invoices saved:', {
+    companyId: req.user.companyId,
+    invoiceId: invoice.serverId || invoice.id,
+    supplierId: invoice.supplierId,
+    invoiceNo: invoice.invoiceNo,
+    totalAmount: invoice.totalAmount,
+    status: invoice.status
+  });
+  await mirrorSqlSyncDataToMongo(req.user.companyId, 'api-invoices-save');
   res.json({ ...invoice, supplierName: displaySupplierName(supplier, req.body.supplierName || '') || '未命名供应商', duplicateCheck });
 }));
 
@@ -3893,6 +4021,7 @@ app.post('/api/ocr', requireAuth, upload.single('image'), asyncHandler(async (re
 }));
 
 app.get('/api/stats', requireAuth, asyncHandler(async (req, res) => {
+  if (useMongoSync()) await mirrorSqlSyncDataToMongo(req.user.companyId, 'stats-query');
   const stats = {};
   for (const table of syncTables) {
     const row = await queryGet(`
@@ -3901,6 +4030,7 @@ app.get('/api/stats', requireAuth, asyncHandler(async (req, res) => {
     `, [req.user.companyId]);
     stats[table] = Number(row?.count || 0);
   }
+  console.log('[stats] query:', { companyId: req.user.companyId, backend: usingPostgres ? 'postgres/sql' : 'sqlite/sql', stats });
   res.json(stats);
 }));
 

@@ -2,6 +2,13 @@ const API_BASE = (import.meta.env.VITE_API_BASE_URL || 'http://localhost:3000').
 const AUTH_KEY = 'invoicePriceTrackerAuth';
 const AUTH_TOKEN_KEY = 'authToken';
 const LEGACY_AUTH_KEYS = ['token', 'user', 'company', 'companyId', 'invoicePriceTrackerLoggedOut'];
+const DEFAULT_TIMEOUT_MS = 20000;
+
+function makeApiError(message, extras = {}) {
+  const error = new Error(message);
+  Object.assign(error, extras);
+  return error;
+}
 
 function parseStoredSession() {
   try {
@@ -90,27 +97,29 @@ async function request(path, options = {}) {
   const isPublicInvitationRead = options.method !== 'POST' && pathname.startsWith('/api/invitations/');
   const isPublicInvitationAccept = pathname === '/api/invitations/accept';
   if (!token && !publicPaths.includes(pathname) && !isPublicInvitationRead && !isPublicInvitationAccept) {
-    throw new Error('请先登录');
+    throw makeApiError('请先登录', { status: 401 });
   }
   const headers = options.body instanceof FormData ? {} : { 'Content-Type': 'application/json' };
   if (token) headers.Authorization = `Bearer ${token}`;
-  const timeoutMs = Number(options.timeoutMs || 0);
-  const controller = timeoutMs > 0 ? new AbortController() : null;
-  const timeoutId = controller
-    ? window.setTimeout(() => controller.abort(), timeoutMs)
-    : null;
+  const timeoutMs = Number(options.timeoutMs ?? DEFAULT_TIMEOUT_MS);
+  const controller = new AbortController();
+  const timeoutId = timeoutMs > 0 ? window.setTimeout(() => controller.abort(), timeoutMs) : null;
+  if (options.signal) {
+    options.signal.addEventListener('abort', () => controller.abort(), { once: true });
+  }
   let response;
   try {
+    const { timeoutMs: _timeoutMs, signal: _signal, ...fetchOptions } = options;
     response = await fetch(`${API_BASE}${path}`, {
       headers,
-      ...options,
-      signal: controller?.signal || options.signal
+      ...fetchOptions,
+      signal: controller.signal
     });
   } catch (error) {
     if (error?.name === 'AbortError') {
-      throw new Error('请求超时，请稍后重试');
+      throw makeApiError('请求超时，请稍后重试', { isTimeout: true, status: 0 });
     }
-    throw error;
+    throw makeApiError(error.message || '网络请求失败', { isNetworkError: true, status: 0, cause: error });
   } finally {
     if (timeoutId) window.clearTimeout(timeoutId);
   }
@@ -123,7 +132,7 @@ async function request(path, options = {}) {
     } catch {
       message = response.statusText || message;
     }
-    throw new Error(message);
+    throw makeApiError(message, { status: response.status });
   }
 
   const contentType = response.headers.get('content-type') || '';
@@ -147,7 +156,7 @@ async function download(path, filename) {
 export const api = {
   login: (payload) => request('/api/auth/login', { method: 'POST', body: JSON.stringify(payload) }),
   register: (payload) => request('/api/auth/register', { method: 'POST', body: JSON.stringify(payload), timeoutMs: 15000 }),
-  me: () => request('/api/auth/me'),
+  me: (options = {}) => request('/api/auth/me', { timeoutMs: 5000, ...options }),
   searchUsers: (keyword) => request(`/api/users/search?keyword=${encodeURIComponent(keyword)}`),
   requestAccountConnection: (payload) => request('/api/account-connections/request', { method: 'POST', body: JSON.stringify(payload) }),
   getSentConnections: () => request('/api/account-connections/sent'),
@@ -170,7 +179,7 @@ export const api = {
   getInvoice: (id) => request(`/api/invoices/${id}`),
   createInvoice: (payload) => request('/api/invoices', { method: 'POST', body: JSON.stringify(payload) }),
   confirmAndLearnInvoice: (payload) => request('/api/learning/confirm-invoice', { method: 'POST', body: JSON.stringify(payload) }),
-  uploadInvoiceImage: (id, formData) => request(`/api/invoices/${encodeURIComponent(id)}/image`, { method: 'POST', body: formData }),
+  uploadInvoiceImage: (id, formData) => request(`/api/invoices/${encodeURIComponent(id)}/image`, { method: 'POST', body: formData, timeoutMs: 60000 }),
   mergeInvoice: (id, mergeIds) => request(`/api/invoices/${encodeURIComponent(id)}/merge`, { method: 'POST', body: JSON.stringify({ mergeIds }) }),
   deleteInvoice: (id) => request(`/api/invoices/${id}`, { method: 'DELETE' }),
 
@@ -203,9 +212,9 @@ export const api = {
   downloadExportExcel: () => download('/api/export.xls', 'invoice-export.xls'),
   ocrUpload: (formData) => {
     console.log('OCR upload URL:', `${API_BASE}/api/ocr`);
-    return request('/api/ocr', { method: 'POST', body: formData });
+    return request('/api/ocr', { method: 'POST', body: formData, timeoutMs: 60000 });
   },
-  createRecognitionTask: (formData) => request('/api/invoice-recognition/tasks', { method: 'POST', body: formData }),
+  createRecognitionTask: (formData) => request('/api/invoice-recognition/tasks', { method: 'POST', body: formData, timeoutMs: 60000 }),
   getRecognitionTasks: () => request('/api/invoice-recognition/tasks'),
   getRecognitionTask: (id) => request(`/api/invoice-recognition/tasks/${id}`),
   retryRecognitionTask: (id) => request(`/api/invoice-recognition/tasks/${id}/retry`, { method: 'POST' }),

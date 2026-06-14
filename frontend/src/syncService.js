@@ -52,8 +52,17 @@ export async function syncNow() {
     }
     const pending = await localDb.getPendingChanges();
     const hasPending = Object.values(pending).some((records) => records.length > 0);
+    console.log('[sync] start:', {
+      companyId,
+      pendingCounts: Object.fromEntries(Object.entries(pending).map(([table, records]) => [table, records.length]))
+    });
     if (hasPending) {
       const pushed = await api.syncPush({ deviceId, companyId, changes: pending });
+      console.log('[sync] push completed:', {
+        companyId,
+        resultCount: Array.isArray(pushed.results) ? pushed.results.length : 0,
+        backend: pushed.backend || ''
+      });
       for (const result of pushed.results || []) {
         await localDb.markSynced(result.table, result);
       }
@@ -64,6 +73,12 @@ export async function syncNow() {
     const stats = await localDb.getStats();
     const hasLocalData = Object.values(stats).some((count) => Number(count || 0) > 0);
     const pulled = await api.syncPull(hasLocalData ? (meta?.value || '') : '');
+    console.log('[sync] pull completed:', {
+      companyId,
+      since: hasLocalData ? (meta?.value || '') : '',
+      backend: pulled.backend || '',
+      counts: Object.fromEntries(syncTables.map((table) => [table, (pulled.data?.[table] || []).length]))
+    });
     for (const table of syncTables) {
       for (const record of pulled.data?.[table] || []) {
         await localDb.mergeRemote(table, record);
@@ -73,6 +88,7 @@ export async function syncNow() {
     lastError = '';
   } catch (error) {
     lastError = error.message || '同步失败';
+    console.error('[sync] failed:', error);
   } finally {
     syncing = false;
     window.dispatchEvent(new Event('sync-state-change'));
@@ -97,6 +113,13 @@ export async function pullFromCloud({ full = false } = {}) {
     const metaKey = `lastPullAt:${companyId}`;
     const meta = full ? null : await localDb.getMeta(metaKey);
     const pulled = await api.syncPull(meta?.value || '');
+    console.log('[sync] cloud pull completed:', {
+      companyId,
+      full,
+      since: meta?.value || '',
+      backend: pulled.backend || '',
+      counts: Object.fromEntries(syncTables.map((table) => [table, (pulled.data?.[table] || []).length]))
+    });
     for (const table of syncTables) {
       for (const record of pulled.data?.[table] || []) {
         await localDb.mergeRemote(table, record);

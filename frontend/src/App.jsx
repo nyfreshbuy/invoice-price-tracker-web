@@ -91,7 +91,12 @@ const emptyTemplate = (supplierName = '') => ({
 
 export default function App() {
   const [authSession, setAuthState] = useState(() => getAuthSession());
-  const [authReady, setAuthReady] = useState(() => !getAuthSession()?.token);
+  const [authStatus, setAuthStatus] = useState(() => {
+    const session = getAuthSession();
+    if (!session?.token) return 'unauthenticated';
+    return navigator.onLine ? 'checkingAuth' : 'offlineMode';
+  });
+  const [authNotice, setAuthNotice] = useState('');
   const [syncState, setSyncState] = useState({ label: '已同步', pendingCount: 0, online: navigator.onLine, syncing: false });
 
   useEffect(() => {
@@ -116,7 +121,14 @@ export default function App() {
   }, []);
 
   useEffect(() => {
-    const refreshAuth = () => setAuthState(getAuthSession());
+    const refreshAuth = () => {
+      const session = getAuthSession();
+      setAuthState(session);
+      if (!session?.token) {
+        setAuthStatus('unauthenticated');
+        setAuthNotice('');
+      }
+    };
     window.addEventListener('auth-change', refreshAuth);
     return () => window.removeEventListener('auth-change', refreshAuth);
   }, []);
@@ -125,20 +137,42 @@ export default function App() {
     let cancelled = false;
     async function verifyCurrentToken() {
       if (!authSession?.token) {
-        setAuthReady(true);
+        setAuthStatus('unauthenticated');
+        setAuthNotice('');
         return;
       }
-      setAuthReady(false);
+      if (!navigator.onLine) {
+        setAuthStatus('offlineMode');
+        setAuthNotice('当前离线，已进入离线模式，可先查看本地缓存数据。');
+        return;
+      }
+      setAuthStatus('checkingAuth');
+      setAuthNotice('');
       try {
         const data = await api.me();
         if (cancelled) return;
         const verifiedSession = { token: authSession.token, user: data.user, company: data.company };
         setAuthSession(verifiedSession);
         setAuthState(getAuthSession());
-      } catch {
-        if (!cancelled) setAuthSession(null);
-      } finally {
-        if (!cancelled) setAuthReady(true);
+        setAuthStatus('authenticated');
+        setAuthNotice('');
+        pullFromCloud({ full: false });
+      } catch (error) {
+        if (cancelled) return;
+        if (error?.status === 401 || error?.status === 403) {
+          setAuthSession(null);
+          setAuthState(null);
+          setAuthStatus('unauthenticated');
+          setAuthNotice('登录已失效，请重新登录。');
+          return;
+        }
+        if (error?.isTimeout || error?.isNetworkError || error?.status === 0) {
+          setAuthStatus('serverStarting');
+          setAuthNotice('服务器启动中，请稍后重试。已保留本地离线模式，可先查看本地缓存数据。');
+          return;
+        }
+        setAuthStatus('serverStarting');
+        setAuthNotice(error.message || '服务器暂时不可用，请稍后重试。');
       }
     }
     verifyCurrentToken();
@@ -147,16 +181,61 @@ export default function App() {
     };
   }, [authSession?.token]);
 
+  useEffect(() => {
+    const markOffline = () => {
+      if (getAuthSession()?.token) {
+        setAuthStatus('offlineMode');
+        setAuthNotice('当前离线，已进入离线模式，可先查看本地缓存数据。');
+      }
+    };
+    const markOnline = () => {
+      if (getAuthSession()?.token) handleRetryAuth();
+    };
+    window.addEventListener('offline', markOffline);
+    window.addEventListener('online', markOnline);
+    return () => {
+      window.removeEventListener('offline', markOffline);
+      window.removeEventListener('online', markOnline);
+    };
+  }, []);
+
   async function handleSyncNow() {
     setSyncState(await syncNow());
   }
 
-  function handleLogout() {
-    setAuthSession(null);
+  async function handleRetryAuth() {
+    const session = getAuthSession();
+    if (!session?.token) {
+      setAuthStatus('unauthenticated');
+      setAuthNotice('');
+      return;
+    }
+    setAuthState(session);
+    setAuthStatus('checkingAuth');
+    setAuthNotice('');
+    try {
+      const data = await api.me();
+      const verifiedSession = { token: session.token, user: data.user, company: data.company };
+      setAuthSession(verifiedSession);
+      setAuthState(getAuthSession());
+      setAuthStatus('authenticated');
+      setAuthNotice('');
+      await pullFromCloud({ full: false });
+    } catch (error) {
+      if (error?.status === 401 || error?.status === 403) {
+        setAuthSession(null);
+        setAuthState(null);
+        setAuthStatus('unauthenticated');
+        setAuthNotice('登录已失效，请重新登录。');
+        return;
+      }
+      setAuthStatus('serverStarting');
+      setAuthNotice('服务器启动中，请稍后重试。已保留本地离线模式，可先查看本地缓存数据。');
+    }
   }
 
-  if (!authReady) {
-    return <div className="auth-shell"><div className="auth-card">正在验证登录状态...</div></div>;
+  function handleLogout() {
+    setAuthSession(null);
   }
 
   if (window.location.pathname.startsWith('/invite/')) {
@@ -178,6 +257,7 @@ export default function App() {
   return (
     <div className="app-shell">
       <SyncBar state={syncState} session={authSession} onSyncNow={handleSyncNow} onLogout={handleLogout} />
+      <AuthStatusBanner status={authStatus} message={authNotice} onRetry={handleRetryAuth} />
       <main className="main">
         <Routes>
           <Route path="/" element={<RequireAuth session={authSession}><HomeDashboardPage /></RequireAuth>} />
@@ -200,6 +280,19 @@ export default function App() {
         </Routes>
       </main>
       <BottomNav />
+    </div>
+  );
+}
+
+function AuthStatusBanner({ status, message, onRetry }) {
+  if (!['checkingAuth', 'serverStarting', 'offlineMode'].includes(status)) return null;
+  const text = status === 'checkingAuth'
+    ? '正在后台验证登录状态，不影响本地数据查看。'
+    : message || (status === 'offlineMode' ? '当前离线，已进入离线模式。' : '服务器启动中，请稍后重试。');
+  return (
+    <div className={`auth-status-banner ${status}`}>
+      <span>{text}</span>
+      {status !== 'checkingAuth' && <button type="button" onClick={onRetry}>重试登录验证</button>}
     </div>
   );
 }
@@ -587,7 +680,17 @@ function BatchImportPage() {
             error: task.error || entry.error
           };
         }));
-        if (tasks.some((task) => task.status === 'completed')) syncNow();
+        const completedTasks = tasks.filter((task) => task.status === 'completed');
+        if (completedTasks.length) {
+          console.log('[recognition] completed tasks detected, pulling cloud data:', completedTasks.map((task) => ({
+            taskId: task.id,
+            invoiceId: task.invoiceId || '',
+            supplierName: task.result?.parsed?.supplierName || '',
+            invoiceNo: task.result?.parsed?.invoiceNo || '',
+            totalAmount: task.result?.parsed?.totalAmount || 0
+          })));
+          await pullFromCloud({ full: true });
+        }
       } catch (error) {
         console.error('Refresh recognition tasks failed:', error);
       }
@@ -811,12 +914,24 @@ function BatchImportPage() {
 function RecognitionTaskListPage() {
   const [tasks, setTasks] = useState([]);
   const [message, setMessage] = useState('');
+  const pulledCompletedTaskIds = useRef(new Set());
 
   async function load() {
     try {
       const data = await api.getRecognitionTasks();
       setTasks(data);
-      if (data.some((task) => task.status === 'completed')) syncNow();
+      const newCompletedTasks = data.filter((task) => task.status === 'completed' && !pulledCompletedTaskIds.current.has(task.id));
+      if (newCompletedTasks.length) {
+        newCompletedTasks.forEach((task) => pulledCompletedTaskIds.current.add(task.id));
+        console.log('[recognition] task list completed tasks, pulling cloud data:', newCompletedTasks.map((task) => ({
+          taskId: task.id,
+          invoiceId: task.invoiceId || '',
+          supplierName: task.result?.parsed?.supplierName || '',
+          invoiceNo: task.result?.parsed?.invoiceNo || '',
+          totalAmount: task.result?.parsed?.totalAmount || 0
+        })));
+        await pullFromCloud({ full: true });
+      }
     } catch (error) {
       setMessage(error.message || '读取识别任务失败');
     }
@@ -851,7 +966,7 @@ function RecognitionTaskListPage() {
     try {
       await api.forceSaveRecognitionTask(taskId);
       setMessage('已强制保存该识别结果');
-      syncNow();
+      await pullFromCloud({ full: true });
       load();
     } catch (error) {
       setMessage(error.message || '强制保存失败');
@@ -985,7 +1100,14 @@ function InvoiceFormPage() {
         if (task.status === 'completed') {
           applyRecognitionTaskToForm(task);
           setMessage(task.invoiceId ? '识别完成，后端已保存发票。' : '识别完成。');
-          syncNow();
+          console.log('[recognition] single task completed, pulling cloud data:', {
+            taskId: task.id,
+            invoiceId: task.invoiceId || '',
+            supplierName: task.result?.parsed?.supplierName || '',
+            invoiceNo: task.result?.parsed?.invoiceNo || '',
+            totalAmount: task.result?.parsed?.totalAmount || 0
+          });
+          await pullFromCloud({ full: true });
         }
         if (task.status === 'failed') {
           setMessage(task.error || '识别失败');
@@ -1092,7 +1214,7 @@ function InvoiceFormPage() {
 
   async function save() {
     if (recognitionTask?.status === 'completed' && recognitionTask.invoiceId) {
-      await syncNow();
+      await pullFromCloud({ full: true });
       navigate(`/invoices/${recognitionTask.invoiceId}`);
       return;
     }

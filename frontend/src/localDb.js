@@ -1351,7 +1351,7 @@ export const localDb = {
     const month = currentMonth();
     const monthInvoices = invoices.filter((invoice) => String(invoice.invoiceDate || invoice.createdAt || '').startsWith(month));
     const monthSupplierIds = new Set(monthInvoices.map((invoice) => invoice.supplierId).filter(Boolean));
-    return {
+    const metrics = {
       totalPurchaseAmount: invoices.reduce((sum, invoice) => sum + moneyNumber(invoice.totalAmount), 0),
       monthPurchaseAmount: monthInvoices.reduce((sum, invoice) => sum + moneyNumber(invoice.totalAmount), 0),
       monthInvoiceCount: monthInvoices.length,
@@ -1361,6 +1361,14 @@ export const localDb = {
       abnormalInvoiceCount: allInvoices.filter(pendingReviewInvoice).length,
       pendingInvoiceCount: allInvoices.filter((invoice) => pendingReviewInvoice(invoice) || invoice.syncStatus === 'pending').length
     };
+    console.log('[dashboard] local IndexedDB stats query:', {
+      companyId: getCurrentCompanyId(),
+      suppliers: suppliers.length,
+      allInvoices: allInvoices.length,
+      approvedInvoices: invoices.length,
+      metrics
+    });
+    return metrics;
   },
 
   async getPurchaseAnalytics() {
