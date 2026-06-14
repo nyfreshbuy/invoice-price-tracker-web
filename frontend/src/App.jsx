@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
-import { Link, NavLink, Route, Routes, useNavigate, useParams } from 'react-router-dom';
+import { Link, NavLink, Route, Routes, useLocation, useNavigate, useParams } from 'react-router-dom';
 import {
   Building2,
   BarChart3,
@@ -513,23 +513,31 @@ function HomePage() {
 }
 
 function InvoiceListPage() {
+  const location = useLocation();
   const [items, setItems] = useState([]);
   const [mergeInvoice, setMergeInvoice] = useState(null);
   const [message, setMessage] = useState('');
   const load = () => localDb.getInvoices().then(setItems);
   useLocalReload(load);
+  const filter = new URLSearchParams(location.search).get('filter') || '';
+  const filteredItems = items.filter((invoice) => {
+    if (filter === 'pending') return isPendingInvoice(invoice);
+    if (filter === 'abnormal') return isAbnormalInvoice(invoice);
+    return true;
+  });
 
   return (
     <Page title="发票列表" action={<div className="row-actions"><Link className="icon-button" to="/invoices/batch"><Upload size={18} />批量</Link><Link className="icon-button" to="/invoices/new"><Plus size={18} />新增</Link></div>}>
-      {items.length === 0 && <EmptyState text="暂无发票" />}
+      {filter && <p className="hint">当前筛选：{filter === 'pending' ? '待确认发票' : '异常发票'} <Link to="/invoices">查看全部</Link></p>}
+      {filteredItems.length === 0 && <EmptyState text="暂无发票" />}
       {message && <p className={message.includes('失败') || message.includes('没有') ? 'error' : 'success-text'}>{message}</p>}
       <div className="card-list">
-        {items.map((invoice) => (
+        {filteredItems.map((invoice) => (
           <div className="row-card" key={invoice.id}>
             <div>
               <h3>{invoice.supplierName || '未命名供应商'}</h3>
               <p>日期 {invoice.invoiceDate || '-'} · 金额 {money(invoice.totalAmount)}</p>
-              <p>{statusText(invoice.syncStatus)}{invoice.invoiceNo ? ` · 发票号 ${invoice.invoiceNo}` : ''}</p>
+              <p>{invoiceStatusLabel(invoice)} · {statusText(invoice.syncStatus)}{invoice.invoiceNo ? ` · 发票号 ${invoice.invoiceNo}` : ''}</p>
             </div>
             <div className="row-actions">
               <button type="button" onClick={() => setMergeInvoice(invoice)}>合并</button>
@@ -599,10 +607,11 @@ function MergeInvoiceDialog({ invoice, onClose, onMerged }) {
     try {
       const result = await api.mergeInvoice(invoice.id, selectedIds);
       await syncNow();
-      onMerged?.(result.message || '合并成功');
+      onMerged?.(result.message || '✓ 已合并');
       navigate(`/invoices/${encodeURIComponent(result.invoiceId || invoice.id)}`);
     } catch (error) {
       setMessage(error.message || '合并失败');
+      alert(`操作失败：${error.message || '合并失败'}`);
     } finally {
       setLoading(false);
     }
@@ -914,6 +923,7 @@ function BatchImportPage() {
 function RecognitionTaskListPage() {
   const [tasks, setTasks] = useState([]);
   const [message, setMessage] = useState('');
+  const [taskActions, setTaskActions] = useState({});
   const pulledCompletedTaskIds = useRef(new Set());
 
   async function load() {
@@ -953,16 +963,21 @@ function RecognitionTaskListPage() {
   }, []);
 
   async function retry(taskId) {
+    setTaskActions((current) => ({ ...current, [taskId]: 'retry' }));
     try {
       await api.retryRecognitionTask(taskId);
       setMessage('已重新加入后台识别队列');
       load();
     } catch (error) {
       setMessage(error.message || '重新识别失败');
+      alert(`操作失败：${error.message || '重新识别失败'}`);
+    } finally {
+      setTaskActions((current) => ({ ...current, [taskId]: '' }));
     }
   }
 
   async function forceSave(taskId) {
+    setTaskActions((current) => ({ ...current, [taskId]: 'force' }));
     try {
       await api.forceSaveRecognitionTask(taskId);
       setMessage('已强制保存该识别结果');
@@ -970,6 +985,9 @@ function RecognitionTaskListPage() {
       load();
     } catch (error) {
       setMessage(error.message || '强制保存失败');
+      alert(`操作失败：${error.message || '强制保存失败'}`);
+    } finally {
+      setTaskActions((current) => ({ ...current, [taskId]: '' }));
     }
   }
 
@@ -988,13 +1006,17 @@ function RecognitionTaskListPage() {
   }
 
   async function decideTask(taskId, action) {
+    setTaskActions((current) => ({ ...current, [taskId]: action }));
     try {
       await api.decideRecognitionTask(taskId, action);
-      setMessage(action === 'merge' ? '已确认合并。' : action === 'duplicate' ? '已标记为重复。' : '已保留为独立发票。');
-      syncNow();
+      setMessage(action === 'merge' ? '✓ 已合并' : action === 'duplicate' ? '✓ 已标记重复' : '✓ 已保留');
+      await pullFromCloud({ full: true });
       load();
     } catch (error) {
       setMessage(error.message || '人工确认失败');
+      alert(`操作失败：${error.message || '人工确认失败'}`);
+    } finally {
+      setTaskActions((current) => ({ ...current, [taskId]: action === 'merge' ? 'merged' : action === 'duplicate' ? 'duplicated' : action === 'independent' ? 'kept' : '' }));
     }
   }
 
@@ -1003,7 +1025,10 @@ function RecognitionTaskListPage() {
       {message && <p className="error">{message}</p>}
       {tasks.length === 0 && <EmptyState text="暂无识别任务" />}
       <div className="card-list">
-        {tasks.map((task) => (
+        {tasks.map((task) => {
+          const action = taskActions[task.id] || '';
+          const handled = ['merged', 'duplicated', 'kept'].includes(action);
+          return (
           <div className="row-card" key={task.id}>
             <div>
               <h3>{task.originalName || task.id}</h3>
@@ -1020,7 +1045,7 @@ function RecognitionTaskListPage() {
             </div>
             <div className="row-actions">
               {task.invoiceId && <Link className="icon-button" to={`/invoices/${task.invoiceId}`}>发票</Link>}
-              {task.status === 'failed' && <button onClick={() => retry(task.id)}>重新识别</button>}
+              {task.status === 'failed' && <button disabled={Boolean(action)} onClick={() => retry(task.id)}>{action === 'retry' ? '处理中...' : '重新识别'}</button>}
               {task.status === 'failed' && (
                 <label className="icon-button">
                   重新上传图片
@@ -1036,17 +1061,18 @@ function RecognitionTaskListPage() {
                 </label>
               )}
               {task.status === 'failed' && <Link className="icon-button" to="/invoices/new">手动编辑</Link>}
-              {task.status === 'completed' && task.result?.duplicateCheck?.isDuplicate && !task.invoiceId && <button onClick={() => forceSave(task.id)}>强制保存</button>}
+              {task.status === 'completed' && task.result?.duplicateCheck?.isDuplicate && !task.invoiceId && <button disabled={Boolean(action)} onClick={() => forceSave(task.id)}>{action === 'force' ? '处理中...' : '强制保存'}</button>}
               {task.status === 'completed' && task.result?.duplicateCheck?.sameInvoiceGroup && (
                 <>
-                  <button onClick={() => decideTask(task.id, 'merge')}>合并</button>
-                  <button onClick={() => decideTask(task.id, 'duplicate')}>标记重复</button>
-                  <button onClick={() => decideTask(task.id, 'independent')}>保留为独立发票</button>
+                  <button className={action === 'merged' ? 'success-button' : ''} disabled={handled || Boolean(action)} onClick={() => decideTask(task.id, 'merge')}>{action === 'merge' ? '合并中...' : action === 'merged' ? '✓ 已合并' : '合并'}</button>
+                  <button className={action === 'duplicated' ? 'danger-button' : ''} disabled={handled || Boolean(action)} onClick={() => decideTask(task.id, 'duplicate')}>{action === 'duplicate' ? '标记中...' : action === 'duplicated' ? '✓ 已标记重复' : '标记重复'}</button>
+                  <button className={action === 'kept' ? 'success-button' : ''} disabled={handled || Boolean(action)} onClick={() => decideTask(task.id, 'independent')}>{action === 'independent' ? '处理中...' : action === 'kept' ? '✓ 已保留' : '保留为独立发票'}</button>
                 </>
               )}
             </div>
           </div>
-        ))}
+        );
+        })}
       </div>
     </Page>
   );
@@ -1428,14 +1454,17 @@ function HomeDashboardPage() {
     <Page title="InvoicePriceTracker" subtitle="采购数据库、供应商数据库、历史价格数据库">
       <Section title="采购仪表盘">
         <div className="metric-grid">
-          <Metric label="总采购金额" value={money(dashboard?.totalPurchaseAmount)} />
-          <Metric label="本月采购金额" value={money(dashboard?.monthPurchaseAmount)} />
-          <Metric label="本月发票数量" value={dashboard?.monthInvoiceCount ?? 0} />
+          <Metric label="已确认采购金额" value={money(dashboard?.confirmedPurchaseAmount ?? dashboard?.totalPurchaseAmount)} />
+          <Metric label="待确认采购金额" value={money(dashboard?.pendingPurchaseAmount)} to="/invoices?filter=pending" />
+          <Metric label="异常发票金额" value={money(dashboard?.abnormalInvoiceAmount)} to="/invoices?filter=abnormal" />
+          <Metric label="本月已确认金额" value={money(dashboard?.monthConfirmedAmount ?? dashboard?.monthPurchaseAmount)} />
+          <Metric label="本月待确认金额" value={money(dashboard?.monthPendingAmount)} to="/invoices?filter=pending" />
+          <Metric label="已确认发票数量" value={dashboard?.confirmedInvoiceCount ?? dashboard?.monthInvoiceCount ?? 0} />
           <Metric label="本月新增供应商" value={dashboard?.monthNewSupplierCount ?? 0} />
           <Metric label="赠品总价值" value={money(dashboard?.giftValueTotal)} />
           <Metric label="折扣总金额" value={money(dashboard?.discountTotal)} />
-          <Metric label="异常发票数量" value={dashboard?.abnormalInvoiceCount ?? 0} />
-          <Metric label="待确认发票数量" value={dashboard?.pendingInvoiceCount ?? 0} />
+          <Metric label="异常发票数量" value={dashboard?.abnormalInvoiceCount ?? 0} to="/invoices?filter=abnormal" />
+          <Metric label="待确认发票数量" value={dashboard?.pendingInvoiceCount ?? 0} to="/invoices?filter=pending" />
         </div>
       </Section>
       <Section title="采购中心">
@@ -1465,6 +1494,7 @@ function InvoiceDetailPageWithGifts() {
   const [editingItem, setEditingItem] = useState(null);
   const [editingPromoGroups, setEditingPromoGroups] = useState(false);
   const [detailMessage, setDetailMessage] = useState('');
+  const [operation, setOperation] = useState('');
 
   const loadDetail = () => localDb.getInvoice(id).then(setDetail);
   useLocalReload(loadDetail, [id]);
@@ -1493,10 +1523,19 @@ function InvoiceDetailPageWithGifts() {
   }
 
   async function saveEditedItems(nextItems) {
-    const updated = await localDb.updateInvoiceItems(id, nextItems, detail?.items || []);
-    setDetail(updated);
-    setDetailMessage('已保存人工修改，并写入学习记录');
-    syncNow();
+    setOperation('save-items');
+    try {
+      const updated = await localDb.updateInvoiceItems(id, nextItems, detail?.items || []);
+      setDetail(updated);
+      setDetailMessage('✓ 商品已保存');
+      syncNow();
+      return updated;
+    } catch (error) {
+      alert(`操作失败：${error.message || '保存商品失败'}`);
+      throw error;
+    } finally {
+      setOperation('');
+    }
   }
 
   async function saveEditedItem(nextItem) {
@@ -1506,16 +1545,75 @@ function InvoiceDetailPageWithGifts() {
   }
 
   async function savePromoGroups(nextItems) {
-    await saveEditedItems(nextItems);
-    setEditingPromoGroups(false);
+    setOperation('save-promo');
+    try {
+      const updated = await localDb.updateInvoiceItems(id, nextItems, detail?.items || []);
+      setDetail(updated);
+      setEditingPromoGroups(false);
+      setDetailMessage('✓ 赠品分摊已保存');
+      syncNow();
+    } catch (error) {
+      alert(`操作失败：${error.message || '保存分摊失败'}`);
+    } finally {
+      setOperation('');
+    }
   }
 
   async function saveInvoiceFields(fields) {
-    const updated = await localDb.updateInvoiceFields(id, fields);
-    setDetail(updated);
-    setEditingInvoice(false);
-    setDetailMessage('已保存发票修改，并重新计算统计状态');
-    syncNow();
+    setOperation('save-invoice');
+    try {
+      const updated = await localDb.updateInvoiceFields(id, fields);
+      setDetail(updated);
+      setEditingInvoice(false);
+      setDetailMessage('✓ 发票已保存');
+      syncNow();
+    } catch (error) {
+      alert(`操作失败：${error.message || '保存发票失败'}`);
+    } finally {
+      setOperation('');
+    }
+  }
+
+  async function confirmInvoice(status = 'CONFIRMED') {
+    setOperation(status === 'ABNORMAL_HANDLED' ? 'handle-abnormal' : 'confirm-invoice');
+    try {
+      const updated = await localDb.confirmInvoice(id, status);
+      setDetail(updated);
+      setDetailMessage(status === 'ABNORMAL_HANDLED' ? '✓ 异常已处理' : '✓ 发票已确认');
+      syncNow();
+    } catch (error) {
+      alert(`操作失败：${error.message || '确认发票失败'}`);
+    } finally {
+      setOperation('');
+    }
+  }
+
+  async function markDuplicate() {
+    setOperation('mark-duplicate');
+    try {
+      const updated = await localDb.updateInvoiceDuplicateStatus(id, 'duplicate', 'DUPLICATE');
+      setDetail(updated);
+      setDetailMessage('✓ 已标记重复');
+      syncNow();
+    } catch (error) {
+      alert(`操作失败：${error.message || '标记重复失败'}`);
+    } finally {
+      setOperation('');
+    }
+  }
+
+  async function keepIndependent() {
+    setOperation('keep-independent');
+    try {
+      const updated = await localDb.updateInvoiceDuplicateStatus(id, 'none', 'CONFIRMED');
+      setDetail(updated);
+      setDetailMessage('✓ 已保留为独立发票');
+      syncNow();
+    } catch (error) {
+      alert(`操作失败：${error.message || '保留独立发票失败'}`);
+    } finally {
+      setOperation('');
+    }
   }
 
   if (!detail) return <Page title="发票详情"><EmptyState text="未找到发票" /></Page>;
@@ -1532,6 +1630,25 @@ function InvoiceDetailPageWithGifts() {
   return (
     <Page title="发票详情" action={<div className="row-actions"><button type="button" onClick={() => setEditingInvoice(true)}>编辑发票</button><button className="danger-button" onClick={remove}><Trash2 size={16} />删除</button></div>}>
       {detailMessage && <p className="success-text">{detailMessage}</p>}
+      {(isPendingInvoice(invoice) || isAbnormalInvoice(invoice)) && (
+        <Section title="处理状态">
+          {isPendingInvoice(invoice) && <p className="status-badge pending">待确认发票</p>}
+          {isAbnormalInvoice(invoice) && <p className="status-badge abnormal">异常发票</p>}
+          {isAbnormalInvoice(invoice) && (
+            <p className="warning-text">异常原因：{invoice.recognitionWarnings || '商品明细总额与发票总额不一致'}{Number(invoice.totalDifference || 0) > 0.05 ? `，差额：${money(invoice.totalDifference)}` : ''}</p>
+          )}
+          <div className="row-actions">
+            <button className="primary-button success-button" type="button" disabled={operation === 'confirm-invoice'} onClick={() => confirmInvoice('CONFIRMED')}>
+              {operation === 'confirm-invoice' ? '处理中...' : '确认发票'}
+            </button>
+            {invoice.duplicateStatus === 'possible' && <button className="danger-button" type="button" disabled={operation === 'mark-duplicate'} onClick={markDuplicate}>{operation === 'mark-duplicate' ? '标记中...' : '标记重复'}</button>}
+            {invoice.duplicateStatus === 'possible' && <button className="primary-button success-button" type="button" disabled={operation === 'keep-independent'} onClick={keepIndependent}>{operation === 'keep-independent' ? '处理中...' : '保留为独立发票'}</button>}
+            {isAbnormalInvoice(invoice) && <button className="secondary-button" type="button" onClick={() => setEditingInvoice(true)}>编辑发票</button>}
+            {isAbnormalInvoice(invoice) && <button className="secondary-button" type="button" disabled={!items.length} onClick={() => items[0] && setEditingItem(items[0])}>编辑商品明细</button>}
+            {isAbnormalInvoice(invoice) && <button className="primary-button success-button" type="button" disabled={operation === 'confirm-invoice'} onClick={() => confirmInvoice('CONFIRMED')}>{operation === 'confirm-invoice' ? '处理中...' : '确认无误'}</button>}
+          </div>
+        </Section>
+      )}
       <Section title="发票信息">
         <Info label="供应商" value={invoice.supplierName || '未命名供应商'} />
         <Info label="发票号" value={invoice.invoiceNo || '-'} />
@@ -1644,6 +1761,7 @@ function InvoiceDetailPageWithGifts() {
 }
 
 function InvoiceEditDialog({ invoice, onClose, onSave }) {
+  const [saving, setSaving] = useState(false);
   const [form, setForm] = useState(() => ({
     supplierName: invoice.supplierName || '',
     supplierNameChinese: invoice.supplierNameChinese || '',
@@ -1661,19 +1779,26 @@ function InvoiceEditDialog({ invoice, onClose, onSave }) {
     setForm((current) => ({ ...current, [field]: value }));
   }
 
-  function save() {
-    onSave({
-      supplierName: form.supplierName,
-      supplierNameChinese: form.supplierNameChinese,
-      supplierNameEnglish: form.supplierNameEnglish,
-      supplierDisplayName: form.supplierDisplayName,
-      invoiceNo: form.invoiceNo,
-      invoiceDate: normalizeDateInput(form.invoiceDate) || '',
-      totalAmount: Number(form.totalAmount || 0),
-      subtotal: Number(form.subtotal || form.totalAmount || 0),
-      tax: Number(form.tax || 0),
-      recognitionWarnings: form.recognitionWarnings
-    });
+  async function save() {
+    setSaving(true);
+    try {
+      await onSave({
+        supplierName: form.supplierName,
+        supplierNameChinese: form.supplierNameChinese,
+        supplierNameEnglish: form.supplierNameEnglish,
+        supplierDisplayName: form.supplierDisplayName,
+        invoiceNo: form.invoiceNo,
+        invoiceDate: normalizeDateInput(form.invoiceDate) || '',
+        totalAmount: Number(form.totalAmount || 0),
+        subtotal: Number(form.subtotal || form.totalAmount || 0),
+        tax: Number(form.tax || 0),
+        recognitionWarnings: form.recognitionWarnings
+      });
+    } catch (error) {
+      alert(`保存失败：${error.message || '未知错误'}`);
+    } finally {
+      setSaving(false);
+    }
   }
 
   return (
@@ -1690,15 +1815,16 @@ function InvoiceEditDialog({ invoice, onClose, onSave }) {
         <label className="field"><span>Tax</span><input type="number" value={form.tax} onChange={(event) => update('tax', event.target.value)} /></label>
       </div>
       <label className="field"><span>识别警告</span><textarea rows="3" value={form.recognitionWarnings} onChange={(event) => update('recognitionWarnings', event.target.value)} /></label>
-      <div className="dialog-actions">
-        <button className="secondary-button" type="button" onClick={onClose}>取消</button>
-        <button className="primary-button" type="button" onClick={save}>保存发票</button>
+      <div className="dialog-actions sticky-dialog-actions">
+        <button className="secondary-button" type="button" disabled={saving} onClick={onClose}>取消</button>
+        <button className="primary-button success-button" type="button" disabled={saving} onClick={save}>{saving ? '处理中...' : '保存发票'}</button>
       </div>
     </Dialog>
   );
 }
 
 function InvoiceItemEditDialog({ item, onClose, onSave }) {
+  const [saving, setSaving] = useState(false);
   const [form, setForm] = useState(() => ({
     ...emptyItem(),
     ...item,
@@ -1713,52 +1839,92 @@ function InvoiceItemEditDialog({ item, onClose, onSave }) {
   }));
 
   function update(field, value) {
-    setForm((current) => ({ ...current, [field]: value }));
-  }
-
-  function save() {
-    const name = form.productNameOriginal || [form.nameCn, form.nameEn].filter(Boolean).join(' ');
-    onSave({
-      ...form,
-      productNameOriginal: name,
-      productNameNormalized: form.productNameNormalized || name,
-      quantity: Number(form.quantity || 0),
-      unitPrice: Number(form.unitPrice || 0),
-      totalPrice: Number(form.totalPrice || 0),
-      isFreeItem: form.isFreeItem ? 1 : 0,
-      participatesInGiftAllocation: form.participatesInGiftAllocation ? 1 : 0,
-      correctedByUser: 1
+    setForm((current) => {
+      const next = { ...current, [field]: value };
+      if (field === 'quantity' || field === 'unitPrice') {
+        next.totalPrice = Number(next.quantity || 0) * Number(next.unitPrice || 0);
+      }
+      if (field === 'chargedQty' || field === 'freeQty') {
+        next.actualQty = Number(next.chargedQty || 0) + Number(next.freeQty || 0);
+        next.totalQty = next.actualQty;
+      }
+      if (field === 'totalPrice' || field === 'quantity' || field === 'unitPrice' || field === 'chargedQty' || field === 'freeQty') {
+        const actualQty = Number(next.actualQty || next.totalQty || next.quantity || 0);
+        next.effectiveUnitCost = actualQty > 0 ? Number(next.totalPrice || 0) / actualQty : 0;
+      }
+      return next;
     });
   }
+
+  async function save() {
+    const name = form.productNameOriginal || [form.nameCn, form.nameEn].filter(Boolean).join(' ');
+    setSaving(true);
+    try {
+      await onSave({
+        ...form,
+        productNameOriginal: name,
+        productNameNormalized: form.productNameNormalized || name,
+        quantity: Number(form.quantity || 0),
+        unitPrice: Number(form.unitPrice || 0),
+        totalPrice: Number(form.totalPrice || 0),
+        chargedQty: Number(form.chargedQty || 0),
+        freeQty: Number(form.freeQty || 0),
+        actualQty: Number(form.actualQty || form.totalQty || form.quantity || 0),
+        totalQty: Number(form.actualQty || form.totalQty || form.quantity || 0),
+        effectiveUnitCost: Number(form.effectiveUnitCost || 0),
+        isFreeItem: form.isFreeItem ? 1 : 0,
+        participatesInGiftAllocation: form.participatesInGiftAllocation ? 1 : 0,
+        correctedByUser: 1
+      });
+    } catch (error) {
+      alert(`保存失败：${error.message || '未知错误'}`);
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  const calculatedTotal = Number(form.quantity || 0) * Number(form.unitPrice || 0);
+  const mismatch = Math.abs(calculatedTotal - Number(form.totalPrice || 0)) > 0.01;
 
   return (
     <Dialog title="编辑商品明细" onClose={onClose}>
       <div className="item-editor">
-        <label className="field"><span>中文名</span><input value={form.nameCn || ''} onChange={(event) => update('nameCn', event.target.value)} /></label>
-        <label className="field"><span>英文名</span><input value={form.nameEn || ''} onChange={(event) => update('nameEn', event.target.value)} /></label>
         <label className="field"><span>商品名称</span><input value={form.productNameOriginal || ''} onChange={(event) => update('productNameOriginal', event.target.value)} /></label>
-        <label className="field"><span>标准名</span><input value={form.productNameNormalized || ''} onChange={(event) => update('productNameNormalized', event.target.value)} /></label>
+        <label className="field"><span>品牌</span><input value={form.brand || ''} onChange={(event) => update('brand', event.target.value)} /></label>
         <label className="field"><span>规格</span><input value={form.spec || ''} onChange={(event) => update('spec', event.target.value)} /></label>
         <div className="grid-2">
           <label className="field"><span>数量</span><input type="number" value={form.quantity || 0} onChange={(event) => update('quantity', event.target.value)} /></label>
-          <label className="field"><span>单位</span><input value={form.unit || ''} onChange={(event) => update('unit', event.target.value)} /></label>
           <label className="field"><span>单价</span><input type="number" value={form.unitPrice || 0} onChange={(event) => update('unitPrice', event.target.value)} /></label>
           <label className="field"><span>金额</span><input type="number" value={form.totalPrice || 0} onChange={(event) => update('totalPrice', event.target.value)} /></label>
+          <label className="field"><span>收费数量</span><input type="number" value={form.chargedQty || 0} onChange={(event) => update('chargedQty', event.target.value)} /></label>
+          <label className="field"><span>免费数量</span><input type="number" value={form.freeQty || 0} onChange={(event) => update('freeQty', event.target.value)} /></label>
+          <label className="field"><span>实际数量</span><input type="number" value={form.actualQty || form.totalQty || 0} onChange={(event) => update('actualQty', event.target.value)} /></label>
+          <label className="field"><span>实际摊薄成本</span><input type="number" value={Number(form.effectiveUnitCost || 0).toFixed(2)} onChange={(event) => update('effectiveUnitCost', event.target.value)} /></label>
         </div>
-        <label className="field"><span>赠品</span><input type="checkbox" checked={Boolean(form.isFreeItem)} onChange={(event) => update('isFreeItem', event.target.checked)} /></label>
-        <label className="field"><span>参与赠品分摊</span><input type="checkbox" checked={Boolean(form.participatesInGiftAllocation)} onChange={(event) => update('participatesInGiftAllocation', event.target.checked)} /></label>
-        <label className="field"><span>分摊组</span><input value={form.promoGroupName || ''} onChange={(event) => update('promoGroupName', event.target.value)} /></label>
+        {mismatch && <p className="warning-text">总价与 数量 × 单价 不一致，计算值：{money(calculatedTotal)}。允许保存。</p>}
+        <SwitchField label="是否赠品" checked={Boolean(form.isFreeItem)} onChange={(checked) => update('isFreeItem', checked)} />
+        <SwitchField label="参与赠品分摊" checked={Boolean(form.participatesInGiftAllocation)} onChange={(checked) => update('participatesInGiftAllocation', checked)} />
         <label className="field"><span>备注</span><input value={form.notes || ''} onChange={(event) => update('notes', event.target.value)} /></label>
+        <CollapsibleSection title="高级信息">
+          <label className="field"><span>标准名</span><input value={form.productNameNormalized || ''} onChange={(event) => update('productNameNormalized', event.target.value)} /></label>
+          <label className="field"><span>单位</span><input value={form.unit || ''} onChange={(event) => update('unit', event.target.value)} /></label>
+          <label className="field"><span>分摊组 ID</span><input value={form.promoGroupId || ''} onChange={(event) => update('promoGroupId', event.target.value)} /></label>
+          <label className="field"><span>分摊组名称</span><input value={form.promoGroupName || ''} onChange={(event) => update('promoGroupName', event.target.value)} /></label>
+          <SwitchField label="候选行不保存" checked={Boolean(form.candidateOnly)} onChange={(checked) => update('candidateOnly', checked)} />
+          <SwitchField label="圈选" checked={Boolean(form.isCircled)} onChange={(checked) => update('isCircled', checked)} />
+          <SwitchField label="勾选" checked={Boolean(form.isChecked)} onChange={(checked) => update('isChecked', checked)} />
+        </CollapsibleSection>
       </div>
-      <div className="dialog-actions">
-        <button className="secondary-button" type="button" onClick={onClose}>取消</button>
-        <button className="primary-button" type="button" onClick={save}>保存</button>
+      <div className="dialog-actions sticky-dialog-actions">
+        <button className="secondary-button" type="button" disabled={saving} onClick={onClose}>取消</button>
+        <button className="primary-button success-button" type="button" disabled={saving} onClick={save}>{saving ? '处理中...' : '保存商品'}</button>
       </div>
     </Dialog>
   );
 }
 
 function PromoAllocationDialog({ items, onClose, onSave }) {
+  const [saving, setSaving] = useState(false);
   const [rows, setRows] = useState(() => items.map((item) => ({
     ...item,
     participatesInGiftAllocation: Boolean(Number(item.participatesInGiftAllocation || 0) || item.promoGroupId || item.isFreeItem),
@@ -1771,29 +1937,47 @@ function PromoAllocationDialog({ items, onClose, onSave }) {
   })));
 
   function updateRow(idValue, field, value) {
-    setRows((current) => current.map((row) => row.id === idValue ? { ...row, [field]: value } : row));
+    setRows((current) => current.map((row) => {
+      if (row.id !== idValue) return row;
+      const next = { ...row, [field]: value };
+      if (field === 'chargedQty' || field === 'freeQty') {
+        next.actualQty = Number(next.chargedQty || 0) + Number(next.freeQty || 0);
+      }
+      if (field === 'totalPrice' || field === 'chargedQty' || field === 'freeQty' || field === 'actualQty') {
+        const actualQty = Number(next.actualQty || 0);
+        next.effectiveUnitCost = actualQty > 0 ? Number(next.totalPrice || 0) / actualQty : 0;
+      }
+      return next;
+    }));
   }
 
-  function save() {
-    onSave(rows.map((row) => {
-      const groupName = String(row.promoGroupName || '').trim();
-      const participates = Boolean(row.participatesInGiftAllocation);
-      return {
-        ...row,
-        promoGroupId: participates ? groupName.toLowerCase().replace(/[^a-z0-9\u3400-\u9fff]+/g, '-') : '',
-        promoGroupName: participates ? groupName : '',
-        promoGroupRule: participates ? 'manual allocation' : '',
-        participatesInGiftAllocation: participates ? 1 : 0,
-        chargedQty: Number(row.chargedQty || 0),
-        freeQty: Number(row.freeQty || 0),
-        totalQty: Number(row.actualQty || 0),
-        actualQty: Number(row.actualQty || 0),
-        originalUnitCost: Number(row.originalUnitCost || 0),
-        effectiveUnitCost: Number(row.effectiveUnitCost || 0),
-        manualCostOverride: 1,
-        correctedByUser: 1
-      };
-    }));
+  async function save() {
+    setSaving(true);
+    try {
+      await onSave(rows.map((row) => {
+        const groupName = String(row.promoGroupName || '').trim();
+        const participates = Boolean(row.participatesInGiftAllocation);
+        return {
+          ...row,
+          promoGroupId: participates ? groupName.toLowerCase().replace(/[^a-z0-9\u3400-\u9fff]+/g, '-') : '',
+          promoGroupName: participates ? groupName : '',
+          promoGroupRule: participates ? 'manual allocation' : '',
+          participatesInGiftAllocation: participates ? 1 : 0,
+          chargedQty: Number(row.chargedQty || 0),
+          freeQty: Number(row.freeQty || 0),
+          totalQty: Number(row.actualQty || 0),
+          actualQty: Number(row.actualQty || 0),
+          originalUnitCost: Number(row.originalUnitCost || 0),
+          effectiveUnitCost: Number(row.effectiveUnitCost || 0),
+          manualCostOverride: 1,
+          correctedByUser: 1
+        };
+      }));
+    } catch (error) {
+      alert(`操作失败：${error.message || '保存分摊失败'}`);
+    } finally {
+      setSaving(false);
+    }
   }
 
   return (
@@ -1802,7 +1986,7 @@ function PromoAllocationDialog({ items, onClose, onSave }) {
         {rows.map((row) => (
           <div className="detail-item" key={row.id}>
             <strong>{row.productNameOriginal || row.rawName}</strong>
-            <label className="field"><span>加入分摊组</span><input type="checkbox" checked={Boolean(row.participatesInGiftAllocation)} onChange={(event) => updateRow(row.id, 'participatesInGiftAllocation', event.target.checked)} /></label>
+            <SwitchField label="加入分摊组" checked={Boolean(row.participatesInGiftAllocation)} onChange={(checked) => updateRow(row.id, 'participatesInGiftAllocation', checked)} />
             <label className="field"><span>分摊组名称</span><input value={row.promoGroupName || ''} onChange={(event) => updateRow(row.id, 'promoGroupName', event.target.value)} /></label>
             <div className="grid-2">
               <label className="field"><span>收费数量</span><input type="number" value={row.chargedQty || 0} onChange={(event) => updateRow(row.id, 'chargedQty', event.target.value)} /></label>
@@ -1815,9 +1999,9 @@ function PromoAllocationDialog({ items, onClose, onSave }) {
           </div>
         ))}
       </div>
-      <div className="dialog-actions">
-        <button className="secondary-button" type="button" onClick={onClose}>取消</button>
-        <button className="primary-button" type="button" onClick={save}>保存分摊</button>
+      <div className="dialog-actions sticky-dialog-actions">
+        <button className="secondary-button" type="button" disabled={saving} onClick={onClose}>取消</button>
+        <button className="primary-button success-button" type="button" disabled={saving} onClick={save}>{saving ? '保存中...' : '保存分摊'}</button>
       </div>
     </Dialog>
   );
@@ -1827,11 +2011,12 @@ function ProductSearchPage() {
   const [q, setQ] = useState('');
   const [results, setResults] = useState([]);
   const [searched, setSearched] = useState(false);
+  useLocalReload(() => localDb.searchProducts(q).then(setResults), [q]);
 
   async function search(event) {
     event?.preventDefault();
     setSearched(true);
-    setResults(q.trim() ? await localDb.searchProducts(q) : []);
+    setResults(await localDb.searchProducts(q));
   }
 
   return (
@@ -1840,6 +2025,7 @@ function ProductSearchPage() {
         <input placeholder="输入商品名称" value={q} onChange={(event) => setQ(event.target.value)} />
         <button><Search size={18} />搜索</button>
       </form>
+      {!q.trim() && <p className="hint">默认显示最近 20 个购买商品。</p>}
       {searched && results.length === 0 && <EmptyState text="暂无结果" />}
       <div className="card-list">
         {results.map((item) => (
@@ -1847,7 +2033,8 @@ function ProductSearchPage() {
             <div>
               <h3>{item.standardName}</h3>
               <p>最近 {money(item.recentPrice)} · 最低 {money(item.minPrice)} · 最高 {money(item.maxPrice)}</p>
-              <p>均价 {money(item.averagePrice)} · 最近采购 {item.recentPurchaseDate} · {item.recordCount} 条</p>
+              <p>均价 {money(item.averagePrice)} · 最近供应商 {item.recentSupplierName || '-'} · 最近采购 {item.recentPurchaseDate} · {item.recordCount} 条</p>
+              {item.pendingCount > 0 && <p className="warning-text">{item.pendingCount} 条价格来自待确认/异常发票</p>}
             </div>
             <ChevronRight />
           </Link>
@@ -2019,6 +2206,15 @@ function PurchaseAnalysisPage() {
 
   return (
     <Page title="采购分析" subtitle="从本地 IndexedDB 汇总采购金额、商品数量、月度趋势和历史最低价">
+      {analytics.pendingOrAbnormalCount > 0 && analytics.supplierRanking.length === 0 && (
+        <Section title="需要先处理发票">
+          <p className="warning-text">当前有 {analytics.pendingOrAbnormalCount} 张待确认/异常发票，确认后会进入正式采购分析。</p>
+          <div className="row-actions">
+            <Link className="secondary-button" to="/invoices?filter=pending">查看待确认发票</Link>
+            <Link className="secondary-button" to="/invoices?filter=abnormal">查看异常发票</Link>
+          </div>
+        </Section>
+      )}
       <Section title="供应商采购排名">
         {analytics.supplierRanking.length === 0 && <EmptyState text="暂无供应商采购数据" />}
         {analytics.supplierRanking.slice(0, 20).map((row) => (
@@ -2904,8 +3100,21 @@ function Info({ label, value }) {
   return <div className="info-row"><span>{label}</span><strong>{value}</strong></div>;
 }
 
-function Metric({ label, value }) {
-  return <div className="metric-card"><span>{label}</span><strong>{value}</strong></div>;
+function Metric({ label, value, to }) {
+  const content = <><span>{label}</span><strong>{value}</strong></>;
+  if (to) return <Link className="metric-card metric-link" to={to}>{content}</Link>;
+  return <div className="metric-card">{content}</div>;
+}
+
+function SwitchField({ label, checked, onChange }) {
+  return (
+    <label className="switch-field">
+      <span>{label}</span>
+      <button type="button" className={`ios-switch ${checked ? 'on' : ''}`} onClick={() => onChange(!checked)} aria-pressed={checked}>
+        <span />
+      </button>
+    </label>
+  );
 }
 
 function ConfidenceSummary({ parsed = {} }) {
@@ -2984,6 +3193,32 @@ function statusText(status) {
   if (status === 'deleted') return '待删除同步';
   if (status === 'conflict') return '需要人工确认';
   return '已同步';
+}
+
+function isConfirmedInvoice(invoice = {}) {
+  return ['APPROVED', 'CONFIRMED'].includes(String(invoice.status || '').toUpperCase());
+}
+
+function isPendingInvoice(invoice = {}) {
+  if (isConfirmedInvoice(invoice)) return false;
+  return String(invoice.status || '').toUpperCase() === 'PENDING_REVIEW' || invoice.duplicateStatus === 'possible';
+}
+
+function isAbnormalInvoice(invoice = {}) {
+  if (isConfirmedInvoice(invoice)) return false;
+  return String(invoice.status || '').toUpperCase() === 'ABNORMAL'
+    || Boolean(invoice.recognitionWarnings)
+    || Number(invoice.totalDifference || 0) > 0.05;
+}
+
+function invoiceStatusLabel(invoice = {}) {
+  if (['duplicate', 'confirmed'].includes(String(invoice.duplicateStatus || '').toLowerCase())) return '重复';
+  if (String(invoice.status || '').toLowerCase() === 'duplicate') return '重复';
+  if (isConfirmedInvoice(invoice)) return '已确认';
+  if (isAbnormalInvoice(invoice)) return '异常';
+  if (isPendingInvoice(invoice)) return '待确认';
+  if (String(invoice.status || '').toLowerCase() === 'merged') return '已合并';
+  return invoice.status || '正常';
 }
 
 function isAdminRole(role) {

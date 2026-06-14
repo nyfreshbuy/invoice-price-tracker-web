@@ -1,8 +1,38 @@
 import { api, getAuthSession, getCompanyId } from './api.js';
 import { localDb, syncTables, getDeviceId, nowIso } from './localDb.js';
 
+const SYNC_BATCH_SIZE = 20;
+
 let syncing = false;
 let lastError = '';
+let syncProgress = { done: 0, total: 0, failed: 0 };
+
+function emitSyncStateChange() {
+  window.dispatchEvent(new Event('sync-state-change'));
+}
+
+function flattenPendingChanges(changes) {
+  return syncTables.flatMap((table) => (changes[table] || []).map((record) => ({ table, record })));
+}
+
+function buildBatchChanges(records) {
+  const changes = Object.fromEntries(syncTables.map((table) => [table, []]));
+  for (const entry of records) {
+    changes[entry.table].push(entry.record);
+  }
+  return changes;
+}
+
+function syncLabel({ session, pendingCount, conflictCount }) {
+  if (!session) return '请先登录';
+  if (!navigator.onLine) return '离线模式';
+  if (syncing && syncProgress.total > 0) return `同步中 ${syncProgress.done}/${syncProgress.total}`;
+  if (syncing) return '同步中';
+  if (lastError) return syncProgress.failed > 0 ? `同步失败 ${syncProgress.failed} 条` : '同步失败';
+  if (conflictCount > 0) return `需要人工确认 ${conflictCount} 条`;
+  if (pendingCount > 0) return `待同步 ${pendingCount} 条`;
+  return '已同步';
+}
 
 export async function getSyncSnapshot() {
   const session = getAuthSession();
@@ -15,17 +45,8 @@ export async function getSyncSnapshot() {
     conflictCount,
     syncing,
     lastError,
-    label: !session
-      ? '请先登录'
-      : !navigator.onLine
-        ? '离线模式'
-        : lastError
-          ? '同步失败'
-          : conflictCount > 0
-            ? `需要人工确认 ${conflictCount} 条`
-            : pendingCount > 0
-            ? `待同步 ${pendingCount} 条`
-            : '已同步'
+    syncProgress: { ...syncProgress },
+    label: syncLabel({ session, pendingCount, conflictCount })
   };
 }
 
@@ -41,7 +62,8 @@ export async function syncNow() {
   }
 
   syncing = true;
-  window.dispatchEvent(new Event('sync-state-change'));
+  syncProgress = { done: 0, total: 0, failed: 0 };
+  emitSyncStateChange();
 
   try {
     const deviceId = getDeviceId();
@@ -50,21 +72,40 @@ export async function syncNow() {
       lastError = '请先登录';
       return getSyncSnapshot();
     }
+
     const pending = await localDb.getPendingChanges();
-    const hasPending = Object.values(pending).some((records) => records.length > 0);
+    const pendingRecords = flattenPendingChanges(pending);
     console.log('[sync] start:', {
       companyId,
       pendingCounts: Object.fromEntries(Object.entries(pending).map(([table, records]) => [table, records.length]))
     });
-    if (hasPending) {
-      const pushed = await api.syncPush({ deviceId, companyId, changes: pending });
-      console.log('[sync] push completed:', {
-        companyId,
-        resultCount: Array.isArray(pushed.results) ? pushed.results.length : 0,
-        backend: pushed.backend || ''
-      });
-      for (const result of pushed.results || []) {
-        await localDb.markSynced(result.table, result);
+
+    if (pendingRecords.length) {
+      syncProgress = { done: 0, total: pendingRecords.length, failed: 0 };
+      emitSyncStateChange();
+
+      for (let index = 0; index < pendingRecords.length; index += SYNC_BATCH_SIZE) {
+        const batch = pendingRecords.slice(index, index + SYNC_BATCH_SIZE);
+        try {
+          const pushed = await api.syncPush({ deviceId, companyId, changes: buildBatchChanges(batch) });
+          console.log('[sync] push batch completed:', {
+            companyId,
+            batchStart: index,
+            batchSize: batch.length,
+            resultCount: Array.isArray(pushed.results) ? pushed.results.length : 0,
+            backend: pushed.backend || ''
+          });
+          for (const result of pushed.results || []) {
+            await localDb.markSynced(result.table, result);
+          }
+        } catch (error) {
+          syncProgress.failed += batch.length;
+          lastError = error.message || '同步失败';
+          console.error('[sync] push batch failed:', { batchStart: index, batchSize: batch.length, error });
+        } finally {
+          syncProgress.done += batch.length;
+          emitSyncStateChange();
+        }
       }
     }
 
@@ -85,13 +126,13 @@ export async function syncNow() {
       }
     }
     await localDb.setMeta(metaKey, pulled.serverTime || nowIso());
-    lastError = '';
+    if (syncProgress.failed === 0) lastError = '';
   } catch (error) {
     lastError = error.message || '同步失败';
     console.error('[sync] failed:', error);
   } finally {
     syncing = false;
-    window.dispatchEvent(new Event('sync-state-change'));
+    emitSyncStateChange();
   }
 
   return getSyncSnapshot();
@@ -107,7 +148,8 @@ export async function pullFromCloud({ full = false } = {}) {
     return getSyncSnapshot();
   }
   syncing = true;
-  window.dispatchEvent(new Event('sync-state-change'));
+  syncProgress = { done: 0, total: 0, failed: 0 };
+  emitSyncStateChange();
   try {
     const companyId = getCompanyId();
     const metaKey = `lastPullAt:${companyId}`;
@@ -131,7 +173,7 @@ export async function pullFromCloud({ full = false } = {}) {
     lastError = error.message || '从云端恢复失败';
   } finally {
     syncing = false;
-    window.dispatchEvent(new Event('sync-state-change'));
+    emitSyncStateChange();
   }
   return getSyncSnapshot();
 }
@@ -146,7 +188,8 @@ export async function resetLocalCacheAndPull() {
     return getSyncSnapshot();
   }
   syncing = true;
-  window.dispatchEvent(new Event('sync-state-change'));
+  syncProgress = { done: 0, total: 0, failed: 0 };
+  emitSyncStateChange();
   try {
     await localDb.clearLocalCacheForCurrentCompany();
     lastError = '';
@@ -154,8 +197,8 @@ export async function resetLocalCacheAndPull() {
     lastError = error.message || '清空本地缓存失败';
   } finally {
     syncing = false;
+    emitSyncStateChange();
   }
-  window.dispatchEvent(new Event('sync-state-change'));
   if (!lastError) return pullFromCloud({ full: true });
   return getSyncSnapshot();
 }

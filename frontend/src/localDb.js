@@ -396,16 +396,25 @@ function active(record) {
 }
 
 function pendingReviewInvoice(invoice = {}) {
-  return String(invoice.status || '').toUpperCase() === 'PENDING_REVIEW'
-    || invoice.duplicateStatus === 'possible'
+  const status = String(invoice.status || '').toUpperCase();
+  if (['CONFIRMED', 'APPROVED'].includes(status)) return false;
+  return status === 'PENDING_REVIEW'
+    || invoice.duplicateStatus === 'possible';
+}
+
+function abnormalInvoice(invoice = {}) {
+  const status = String(invoice.status || '').toUpperCase();
+  if (['CONFIRMED', 'APPROVED'].includes(status)) return false;
+  return status === 'ABNORMAL'
     || Boolean(invoice.recognitionWarnings)
     || Number(invoice.totalDifference || 0) > 0.05;
 }
 
 function approvedForStats(invoice = {}) {
-  if (!active(invoice) || ['merged', 'hidden'].includes(invoice.status)) return false;
-  if (String(invoice.status || '').toUpperCase() === 'APPROVED') return true;
-  return !pendingReviewInvoice(invoice);
+  if (!active(invoice) || ['merged', 'hidden', 'duplicate'].includes(String(invoice.status || '').toLowerCase())) return false;
+  if (['duplicate', 'confirmed'].includes(String(invoice.duplicateStatus || '').toLowerCase())) return false;
+  if (['APPROVED', 'CONFIRMED'].includes(String(invoice.status || '').toUpperCase())) return true;
+  return !pendingReviewInvoice(invoice) && !abnormalInvoice(invoice);
 }
 
 function invoiceIdSet(invoices = []) {
@@ -768,7 +777,67 @@ export const localDb = {
         invoiceItemId: ''
       }));
     if (corrections.length) await putMany('recognition_corrections', corrections);
+    await localDb.rebuildInvoicePriceHistory(updated.id);
     return localDb.getInvoice(invoiceId);
+  },
+
+  async confirmInvoice(invoiceId, status = 'CONFIRMED') {
+    const detail = await localDb.getInvoice(invoiceId);
+    if (!detail) throw new Error('Invoice not found');
+    const calculatedTotal = detail.items
+      .filter((item) => !Number(item.isDiscountLine || 0) && !Number(item.candidateOnly || 0))
+      .reduce((sum, item) => sum + Number(item.totalPrice || 0), 0);
+    const updated = syncFields({
+      ...detail.invoice,
+      status,
+      duplicateStatus: status === 'CONFIRMED' ? (detail.invoice.duplicateStatus === 'possible' ? 'none' : detail.invoice.duplicateStatus) : detail.invoice.duplicateStatus,
+      recognitionWarnings: status === 'CONFIRMED' ? '' : detail.invoice.recognitionWarnings,
+      calculatedTotal,
+      totalDifference: status === 'CONFIRMED' ? 0 : Math.abs(calculatedTotal - Number(detail.invoice.totalAmount || 0))
+    });
+    await put('invoices', updated);
+    await localDb.rebuildInvoicePriceHistory(updated.id);
+    return localDb.getInvoice(invoiceId);
+  },
+
+  async updateInvoiceDuplicateStatus(invoiceId, duplicateStatus, status = '') {
+    const detail = await localDb.getInvoice(invoiceId);
+    if (!detail) throw new Error('Invoice not found');
+    const updated = syncFields({
+      ...detail.invoice,
+      duplicateStatus,
+      status: status || detail.invoice.status || 'APPROVED'
+    });
+    await put('invoices', updated);
+    return localDb.getInvoice(invoiceId);
+  },
+
+  async rebuildInvoicePriceHistory(invoiceId) {
+    const detail = await localDb.getInvoice(invoiceId);
+    if (!detail) return;
+    const invoiceIds = idsFor(detail.invoice);
+    const itemIds = detail.items.flatMap(idsFor);
+    const existingRows = (await all('price_history')).filter((row) => itemIds.includes(row.invoiceItemId) || invoiceIds.includes(row.invoiceId));
+    if (existingRows.length) {
+      await putMany('price_history', existingRows.map((row) => syncFields({ ...row, deletedAt: nowIso() }, 'deleted')));
+    }
+    const rows = [];
+    for (const item of detail.items.filter((entry) => active(entry) && !Number(entry.isDiscountLine || 0) && !Number(entry.candidateOnly || 0))) {
+      const product = await upsertProductForItem(item);
+      rows.push(syncFields({
+        productId: product?.id || item.productId || '',
+        invoiceId: detail.invoice.id,
+        invoiceItemId: item.id,
+        supplierId: detail.invoice.supplierId || item.supplierId || '',
+        price: item.discountedEffectiveUnitCost || item.effectiveUnitCost || item.unitPrice,
+        quantity: item.actualQty || item.totalQty || item.quantity,
+        unit: item.unit || '',
+        invoiceDate: detail.invoice.invoiceDate || today(),
+        invoiceNo: detail.invoice.invoiceNo || '',
+        status: approvedForStats(detail.invoice) ? 'confirmed' : 'pending_review'
+      }));
+    }
+    if (rows.length) await putMany('price_history', rows);
   },
 
   async createInvoice(payload) {
@@ -877,13 +946,15 @@ export const localDb = {
       const product = await upsertProductForItem(item);
       await put('price_history', syncFields({
         productId: product?.id || '',
+        invoiceId: invoice.id,
         invoiceItemId: item.id,
         supplierId: supplier?.id || '',
         price: item.discountedEffectiveUnitCost || item.effectiveUnitCost || item.unitPrice,
         quantity: item.actualQty || item.totalQty || item.quantity,
         unit: item.unit,
         invoiceDate,
-        invoiceNo: invoice.invoiceNo || ''
+        invoiceNo: invoice.invoiceNo || '',
+        status: approvedForStats(invoice) ? 'confirmed' : 'pending_review'
       }));
     }
     for (const rawDiscount of discountItems) {
@@ -1082,6 +1153,12 @@ export const localDb = {
     }
     if (corrections.length) await putMany('recognition_corrections', corrections);
 
+    const savedItemIds = savedItems.flatMap(idsFor);
+    const existingPrices = (await all('price_history')).filter((row) => savedItemIds.includes(row.invoiceItemId));
+    if (existingPrices.length) {
+      await putMany('price_history', existingPrices.map((row) => syncFields({ ...row, deletedAt: nowIso() }, 'deleted')));
+    }
+
     for (const item of savedItems.filter((entry) => !Number(entry.isDiscountLine || 0) && !Number(entry.candidateOnly || 0))) {
       const product = await upsertProductForItem(item);
       await put('product_aliases', syncFields({
@@ -1107,7 +1184,9 @@ export const localDb = {
         quantity: item.actualQty || item.totalQty || item.quantity,
         unit: item.unit || '',
         invoiceDate: invoice.invoiceDate || today(),
-        invoiceNo: invoice.invoiceNo || ''
+        invoiceNo: invoice.invoiceNo || '',
+        invoiceId: invoice.id,
+        status: approvedForStats(invoice) ? 'confirmed' : 'pending_review'
       }));
     }
 
@@ -1132,8 +1211,11 @@ export const localDb = {
 
   async searchProducts(query) {
     const q = normalizeProductName(query);
-    if (!q) return [];
-    const approvedInvoiceIds = invoiceIdSet((await all('invoices')).filter(approvedForStats));
+    const allActiveInvoices = (await all('invoices')).filter(active);
+    const invoiceById = new Map(allActiveInvoices.flatMap((invoice) => idsFor(invoice).map((idValue) => [idValue, invoice])));
+    const approvedInvoiceIds = invoiceIdSet(allActiveInvoices.filter(approvedForStats));
+    const activeInvoiceIds = invoiceIdSet(allActiveInvoices);
+    const suppliers = await all('suppliers');
     const aliases = (await all('product_aliases')).filter(active);
     const aliasProductIds = new Set(aliases
       .filter((alias) => `${normalizeProductName(alias.aliasName || alias.rawName || alias.keyword || '')} ${normalizeProductName(alias.normalizedAlias || '')} ${normalizeProductName(alias.standardName || '')}`.includes(q))
@@ -1141,7 +1223,8 @@ export const localDb = {
       .filter(Boolean));
     const items = (await all('invoice_items')).filter((item) => {
       if (!active(item) || Number(item.isDiscountLine || 0) || Number(item.candidateOnly || 0)) return false;
-      if (!approvedInvoiceIds.has(item.invoiceId)) return false;
+      if (!activeInvoiceIds.has(item.invoiceId)) return false;
+      if (!q) return true;
       const haystack = `${normalizeProductName(item.rawName || item.productNameOriginal || '')} ${normalizeProductName(item.normalizedName || item.productNameNormalized || '')}`;
       return haystack.includes(q) || aliasProductIds.has(item.productId);
     });
@@ -1154,24 +1237,30 @@ export const localDb = {
     }
     return [...groups.entries()].map(([standardName, records]) => {
       const sorted = [...records].sort((a, b) => `${b.invoiceDate}${b.createdAt}`.localeCompare(`${a.invoiceDate}${a.createdAt}`));
-      const prices = records.map((record) => Number(record.discountedEffectiveUnitCost || record.effectiveUnitCost || record.unitPrice || 0));
+      const confirmedRecords = records.filter((record) => approvedInvoiceIds.has(record.invoiceId));
+      const priceRecords = confirmedRecords.length ? confirmedRecords : records;
+      const prices = priceRecords.map((record) => Number(record.discountedEffectiveUnitCost || record.effectiveUnitCost || record.unitPrice || 0)).filter((price) => price > 0);
+      const recentInvoice = invoiceById.get(sorted[0]?.invoiceId);
+      const recentSupplier = resolveByAnyId(suppliers, sorted[0]?.supplierId || recentInvoice?.supplierId);
       return {
         productId: records[0]?.productId || '',
         standardName,
         recentPrice: Number(sorted[0]?.discountedEffectiveUnitCost || sorted[0]?.effectiveUnitCost || sorted[0]?.unitPrice || 0),
-        minPrice: Math.min(...prices),
-        maxPrice: Math.max(...prices),
-        averagePrice: prices.reduce((sum, price) => sum + price, 0) / prices.length,
+        minPrice: prices.length ? Math.min(...prices) : 0,
+        maxPrice: prices.length ? Math.max(...prices) : 0,
+        averagePrice: prices.length ? prices.reduce((sum, price) => sum + price, 0) / prices.length : 0,
         recentPurchaseDate: sorted[0]?.invoiceDate || '',
-        recordCount: records.length
+        recentSupplierName: supplierDisplayName(recentSupplier),
+        recordCount: records.length,
+        pendingCount: records.length - confirmedRecords.length
       };
-    }).sort((a, b) => (b.recentPurchaseDate || '').localeCompare(a.recentPurchaseDate || ''));
+    }).sort((a, b) => (b.recentPurchaseDate || '').localeCompare(a.recentPurchaseDate || '')).slice(0, q ? 100 : 20);
   },
 
   async getProduct(name) {
     const suppliers = await all('suppliers');
-    const invoices = (await all('invoices')).filter(approvedForStats);
-    const approvedInvoiceIds = invoiceIdSet(invoices);
+    const invoices = (await all('invoices')).filter(active);
+    const activeInvoiceIds = invoiceIdSet(invoices);
     const q = normalizeProductName(name);
     const aliases = (await all('product_aliases')).filter(active);
     const aliasProductIds = new Set(aliases
@@ -1180,13 +1269,13 @@ export const localDb = {
       .filter(Boolean));
     return (await all('invoice_items')).filter((item) => {
       if (!active(item) || Number(item.isDiscountLine || 0) || Number(item.candidateOnly || 0)) return false;
-      if (!approvedInvoiceIds.has(item.invoiceId)) return false;
+      if (!activeInvoiceIds.has(item.invoiceId)) return false;
       const haystack = `${normalizeProductName(item.rawName || item.productNameOriginal || '')} ${normalizeProductName(item.normalizedName || item.productNameNormalized || '')}`;
       return haystack.includes(q) || item.productId === name || aliasProductIds.has(item.productId);
     }).map((item) => {
       const supplier = resolveByAnyId(suppliers, item.supplierId);
       const invoice = resolveByAnyId(invoices, item.invoiceId);
-      return { ...item, supplierName: supplierDisplayName(supplier), invoiceNo: invoice?.invoiceNo || '', invoiceImagePath: invoice?.imagePath || '', invoiceRecordId: invoice?.id || '' };
+      return { ...item, supplierName: supplierDisplayName(supplier), invoiceNo: invoice?.invoiceNo || '', invoiceImagePath: invoice?.imagePath || '', invoiceRecordId: invoice?.id || '', invoiceStatus: invoice?.status || '' };
     }).sort((a, b) => `${b.invoiceDate}${b.createdAt}`.localeCompare(`${a.invoiceDate}${a.createdAt}`));
   },
 
@@ -1229,10 +1318,10 @@ export const localDb = {
     const supplierQ = normalizeSupplierName(query);
     const suppliers = (await all('suppliers')).filter((supplier) => active(supplier) && supplier.status !== 'merged');
     const allInvoices = (await all('invoices')).filter(active);
-    const invoices = allInvoices.filter(approvedForStats);
-    const approvedInvoiceIds = invoiceIdSet(invoices);
-    const items = (await all('invoice_items')).filter((item) => active(item) && approvedInvoiceIds.has(item.invoiceId) && !Number(item.candidateOnly || 0) && !Number(item.isDiscountLine || 0));
-    const discounts = (await all('invoice_discounts')).filter((discount) => active(discount) && approvedInvoiceIds.has(discount.invoiceId));
+    const invoices = allInvoices.filter((invoice) => !['merged', 'hidden'].includes(invoice.status));
+    const invoiceIdsForStats = invoiceIdSet(invoices);
+    const items = (await all('invoice_items')).filter((item) => active(item) && invoiceIdsForStats.has(item.invoiceId) && !Number(item.candidateOnly || 0) && !Number(item.isDiscountLine || 0));
+    const discounts = (await all('invoice_discounts')).filter((discount) => active(discount) && invoiceIdsForStats.has(discount.invoiceId));
     return suppliers.map((supplier) => {
       const supplierIds = idsFor(supplier);
       const supplierInvoices = invoices.filter((invoice) => supplierIds.includes(invoice.supplierId));
@@ -1272,7 +1361,7 @@ export const localDb = {
         skuCount: skuSet.size,
         freeQtyTotal: supplierItems.reduce((sum, item) => sum + moneyNumber(item.freeQty), 0),
         discountTotal: supplierDiscounts.reduce((sum, discount) => sum + moneyNumber(discount.amount), 0),
-        abnormalInvoiceCount: allInvoices.filter((invoice) => supplierIds.includes(invoice.supplierId) && pendingReviewInvoice(invoice)).length,
+        abnormalInvoiceCount: allInvoices.filter((invoice) => supplierIds.includes(invoice.supplierId) && abnormalInvoice(invoice)).length,
         totalPurchaseQty: supplierItems.reduce((sum, item) => sum + moneyNumber(item.actualQty || item.totalQty || item.quantity), 0),
         searchText,
         supplierSearchText
@@ -1345,21 +1434,30 @@ export const localDb = {
     const suppliers = (await all('suppliers')).filter(active);
     const allInvoices = (await all('invoices')).filter(active);
     const invoices = allInvoices.filter(approvedForStats);
+    const pendingInvoices = allInvoices.filter(pendingReviewInvoice);
+    const abnormalInvoices = allInvoices.filter(abnormalInvoice);
     const approvedInvoiceIds = invoiceIdSet(invoices);
     const items = (await all('invoice_items')).filter((item) => active(item) && approvedInvoiceIds.has(item.invoiceId) && !Number(item.candidateOnly || 0) && !Number(item.isDiscountLine || 0));
     const discounts = (await all('invoice_discounts')).filter((discount) => active(discount) && approvedInvoiceIds.has(discount.invoiceId));
     const month = currentMonth();
     const monthInvoices = invoices.filter((invoice) => String(invoice.invoiceDate || invoice.createdAt || '').startsWith(month));
+    const monthPendingInvoices = pendingInvoices.filter((invoice) => String(invoice.invoiceDate || invoice.createdAt || '').startsWith(month));
     const monthSupplierIds = new Set(monthInvoices.map((invoice) => invoice.supplierId).filter(Boolean));
     const metrics = {
       totalPurchaseAmount: invoices.reduce((sum, invoice) => sum + moneyNumber(invoice.totalAmount), 0),
+      confirmedPurchaseAmount: invoices.reduce((sum, invoice) => sum + moneyNumber(invoice.totalAmount), 0),
+      pendingPurchaseAmount: pendingInvoices.reduce((sum, invoice) => sum + moneyNumber(invoice.totalAmount), 0),
+      abnormalInvoiceAmount: abnormalInvoices.reduce((sum, invoice) => sum + moneyNumber(invoice.totalAmount), 0),
       monthPurchaseAmount: monthInvoices.reduce((sum, invoice) => sum + moneyNumber(invoice.totalAmount), 0),
+      monthConfirmedAmount: monthInvoices.reduce((sum, invoice) => sum + moneyNumber(invoice.totalAmount), 0),
+      monthPendingAmount: monthPendingInvoices.reduce((sum, invoice) => sum + moneyNumber(invoice.totalAmount), 0),
       monthInvoiceCount: monthInvoices.length,
+      confirmedInvoiceCount: invoices.length,
       monthNewSupplierCount: suppliers.filter((supplier) => monthSupplierIds.has(supplier.id) || monthSupplierIds.has(supplier.serverId) || String(supplier.createdAt || '').startsWith(month)).length,
       giftValueTotal: items.reduce((sum, item) => sum + moneyNumber(item.freeQty) * moneyNumber(item.effectiveUnitCost || item.unitPrice), 0),
       discountTotal: discounts.reduce((sum, discount) => sum + moneyNumber(discount.amount), 0),
-      abnormalInvoiceCount: allInvoices.filter(pendingReviewInvoice).length,
-      pendingInvoiceCount: allInvoices.filter((invoice) => pendingReviewInvoice(invoice) || invoice.syncStatus === 'pending').length
+      abnormalInvoiceCount: abnormalInvoices.length,
+      pendingInvoiceCount: pendingInvoices.length
     };
     console.log('[dashboard] local IndexedDB stats query:', {
       companyId: getCurrentCompanyId(),
@@ -1374,7 +1472,9 @@ export const localDb = {
   async getPurchaseAnalytics() {
     const suppliers = (await all('suppliers')).filter(active);
     const supplierById = new Map(suppliers.flatMap((supplier) => idsFor(supplier).map((idValue) => [idValue, supplier])));
-    const invoices = (await all('invoices')).filter(approvedForStats);
+    const allInvoices = (await all('invoices')).filter(active);
+    const invoices = allInvoices.filter(approvedForStats);
+    const pendingOrAbnormalInvoices = allInvoices.filter((invoice) => pendingReviewInvoice(invoice) || abnormalInvoice(invoice));
     const approvedInvoiceIds = invoiceIdSet(invoices);
     const items = (await all('invoice_items')).filter((item) => active(item) && approvedInvoiceIds.has(item.invoiceId) && !Number(item.candidateOnly || 0) && !Number(item.isDiscountLine || 0));
     const supplierGroups = new Map();
@@ -1433,7 +1533,10 @@ export const localDb = {
       })).sort((a, b) => b.amount - a.amount),
       productRanking: [...productGroups.values()].sort((a, b) => b.amount - a.amount),
       monthly: [...monthGroups.values()].sort((a, b) => a.month.localeCompare(b.month)),
-      lowestPrices: [...lowestByProduct.values()].sort((a, b) => a.price - b.price)
+      lowestPrices: [...lowestByProduct.values()].sort((a, b) => a.price - b.price),
+      pendingOrAbnormalCount: pendingOrAbnormalInvoices.length,
+      pendingCount: allInvoices.filter(pendingReviewInvoice).length,
+      abnormalCount: allInvoices.filter(abnormalInvoice).length
     };
   },
 

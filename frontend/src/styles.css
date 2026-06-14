@@ -463,6 +463,25 @@ textarea {
   color: var(--danger);
 }
 
+.success-button {
+  background: #dcfce7;
+  color: #047857;
+}
+
+.primary-button.success-button {
+  background: #047857;
+  color: #fff;
+}
+
+button:disabled,
+.primary-button:disabled,
+.secondary-button:disabled,
+.danger-button:disabled,
+.icon-button:disabled {
+  cursor: not-allowed;
+  opacity: 0.66;
+}
+
 .text-danger {
   color: var(--danger);
 }
@@ -638,8 +657,37 @@ textarea {
   margin-top: 12px;
 }
 
+.sticky-dialog-actions {
+  position: sticky;
+  bottom: -16px;
+  z-index: 2;
+  padding: 12px 0 calc(4px + env(safe-area-inset-bottom));
+  background: var(--bg);
+  border-top: 1px solid var(--line);
+}
+
 .success-text {
   color: #047857;
+}
+
+.status-badge {
+  display: inline-flex;
+  width: fit-content;
+  max-width: 100%;
+  padding: 6px 10px;
+  border-radius: 999px;
+  font-weight: 700;
+  overflow-wrap: anywhere;
+}
+
+.status-badge.pending {
+  color: #92400e;
+  background: #fef3c7;
+}
+
+.status-badge.abnormal {
+  color: #991b1b;
+  background: #fee2e2;
 }
 
 .merge-candidate {
@@ -683,6 +731,16 @@ textarea {
   background: var(--card);
   border: 1px solid var(--line);
   border-radius: 8px;
+}
+
+.metric-link {
+  color: inherit;
+  text-decoration: none;
+}
+
+.metric-link:hover {
+  border-color: var(--primary);
+  box-shadow: 0 0 0 2px rgb(15 118 110 / 0.12);
 }
 
 .metric-card span {
@@ -761,6 +819,48 @@ textarea {
 .bottom-nav a.active {
   color: var(--primary);
   font-weight: 700;
+}
+
+.switch-field {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 10px 0;
+  color: var(--text);
+}
+
+.ios-switch {
+  position: relative;
+  width: 48px;
+  min-width: 48px;
+  height: 28px;
+  min-height: 28px;
+  padding: 0;
+  border: 0;
+  border-radius: 999px;
+  background: #cbd5e1;
+  transition: background 0.18s ease;
+}
+
+.ios-switch span {
+  position: absolute;
+  top: 3px;
+  left: 3px;
+  width: 22px;
+  height: 22px;
+  border-radius: 50%;
+  background: #fff;
+  box-shadow: 0 1px 3px rgb(15 23 42 / 0.24);
+  transition: transform 0.18s ease;
+}
+
+.ios-switch.on {
+  background: var(--primary);
+}
+
+.ios-switch.on span {
+  transform: translateX(20px);
 }
 
 @media (max-width: 640px) {
