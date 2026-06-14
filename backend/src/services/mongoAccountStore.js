@@ -3,6 +3,8 @@ import { MongoClient } from 'mongodb';
 let clientPromise = null;
 let activeMongoUri = '';
 let indexesReady = false;
+let connectionState = 'disconnected';
+let lastConnectionError = '';
 
 export function isMongoAuthConfigured() {
   return Boolean(getMongoUri());
@@ -13,7 +15,21 @@ function getMongoUri() {
 }
 
 function getMongoDbName() {
-  return process.env.MONGODB_DB || 'invoice_price_tracker';
+  if (process.env.MONGODB_DB) return process.env.MONGODB_DB;
+  try {
+    const pathname = new URL(getMongoUri()).pathname.replace(/^\//, '');
+    return pathname || 'invoice_price_tracker';
+  } catch {
+    return 'invoice_price_tracker';
+  }
+}
+
+function getMongoHost() {
+  try {
+    return new URL(getMongoUri()).host || '';
+  } catch {
+    return '';
+  }
 }
 
 function publicUser(user) {
@@ -40,17 +56,32 @@ async function getClient() {
   }
   if (!clientPromise || activeMongoUri !== mongoUri) {
     console.info('[mongo] connecting to MongoDB');
+    connectionState = 'connecting';
+    lastConnectionError = '';
     const client = new MongoClient(mongoUri, {
       connectTimeoutMS: 10000,
       serverSelectionTimeoutMS: 10000,
       socketTimeoutMS: 15000
     });
+    client.on?.('close', () => {
+      connectionState = 'disconnected';
+      console.warn('[mongo] disconnected');
+    });
+    client.on?.('error', (error) => {
+      connectionState = 'error';
+      lastConnectionError = error?.message || String(error);
+      console.error('[mongo] error:', error?.stack || error);
+    });
     clientPromise = client.connect()
       .then((connectedClient) => {
+        connectionState = 'connected';
+        lastConnectionError = '';
         console.info('[mongo] connected');
         return connectedClient;
       })
       .catch((error) => {
+        connectionState = 'error';
+        lastConnectionError = error?.message || String(error);
         console.error('[mongo] connection failed:', error?.stack || error);
         clientPromise = null;
         activeMongoUri = '';
@@ -61,6 +92,34 @@ async function getClient() {
     indexesReady = false;
   }
   return clientPromise;
+}
+
+export function getMongoConnectionSnapshot() {
+  return {
+    mongoConfigured: Boolean(getMongoUri()),
+    mongoConnected: connectionState === 'connected',
+    status: connectionState,
+    databaseName: getMongoDbName(),
+    host: getMongoHost(),
+    lastError: lastConnectionError
+  };
+}
+
+export async function getMongoDebugStatus() {
+  const snapshot = getMongoConnectionSnapshot();
+  if (!snapshot.mongoConfigured) return snapshot;
+  try {
+    const db = await getMongoDb();
+    await db.command({ ping: 1 });
+    connectionState = 'connected';
+    lastConnectionError = '';
+    return { ...getMongoConnectionSnapshot(), mongoConnected: true, status: 'connected' };
+  } catch (error) {
+    connectionState = 'error';
+    lastConnectionError = error?.message || String(error);
+    console.error('[mongo] debug ping failed:', error?.stack || error);
+    return { ...getMongoConnectionSnapshot(), mongoConnected: false, status: 'error' };
+  }
 }
 
 export async function getMongoDb() {
@@ -139,9 +198,45 @@ export async function findMongoUserByLogin(login) {
   });
 }
 
+export async function findMongoUserByEmail(email) {
+  const db = await getMongoDb();
+  return db.collection('users').findOne({ email: String(email || '').trim().toLowerCase() });
+}
+
 export async function findMongoUserById(userId) {
   const db = await getMongoDb();
   return db.collection('users').findOne({ id: String(userId || '') });
+}
+
+export async function updateMongoUserFromLegacy({ email, passwordHash, companyId, companyName, role = 'admin', name }) {
+  const db = await getMongoDb();
+  const now = new Date().toISOString();
+  const normalizedEmail = String(email || '').trim().toLowerCase();
+  const existing = await db.collection('users').findOne({ email: normalizedEmail });
+  if (!existing) return null;
+  const update = {
+    passwordHash,
+    companyId,
+    companyName: companyName || existing.companyName || '',
+    role: role || existing.role || 'admin',
+    name: name || existing.name || existing.username || '',
+    updatedAt: now
+  };
+  await db.collection('users').updateOne({ id: existing.id }, { $set: update });
+  await db.collection('companies').updateOne(
+    { id: companyId },
+    {
+      $setOnInsert: {
+        _id: companyId,
+        id: companyId,
+        name: companyName || '',
+        createdAt: now
+      },
+      $set: { updatedAt: now }
+    },
+    { upsert: true }
+  );
+  return { ...existing, ...update };
 }
 
 export async function searchMongoUsers(keyword, currentUserId) {

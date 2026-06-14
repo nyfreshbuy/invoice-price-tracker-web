@@ -58,6 +58,9 @@ import {
   expireMongoInvitation,
   findMongoCompanyById,
   findMongoInvitationByToken,
+  getMongoConnectionSnapshot,
+  getMongoDebugStatus,
+  findMongoUserByEmail,
   findMongoUserById,
   findMongoUserByLogin,
   isMongoAuthConfigured,
@@ -65,7 +68,8 @@ import {
   listReceivedConnections,
   listSentConnections,
   searchMongoUsers,
-  toPublicMongoUser
+  toPublicMongoUser,
+  updateMongoUserFromLegacy
 } from './services/mongoAccountStore.js';
 import { mongoSyncPull, mongoSyncPush, mongoSyncStatus } from './services/mongoSyncStore.js';
 
@@ -100,8 +104,10 @@ const AUTH_STORE = String(process.env.AUTH_STORE || process.env.AUTH_DB || '').t
 
 const hasMongoUri = Boolean(process.env.MONGODB_URI || process.env.MONGO_URL);
 const syncBackend = hasMongoUri ? 'MongoDB' : (usingPostgres ? 'PostgreSQL' : 'SQLite');
+console.log('Mongo URI configured:', !!process.env.MONGODB_URI);
 console.log(`[database] mode: ${syncBackend}`);
 console.log(`[sync] enabled (${syncBackend})`);
+console.log('[mongo] startup status:', getMongoConnectionSnapshot());
 
 function useMongoAuth() {
   if (!isMongoAuthConfigured()) return false;
@@ -198,7 +204,15 @@ async function hashPasswordAsync(password, salt = crypto.randomBytes(16).toStrin
 }
 
 async function verifyPasswordAsync(password, stored) {
-  const parts = String(stored || '').split(':');
+  const storedText = String(stored || '');
+  if (storedText && !storedText.includes(':')) {
+    const passwordBuffer = Buffer.from(String(password));
+    const storedBuffer = Buffer.from(storedText);
+    return passwordBuffer.length === storedBuffer.length
+      ? crypto.timingSafeEqual(passwordBuffer, storedBuffer)
+      : false;
+  }
+  const parts = storedText.split(':');
   if (parts[0] === 'v2') {
     const [, iterationText, salt, expectedHash] = parts;
     const iterations = Number(iterationText || 0);
@@ -336,7 +350,7 @@ function describeAuthRegisterError(error) {
   const message = error?.message || String(error);
   if (/timeout/i.test(message)) return `Registration timed out: ${message}`;
   if (/ssl|tls|alert internal error|MongoServerSelectionError/i.test(message)) {
-    return 'Database connection failed: MongoDB TLS/network error. Please check MONGODB_URI, MongoDB network access list, and TLS settings.';
+    return `Database connection failed: MongoDB TLS/network error: ${message}. Please check MONGODB_URI, MongoDB network access list, and TLS settings.`;
   }
   if (/authentication failed|auth failed|bad auth/i.test(message)) {
     return 'Database authentication failed: please check MongoDB username, password, and permissions.';
@@ -345,6 +359,62 @@ function describeAuthRegisterError(error) {
     return `Database connection failed: ${message}`;
   }
   return message || 'Registration failed. Please try again later.';
+}
+
+async function findSqlUserByEmail(email) {
+  const normalizedEmail = String(email || '').trim().toLowerCase();
+  if (!normalizedEmail) return null;
+  return queryGet(`SELECT * FROM ${quoteTable('users')} WHERE LOWER(${quoteIdentifier('email')}) = ? LIMIT 1`, [normalizedEmail]);
+}
+
+async function findSqlUserByLogin(login) {
+  const normalizedLogin = String(login || '').trim().toLowerCase();
+  if (!normalizedLogin) return null;
+  return queryGet(`
+    SELECT * FROM ${quoteTable('users')}
+    WHERE LOWER(${quoteIdentifier('email')}) = ?
+       OR LOWER(COALESCE(${quoteIdentifier('name')}, '')) = ?
+    LIMIT 1
+  `, [normalizedLogin, normalizedLogin]);
+}
+
+async function findSqlUserByUsername(username) {
+  const normalizedUsername = String(username || '').trim().toLowerCase();
+  if (!normalizedUsername) return null;
+  return queryGet(`
+    SELECT * FROM ${quoteTable('users')}
+    WHERE LOWER(COALESCE(${quoteIdentifier('name')}, '')) = ?
+    LIMIT 1
+  `, [normalizedUsername]);
+}
+
+async function sqlCompanyForUser(user) {
+  if (!user?.companyId) return { id: '', name: '' };
+  return queryGet(`SELECT * FROM ${quoteTable('companies')} WHERE ${quoteIdentifier('id')} = ? LIMIT 1`, [user.companyId])
+    || { id: user.companyId, name: user.companyName || '' };
+}
+
+async function createMongoUserFromSqlUser(sqlUser) {
+  const company = await sqlCompanyForUser(sqlUser);
+  const baseUsername = String(sqlUser.name || sqlUser.email?.split('@')[0] || `user-${sqlUser.id}`).trim();
+  for (let index = 0; index < 5; index += 1) {
+    const username = index === 0 ? baseUsername : `${baseUsername}-${String(sqlUser.id || '').slice(0, 6) || index}`;
+    try {
+      return await createMongoUser({
+        id: sqlUser.id,
+        username,
+        email: sqlUser.email,
+        passwordHash: sqlUser.passwordHash,
+        role: sqlUser.role || 'admin',
+        companyName: company.name || '',
+        companyId: sqlUser.companyId,
+        name: sqlUser.name || username
+      });
+    } catch (error) {
+      if (error?.code !== 11000 || index === 4) throw error;
+    }
+  }
+  throw new Error('Unable to migrate legacy user');
 }
 
 function prepareRecord(table, record, deviceId, companyId) {
@@ -2199,8 +2269,20 @@ async function resumeRecognitionTasks() {
 }
 
 app.get('/api/health', (req, res) => {
-  res.json({ ok: true, database: usingPostgres ? 'postgres' : 'sqlite', time: nowIso() });
+  res.json({ ok: true, database: syncBackend.toLowerCase(), time: nowIso() });
 });
+
+app.get('/api/debug/db', asyncHandler(async (req, res) => {
+  const mongo = await getMongoDebugStatus();
+  res.json({
+    mongoConfigured: mongo.mongoConfigured,
+    mongoConnected: mongo.mongoConnected,
+    status: mongo.status,
+    databaseName: mongo.databaseName,
+    host: mongo.host,
+    lastError: mongo.lastError || ''
+  });
+}));
 
 app.get('/ping', (req, res) => {
   res.json({ ok: true, service: 'InvoicePriceTracker API', host: '0.0.0.0', port: PORT, database: usingPostgres ? 'postgres' : 'sqlite', time: nowIso() });
@@ -2226,6 +2308,18 @@ app.post('/api/auth/register', asyncHandler(async (req, res) => {
     if (!username) return res.status(400).json({ error: '用户名不能为空' });
     try {
       console.info(`[auth/register:${requestId}] mode Mongo`);
+      const [existingMongoEmail, existingMongoUsername, existingSqlEmail, existingSqlUsername] = await Promise.all([
+        findMongoUserByEmail(email),
+        findMongoUserByLogin(username),
+        findSqlUserByEmail(email),
+        findSqlUserByUsername(username)
+      ]);
+      if (existingMongoEmail || existingSqlEmail) {
+        return res.status(409).json({ error: '邮箱已注册，请直接登录' });
+      }
+      if (existingMongoUsername || existingSqlUsername) {
+        return res.status(409).json({ error: '用户名已注册，请换一个用户名' });
+      }
       console.info(`[auth/register:${requestId}] creating Mongo user`);
       const user = await withTimeout(createMongoUser({
         id: id(),
@@ -2248,13 +2342,15 @@ app.post('/api/auth/register', asyncHandler(async (req, res) => {
   }
 
   console.info(`[auth/register:${requestId}] mode SQLite`);
-  const existing = await queryGet(`SELECT * FROM ${quoteTable('users')} WHERE LOWER(${quoteIdentifier('email')}) = ? LIMIT 1`, [email]);
+  const existing = await findSqlUserByEmail(email);
   if (existing) return res.status(409).json({ error: '这个邮箱已经注册' });
+  const existingUsername = username ? await findSqlUserByUsername(username) : null;
+  if (existingUsername) return res.status(409).json({ error: '用户名已注册，请换一个用户名' });
 
   const now = nowIso();
   const company = { id: id(), name: companyName, createdAt: now, updatedAt: now };
   const passwordHash = await withTimeout(hashPasswordAsync(password), 15000, 'Password hash');
-  const user = { id: id(), companyId: company.id, email, passwordHash, name, role: 'admin', createdAt: now, updatedAt: now };
+  const user = { id: id(), companyId: company.id, email, passwordHash, name: name || username, role: 'admin', createdAt: now, updatedAt: now };
   await withTransaction(async (client) => {
     await upsertRecord('companies', company, client);
     await upsertRecord('users', user, client);
@@ -2269,17 +2365,38 @@ app.post('/api/auth/login', asyncHandler(async (req, res) => {
   const password = String(req.body.password || '');
   if (useMongoAuth()) {
     const mongoUser = await findMongoUserByLogin(login);
-    if (!mongoUser || !(await verifyPasswordAsync(password, mongoUser.passwordHash))) {
+    if (mongoUser && (await verifyPasswordAsync(password, mongoUser.passwordHash))) {
+      res.json(authResponse({ ...mongoUser, authStore: 'mongo' }, { id: mongoUser.companyId, name: mongoUser.companyName || '' }));
+      return;
+    }
+
+    const legacySqlUser = await findSqlUserByLogin(login);
+    if (legacySqlUser && (await verifyPasswordAsync(password, legacySqlUser.passwordHash))) {
+      const company = await sqlCompanyForUser(legacySqlUser);
+      const migratedUser = mongoUser?.email === legacySqlUser.email
+        ? await updateMongoUserFromLegacy({
+            email: legacySqlUser.email,
+            passwordHash: legacySqlUser.passwordHash,
+            companyId: legacySqlUser.companyId,
+            companyName: company.name || '',
+            role: legacySqlUser.role || mongoUser.role || 'admin',
+            name: legacySqlUser.name || mongoUser.name || mongoUser.username || ''
+          })
+        : await createMongoUserFromSqlUser(legacySqlUser);
+      res.json(authResponse({ ...migratedUser, authStore: 'mongo' }, { id: migratedUser.companyId, name: migratedUser.companyName || company.name || '' }));
+      return;
+    }
+
+    if (!mongoUser) {
       return res.status(401).json({ error: '邮箱/用户名或密码不正确' });
     }
-    res.json(authResponse({ ...mongoUser, authStore: 'mongo' }, { id: mongoUser.companyId, name: mongoUser.companyName || '' }));
-    return;
+    return res.status(401).json({ error: '邮箱/用户名或密码不正确' });
   }
-  const user = await queryGet(`SELECT * FROM ${quoteTable('users')} WHERE LOWER(${quoteIdentifier('email')}) = ? LIMIT 1`, [email]);
+  const user = await findSqlUserByLogin(email);
   if (!user || !(await verifyPasswordAsync(password, user.passwordHash))) {
     return res.status(401).json({ error: '邮箱或密码不正确' });
   }
-  const company = await queryGet(`SELECT * FROM ${quoteTable('companies')} WHERE ${quoteIdentifier('id')} = ? LIMIT 1`, [user.companyId]);
+  const company = await sqlCompanyForUser(user);
   res.json(authResponse(user, company || { id: user.companyId, name: '' }));
 }));
 
@@ -3541,6 +3658,13 @@ if (fs.existsSync(frontendDist)) {
 }
 
 export function startServer(port = PORT) {
+  if (hasMongoUri) {
+    setTimeout(() => {
+      getMongoDebugStatus()
+        .then((status) => console.log('[mongo] startup connection check:', status))
+        .catch((error) => console.error('[mongo] startup connection check failed:', error?.stack || error));
+    }, 100);
+  }
   setTimeout(() => {
     resumeRecognitionTasks().catch((error) => console.error('[recognition-task] resume failed:', error));
   }, 500);
