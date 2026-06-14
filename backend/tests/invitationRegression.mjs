@@ -77,6 +77,7 @@ async function json(method, url, body, options) {
 const suffix = `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
 const adminEmail = `invite-admin-${suffix}@example.com`;
 const memberEmail = `invite-member-${suffix}@example.com`;
+const existingEmail = `invite-existing-${suffix}@example.com`;
 const password = 'invite-pass';
 
 const register = await json('POST', '/api/auth/register', {
@@ -112,9 +113,31 @@ assert.equal(accepted.success, true);
 assert.equal(accepted.user.email, memberEmail);
 assert.equal(accepted.user.companyId, session.user.companyId);
 
+await json('POST', '/api/auth/register', {
+  username: `invite-existing-${suffix}`,
+  email: existingEmail,
+  password,
+  companyName: `Existing Invite Regression ${suffix}`
+}, { auth: false });
+
+const existingInvite = await json('POST', '/api/invitations', { email: existingEmail, role: 'user' });
+const missingPassword = await invoke('POST', '/api/invitations/accept', {
+  token: existingInvite.invitation.token
+}, { auth: false });
+assert.equal(missingPassword.status, 401);
+
+const acceptedExisting = await json('POST', '/api/invitations/accept', {
+  token: existingInvite.invitation.token,
+  password
+}, { auth: false });
+assert.equal(acceptedExisting.success, true);
+assert.equal(acceptedExisting.user.email, existingEmail);
+assert.equal(acceptedExisting.user.companyId, session.user.companyId);
+
 console.log(JSON.stringify({
   ok: true,
   invitationStatus: preview.invitation.status,
   acceptedUser: accepted.user.email,
+  acceptedExistingUser: acceptedExisting.user.email,
   companyId: accepted.user.companyId
 }, null, 2));

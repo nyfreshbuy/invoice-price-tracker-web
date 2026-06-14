@@ -280,6 +280,24 @@ Environment variable:
 VITE_API_BASE_URL=https://your-backend-name.onrender.com
 ```
 
+Single-page app routes such as `/invite/:token` require a Render rewrite fallback.
+If you use the committed `render.yaml`, this is already configured:
+
+```yaml
+routes:
+  - type: rewrite
+    source: /*
+    destination: /index.html
+```
+
+If you manage the existing Static Site manually in the Render Dashboard, add:
+
+```text
+Source: /*
+Destination: /index.html
+Action: Rewrite
+```
+
 After the frontend deploys, update backend:
 
 ```text

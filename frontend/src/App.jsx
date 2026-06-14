@@ -315,7 +315,7 @@ function InvitationAcceptPage({ onAuthenticated }) {
             <label className="field"><span>邮箱</span><input value={invitation.email || ''} readOnly /></label>
             <label className="field"><span>用户名（新账号需要）</span><input value={form.username} onChange={(event) => setForm({ ...form, username: event.target.value })} /></label>
             <label className="field"><span>密码（新账号需要）</span><input type="password" value={form.password} onChange={(event) => setForm({ ...form, password: event.target.value })} /></label>
-            <p className="hint">如果该邮箱已经注册，系统会直接把该账号加入被邀请公司；如果没有注册，请填写用户名和密码。</p>
+            <p className="hint">如果该邮箱已经注册，请先登录该账号或输入正确密码后接受邀请；如果没有注册，请填写用户名和密码创建账号。</p>
           </>
         ) : (
           <p>正在读取邀请...</p>
@@ -2313,7 +2313,7 @@ function InviteMembersPanel() {
         </select>
         <button className="primary-button" disabled={loading}>{loading ? '创建中...' : '邀请成员'}</button>
       </form>
-      <p className="hint">邀请 7 天内有效。已存在账号会直接加入当前公司；未注册邮箱打开链接后可创建账号并加入。</p>
+      <p className="hint">邀请 7 天内有效。已存在账号需要登录或输入正确密码后加入当前公司；未注册邮箱打开链接后可创建账号并加入。</p>
       {message && <p className={message.includes('失败') ? 'error' : 'success-text'}>{message}</p>}
       <div className="card-list">
         {invitations.map((invitation) => (

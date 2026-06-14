@@ -189,6 +189,12 @@ function verifyToken(token) {
   return payload;
 }
 
+function optionalAuthPayload(req) {
+  const header = req.headers.authorization || '';
+  const token = header.startsWith('Bearer ') ? header.slice(7) : '';
+  return verifyToken(token);
+}
+
 const pbkdf2Async = promisify(crypto.pbkdf2);
 const LEGACY_PASSWORD_ITERATIONS = 120000;
 const PASSWORD_HASH_ITERATIONS = Number(process.env.PASSWORD_HASH_ITERATIONS || 60000);
@@ -2544,7 +2550,15 @@ app.post('/api/invitations/accept', asyncHandler(async (req, res) => {
     let existingUser = await findMongoUserByLogin(invitation.email);
     let passwordHash = existingUser?.passwordHash || '';
     const password = String(req.body.password || '');
-    if (!existingUser) {
+    if (existingUser) {
+      const payload = optionalAuthPayload(req);
+      const authenticatedSameUser = payload?.userId === existingUser.id && String(payload.email || '').toLowerCase() === String(existingUser.email || '').toLowerCase();
+      const passwordMatches = password && await verifyPasswordAsync(password, existingUser.passwordHash);
+      if (!authenticatedSameUser && !passwordMatches) {
+        res.status(401).json({ error: '该邮箱已注册，请先登录该账号或输入正确密码后接受邀请。' });
+        return;
+      }
+    } else {
       if (password.length < 6) {
         res.status(400).json({ error: 'Password must be at least 6 characters for a new account.' });
         return;
@@ -2580,6 +2594,14 @@ app.post('/api/invitations/accept', asyncHandler(async (req, res) => {
     };
     await upsertRecord('users', user);
   } else {
+    const password = String(req.body.password || '');
+    const payload = optionalAuthPayload(req);
+    const authenticatedSameUser = payload?.userId === user.id && String(payload.email || '').toLowerCase() === String(user.email || '').toLowerCase();
+    const passwordMatches = password && await verifyPasswordAsync(password, user.passwordHash);
+    if (!authenticatedSameUser && !passwordMatches) {
+      res.status(401).json({ error: '该邮箱已注册，请先登录该账号或输入正确密码后接受邀请。' });
+      return;
+    }
     await run(`
       UPDATE ${quoteTable('users')}
       SET ${quoteIdentifier('companyId')} = ?,
