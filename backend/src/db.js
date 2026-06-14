@@ -70,8 +70,8 @@ export const tableColumns = {
   price_anomalies: ['id', 'companyId', 'localId', 'serverId', 'syncStatus', 'version', 'supplierId', 'productId', 'invoiceId', 'invoiceItemId', 'unitPrice', 'averagePrice', 'deviationPercent', 'invoiceDate', 'invoiceNo', 'status', 'message', 'createdAt', 'updatedAt', 'deletedAt', 'deviceId'],
   invoice_recognition_tasks: ['id', 'companyId', 'batchId', 'supplierHint', 'status', 'imagePath', 'filePath', 'originalName', 'mimeType', 'fileSize', 'source', 'recognitionSource', 'ocrLanguage', 'usedTemplate', 'usedAI', 'invoiceId', 'resultJson', 'error', 'retryCount', 'createdAt', 'updatedAt', 'startedAt', 'completedAt', 'deviceId'],
   invoice_templates: ['id', 'companyId', 'supplierName', 'invoiceLayoutType', 'supplierKeywords', 'tableHeaderKeywords', 'columns', 'totalKeywords', 'invoiceNoKeywords', 'dateKeywords', 'tableRegion', 'handwrittenRegions', 'sampleImageHash', 'successCount', 'failCount', 'lastUsedAt', 'accuracyScore', 'isActive', 'createdAt', 'updatedAt'],
-  companies: ['id', 'name', 'createdAt', 'updatedAt'],
-  users: ['id', 'companyId', 'email', 'passwordHash', 'name', 'role', 'createdAt', 'updatedAt'],
+  companies: ['id', 'name', 'maxAdminUsers', 'maxSalesUsers', 'createdAt', 'updatedAt'],
+  users: ['id', 'companyId', 'username', 'email', 'passwordHash', 'name', 'role', 'status', 'phone', 'note', 'lastLoginAt', 'createdAt', 'updatedAt'],
   company_invitations: ['id', 'company_id', 'email', 'role', 'token', 'status', 'created_by', 'created_at', 'accepted_at', 'expires_at']
 };
 

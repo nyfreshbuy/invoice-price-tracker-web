@@ -39,6 +39,10 @@ function publicUser(user) {
     username: user.username || '',
     email: user.email || '',
     role: user.role || 'user',
+    status: user.status || 'active',
+    phone: user.phone || '',
+    note: user.note || '',
+    lastLoginAt: user.lastLoginAt || '',
     companyName: user.companyName || '',
     companyId: user.companyId || '',
     name: user.name || user.username || ''
@@ -129,6 +133,8 @@ export async function getMongoDb() {
     console.info('[mongo] ensuring indexes');
     await Promise.all([
       db.collection('users').createIndex({ email: 1 }, { unique: true }),
+      db.collection('users').createIndex({ companyId: 1, email: 1 }),
+      db.collection('users').createIndex({ companyId: 1, status: 1 }),
       db.collection('users').createIndex({ username: 1 }, { unique: true }),
       db.collection('users').createIndex({ companyName: 'text', username: 'text', email: 'text' }),
       db.collection('account_connections').createIndex({ requesterUserId: 1, targetUserId: 1 }),
@@ -144,7 +150,7 @@ export async function getMongoDb() {
   return db;
 }
 
-export async function createMongoUser({ id, username, email, passwordHash, role = 'user', companyName, companyId, name }) {
+export async function createMongoUser({ id, username, email, passwordHash, role = 'sales', status = 'active', companyName, companyId, name, phone = '', note = '' }) {
   console.info('[mongo] create user start', { email, username, companyName });
   const db = await getMongoDb();
   const now = new Date().toISOString();
@@ -155,6 +161,10 @@ export async function createMongoUser({ id, username, email, passwordHash, role 
     email: String(email || '').trim().toLowerCase(),
     passwordHash,
     role,
+    status,
+    phone: String(phone || '').trim(),
+    note: String(note || '').trim(),
+    lastLoginAt: '',
     companyName: String(companyName || '').trim(),
     companyId: companyId || id,
     name: String(name || username || '').trim(),
@@ -170,6 +180,8 @@ export async function createMongoUser({ id, username, email, passwordHash, role 
         _id: user.companyId,
         id: user.companyId,
         name: user.companyName || companyName || '',
+        maxAdminUsers: 99,
+        maxSalesUsers: 999,
         createdAt: now
       },
       $set: { updatedAt: now }

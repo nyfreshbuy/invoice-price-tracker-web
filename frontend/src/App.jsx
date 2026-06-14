@@ -253,7 +253,7 @@ function AuthPageFixed({ onAuthenticated }) {
     <div className="auth-shell">
       <form className="auth-card" onSubmit={submit}>
         <h1>InvoicePriceTracker</h1>
-        <p>云端储存、离线可用、自动同步。</p>
+        <p>使用邮箱 + 密码登录，云端储存、离线可用、自动同步。</p>
         <div className="segmented">
           <button type="button" className={mode === 'login' ? 'active' : ''} onClick={() => setMode('login')}>登录</button>
           <button type="button" className={mode === 'register' ? 'active' : ''} onClick={() => setMode('register')}>注册账号</button>
@@ -264,7 +264,7 @@ function AuthPageFixed({ onAuthenticated }) {
             <label className="field"><span>用户名</span><input autoComplete="username" value={form.username} onChange={(event) => setForm({ ...form, username: event.target.value })} /></label>
           </>
         )}
-        <label className="field"><span>{mode === 'login' ? '邮箱/用户名' : '邮箱'}</span><input type={mode === 'login' ? 'text' : 'email'} autoComplete={mode === 'login' ? 'username' : 'email'} value={form.email} onChange={(event) => setForm({ ...form, email: event.target.value })} /></label>
+        <label className="field"><span>邮箱</span><input type="email" autoComplete="email" value={form.email} onChange={(event) => setForm({ ...form, email: event.target.value })} /></label>
         <label className="field"><span>密码</span><input type="password" autoComplete={mode === 'login' ? 'current-password' : 'new-password'} value={form.password} onChange={(event) => setForm({ ...form, password: event.target.value })} /></label>
         {mode === 'register' && <label className="field"><span>确认密码</span><input type="password" autoComplete="new-password" value={form.confirmPassword} onChange={(event) => setForm({ ...form, confirmPassword: event.target.value })} /></label>}
         {message && <p className="error">{message}</p>}
@@ -1299,7 +1299,7 @@ function InvoiceDetailPage() {
 function HomeDashboardPage() {
   const [dashboard, setDashboard] = useState(null);
   const session = getAuthSession();
-  const isAdmin = (session?.user?.role || 'admin') === 'admin';
+  const isAdmin = isAdminRole(session?.user?.role || '');
   useLocalReload(() => localDb.getDashboardMetrics().then(setDashboard));
 
   return (
@@ -1327,7 +1327,7 @@ function HomeDashboardPage() {
         <ActionLink to="/invoices/batch" icon={<Upload />} title="批量导入发票" subtitle="多张图片队列识别" />
         <ActionLink to="/recognition-tasks" icon={<RefreshCw />} title="识别记录/任务列表" subtitle="查看后台 AI 识别状态和历史结果" />
         <ActionLink to="/suppliers" icon={<Building2 />} title="供应商管理" subtitle="维护供应商和模板" />
-        {isAdmin && <ActionLink to="/settings" icon={<UserPlus />} title="邀请成员" subtitle="生成邀请链接，让成员加入当前公司" />}
+        {isAdmin && <ActionLink to="/settings" icon={<UserPlus />} title="成员管理" subtitle="管理员直接创建、停用和重置成员账号" />}
         <ActionLink to="/settings" icon={<Settings />} title="设置/导出" subtitle="查看本地统计、导出云端 CSV/Excel" />
       </Section>
     </Page>
@@ -2261,75 +2261,157 @@ function connectionStatusLabel(status) {
   return '待处理';
 }
 
-function InviteMembersPanel() {
-  const [email, setEmail] = useState('');
-  const [role, setRole] = useState('user');
-  const [invitations, setInvitations] = useState([]);
+function MemberManagementPanel() {
+  const [members, setMembers] = useState([]);
+  const [limits, setLimits] = useState({});
+  const [editingMember, setEditingMember] = useState(null);
+  const [resetMember, setResetMember] = useState(null);
   const [message, setMessage] = useState('');
-  const [loading, setLoading] = useState(false);
+  const session = getAuthSession();
 
-  async function loadInvitations() {
-    const data = await api.getInvitations();
-    setInvitations(data.invitations || []);
+  async function loadMembers() {
+    const data = await api.getMembers();
+    setMembers(data.members || []);
+    setLimits(data.limits || {});
   }
 
   useEffect(() => {
-    loadInvitations().catch((error) => setMessage(error.message || '读取邀请记录失败'));
+    loadMembers().catch((error) => setMessage(error.message || '读取成员失败'));
   }, []);
 
-  async function createInvitation(event) {
-    event.preventDefault();
-    setLoading(true);
-    setMessage('');
+  async function saveMember(form) {
     try {
-      const data = await api.createInvitation({ email, role });
-      setEmail('');
-      setRole('user');
-      setMessage(`邀请已创建：${data.invitation?.inviteLink || ''}`);
-      await loadInvitations();
+      if (form.id) await api.updateMember(form.id, form);
+      else await api.createMember(form);
+      setEditingMember(null);
+      setMessage('成员已保存');
+      await loadMembers();
     } catch (error) {
-      setMessage(error.message || '创建邀请失败');
-    } finally {
-      setLoading(false);
+      setMessage(error.message || '保存成员失败');
     }
   }
 
-  async function copyLink(link) {
+  async function resetPassword(member, password) {
     try {
-      await navigator.clipboard.writeText(link);
-      setMessage('邀请链接已复制');
-    } catch {
-      setMessage(link);
+      await api.resetMemberPassword(member.id, password);
+      setResetMember(null);
+      setMessage('密码已重置');
+    } catch (error) {
+      setMessage(error.message || '重置密码失败');
+    }
+  }
+
+  async function toggleStatus(member) {
+    try {
+      if (member.status === 'disabled') await api.enableMember(member.id);
+      else await api.disableMember(member.id);
+      await loadMembers();
+    } catch (error) {
+      setMessage(error.message || '状态修改失败');
+    }
+  }
+
+  async function deleteMember(member) {
+    if (!confirm(`确认删除或停用成员 ${member.email}？`)) return;
+    try {
+      await api.deleteMember(member.id);
+      setMessage('成员已删除');
+      await loadMembers();
+    } catch (error) {
+      setMessage(error.message || '删除成员失败');
     }
   }
 
   return (
-    <Section title="邀请成员">
-      <form className="toolbar" onSubmit={createInvitation}>
-        <input type="email" placeholder="成员邮箱" value={email} onChange={(event) => setEmail(event.target.value)} />
-        <select value={role} onChange={(event) => setRole(event.target.value)}>
-          <option value="user">普通成员</option>
-          <option value="admin">管理员</option>
-        </select>
-        <button className="primary-button" disabled={loading}>{loading ? '创建中...' : '邀请成员'}</button>
-      </form>
-      <p className="hint">邀请 7 天内有效。已存在账号需要登录或输入正确密码后加入当前公司；未注册邮箱打开链接后可创建账号并加入。</p>
-      {message && <p className={message.includes('失败') ? 'error' : 'success-text'}>{message}</p>}
-      <div className="card-list">
-        {invitations.map((invitation) => (
-          <div className="row-card" key={invitation.id}>
-            <div>
-              <h3>{invitation.email}</h3>
-              <p>{invitation.role === 'admin' ? '管理员' : '普通成员'} · {invitation.status} · {invitation.created_at ? new Date(invitation.created_at).toLocaleString() : ''}</p>
-              <p className="long-text">{invitation.inviteLink}</p>
-            </div>
-            <button type="button" onClick={() => copyLink(invitation.inviteLink)}>复制链接</button>
-          </div>
-        ))}
-        {invitations.length === 0 && <EmptyState text="暂无邀请记录" />}
+    <Section title="成员管理">
+      <div className="row-actions">
+        <button className="primary-button" type="button" onClick={() => setEditingMember({ role: 'sales', status: 'active' })}>新增成员</button>
       </div>
+      <p className="hint">管理员直接创建成员账号，把邮箱和初始密码发给成员。管理员上限 {limits.maxAdminUsers ?? '-'}，销售员上限 {limits.maxSalesUsers ?? '-'}。</p>
+      {message && <p className={message.includes('失败') || message.includes('不能') ? 'error' : 'success-text'}>{message}</p>}
+      <div className="card-list">
+        {members.map((member) => {
+          const isSelf = member.id === session?.user?.id;
+          return (
+            <div className="row-card" key={member.id}>
+              <div>
+                <h3>{member.name || member.email}</h3>
+                <p>{member.email} · {memberRoleLabel(member.role)} · {memberStatusLabel(member.status)}</p>
+                <p>最后登录：{member.lastLoginAt ? new Date(member.lastLoginAt).toLocaleString() : '-'} · 创建：{member.createdAt ? new Date(member.createdAt).toLocaleString() : '-'}</p>
+              </div>
+              <div className="row-actions">
+                <button type="button" onClick={() => setEditingMember(member)}>编辑</button>
+                <button type="button" onClick={() => setResetMember(member)}>重置密码</button>
+                <button type="button" disabled={isSelf || member.role === 'super_admin'} onClick={() => toggleStatus(member)}>{member.status === 'disabled' ? '启用' : '禁用'}</button>
+                <button type="button" className="text-danger" disabled={isSelf || member.role === 'super_admin'} onClick={() => deleteMember(member)}>删除</button>
+              </div>
+            </div>
+          );
+        })}
+        {members.length === 0 && <EmptyState text="暂无成员" />}
+      </div>
+      {editingMember && (
+        <MemberDialog
+          member={editingMember}
+          onClose={() => setEditingMember(null)}
+          onSave={saveMember}
+        />
+      )}
+      {resetMember && (
+        <ResetPasswordDialog
+          member={resetMember}
+          onClose={() => setResetMember(null)}
+          onSave={(password) => resetPassword(resetMember, password)}
+        />
+      )}
     </Section>
   );
+}
+
+function MemberDialog({ member, onClose, onSave }) {
+  const isSuperAdmin = member.role === 'super_admin';
+  const [form, setForm] = useState({
+    id: member.id || '',
+    name: member.name || '',
+    email: member.email || '',
+    password: '',
+    role: isSuperAdmin ? 'super_admin' : (member.role || 'sales'),
+    status: member.status || 'active',
+    phone: member.phone || '',
+    note: member.note || ''
+  });
+  return (
+    <Dialog title={form.id ? '编辑成员' : '新增成员'} onClose={onClose}>
+      <label className="field"><span>姓名</span><input value={form.name} onChange={(event) => setForm({ ...form, name: event.target.value })} /></label>
+      <label className="field"><span>邮箱</span><input type="email" value={form.email} onChange={(event) => setForm({ ...form, email: event.target.value })} /></label>
+      {!form.id && <label className="field"><span>初始密码</span><input type="password" value={form.password} onChange={(event) => setForm({ ...form, password: event.target.value })} /></label>}
+      <label className="field"><span>角色</span><select value={form.role} disabled={isSuperAdmin} onChange={(event) => setForm({ ...form, role: event.target.value })}>{isSuperAdmin && <option value="super_admin">超级管理员</option>}<option value="sales">销售员</option><option value="admin">管理员</option></select></label>
+      <label className="field"><span>状态</span><select value={form.status} onChange={(event) => setForm({ ...form, status: event.target.value })}><option value="active">启用</option><option value="disabled">禁用</option></select></label>
+      <label className="field"><span>电话</span><input value={form.phone} onChange={(event) => setForm({ ...form, phone: event.target.value })} /></label>
+      <label className="field"><span>备注</span><textarea rows="2" value={form.note} onChange={(event) => setForm({ ...form, note: event.target.value })} /></label>
+      <button className="primary-button" type="button" onClick={() => onSave(form)}>保存</button>
+    </Dialog>
+  );
+}
+
+function ResetPasswordDialog({ member, onClose, onSave }) {
+  const [password, setPassword] = useState('');
+  return (
+    <Dialog title={`重置密码 · ${member.email}`} onClose={onClose}>
+      <label className="field"><span>新密码</span><input type="password" value={password} onChange={(event) => setPassword(event.target.value)} /></label>
+      <button className="primary-button" type="button" onClick={() => onSave(password)}>保存新密码</button>
+    </Dialog>
+  );
+}
+
+function memberRoleLabel(role) {
+  if (role === 'super_admin') return '超级管理员';
+  if (role === 'admin') return '管理员';
+  return '销售员';
+}
+
+function memberStatusLabel(status) {
+  return status === 'disabled' ? '已禁用' : '启用';
 }
 
 function SettingsPage() {
@@ -2337,7 +2419,7 @@ function SettingsPage() {
   const [syncMessage, setSyncMessage] = useState('');
   const [cloudStatus, setCloudStatus] = useState(null);
   const session = getAuthSession();
-  const isAdmin = (session?.user?.role || 'admin') === 'admin';
+  const isAdmin = isAdminRole(session?.user?.role || '');
   const load = () => localDb.getStats().then(setStats);
   useLocalReload(load);
 
@@ -2386,7 +2468,7 @@ function SettingsPage() {
         <button className="secondary-button" type="button" onClick={() => setAuthSession(null)}>退出到登录/注册页面</button>
         <p className="hint">退出会清除本机保存的 token、user 和 company 信息。</p>
       </Section>
-      {isAdmin && <InviteMembersPanel />}
+      {isAdmin && <MemberManagementPanel />}
       <Section title="同步">
         <div className="row-actions">
           <button className="primary-button" type="button" onClick={runSyncNow}><RefreshCw size={16} />立即同步</button>
@@ -2780,6 +2862,10 @@ function statusText(status) {
   if (status === 'deleted') return '待删除同步';
   if (status === 'conflict') return '需要人工确认';
   return '已同步';
+}
+
+function isAdminRole(role) {
+  return ['admin', 'super_admin'].includes(String(role || '').toLowerCase());
 }
 
 function sourceLabel(source) {

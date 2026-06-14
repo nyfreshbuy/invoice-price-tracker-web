@@ -58,6 +58,7 @@ import {
   expireMongoInvitation,
   findMongoCompanyById,
   findMongoInvitationByToken,
+  getMongoDb,
   getMongoConnectionSnapshot,
   getMongoDebugStatus,
   findMongoUserByEmail,
@@ -252,6 +253,10 @@ function authResponse(user, company) {
       email: user.email,
       name: user.name || user.username || '',
       role: user.role || 'admin',
+      status: user.status || 'active',
+      phone: user.phone || '',
+      note: user.note || '',
+      lastLoginAt: user.lastLoginAt || '',
       companyId: user.companyId,
       companyName: user.companyName || company.name || ''
     },
@@ -273,12 +278,17 @@ async function requireAuth(req, res, next) {
       res.status(401).json({ error: '登录已失效' });
       return;
     }
+    if ((mongoUser.status || 'active') !== 'active') {
+      res.status(403).json({ error: '账号已被禁用' });
+      return;
+    }
     req.user = {
       id: mongoUser.id,
       username: mongoUser.username || '',
       email: mongoUser.email,
       name: mongoUser.name || mongoUser.username || '',
       role: mongoUser.role || 'user',
+      status: mongoUser.status || 'active',
       companyId: mongoUser.companyId,
       companyName: mongoUser.companyName || ''
     };
@@ -291,13 +301,21 @@ async function requireAuth(req, res, next) {
     res.status(401).json({ error: '登录已失效' });
     return;
   }
-  req.user = { id: user.id, email: user.email, name: user.name || '', role: user.role || 'admin', companyId: user.companyId };
+  if ((user.status || 'active') !== 'active') {
+    res.status(403).json({ error: '账号已被禁用' });
+    return;
+  }
+  req.user = { id: user.id, email: user.email, name: user.name || '', role: user.role || 'admin', status: user.status || 'active', companyId: user.companyId };
   next();
 }
 
+function isAdminRole(role) {
+  return ['admin', 'super_admin'].includes(String(role || '').toLowerCase());
+}
+
 function requireAdmin(req, res, next) {
-  if ((req.user?.role || 'admin') !== 'admin') {
-    res.status(403).json({ error: 'Only admins can invite members.' });
+  if (!isAdminRole(req.user?.role || '')) {
+    res.status(403).json({ error: '只有管理员可以管理成员。' });
     return;
   }
   next();
@@ -318,6 +336,10 @@ async function requireAccountAuth(req, res, next) {
   const mongoUser = await findMongoUserById(payload.userId);
   if (!mongoUser) {
     res.status(401).json({ error: '登录已失效' });
+    return;
+  }
+  if ((mongoUser.status || 'active') !== 'active') {
+    res.status(403).json({ error: '账号已被禁用' });
     return;
   }
   req.accountUser = toPublicMongoUser(mongoUser);
@@ -421,6 +443,109 @@ async function createMongoUserFromSqlUser(sqlUser) {
     }
   }
   throw new Error('Unable to migrate legacy user');
+}
+
+function normalizeMemberRole(value, { allowSuperAdmin = false } = {}) {
+  const role = String(value || '').toLowerCase();
+  if (role === 'super_admin') return allowSuperAdmin ? role : 'admin';
+  if (role === 'admin') return role;
+  return 'sales';
+}
+
+function normalizeMemberStatus(value) {
+  return String(value || '').toLowerCase() === 'disabled' ? 'disabled' : 'active';
+}
+
+function publicMember(user = {}) {
+  return {
+    id: user.id || user._id || '',
+    companyId: user.companyId || '',
+    name: user.name || user.username || '',
+    username: user.username || user.email || '',
+    email: user.email || '',
+    role: user.role || 'sales',
+    status: user.status || 'active',
+    phone: user.phone || '',
+    note: user.note || '',
+    lastLoginAt: user.lastLoginAt || '',
+    createdAt: user.createdAt || '',
+    updatedAt: user.updatedAt || ''
+  };
+}
+
+function canManageMember(actor, target) {
+  if (!isAdminRole(actor?.role)) return false;
+  if (target?.role === 'super_admin' && actor?.role !== 'super_admin' && actor?.id !== target?.id) return false;
+  return true;
+}
+
+async function getCompanyLimits(companyId) {
+  if (useMongoAuth()) {
+    const db = await getMongoDb();
+    const company = await db.collection('companies').findOne({ id: companyId });
+    return {
+      maxAdminUsers: Number(company?.maxAdminUsers || 99),
+      maxSalesUsers: Number(company?.maxSalesUsers || 999)
+    };
+  }
+  const company = await queryGet(`SELECT * FROM ${quoteTable('companies')} WHERE ${quoteIdentifier('id')} = ? LIMIT 1`, [companyId]);
+  return {
+    maxAdminUsers: Number(company?.maxAdminUsers || 99),
+    maxSalesUsers: Number(company?.maxSalesUsers || 999)
+  };
+}
+
+async function assertMemberQuota({ companyId, role, targetUserId = '' }) {
+  const normalizedRole = normalizeMemberRole(role);
+  const limits = await getCompanyLimits(companyId);
+  const countAdmin = ['admin', 'super_admin'].includes(normalizedRole);
+  if (useMongoAuth()) {
+    const db = await getMongoDb();
+    const query = {
+      companyId,
+      status: 'active',
+      ...(targetUserId ? { id: { $ne: targetUserId } } : {}),
+      role: countAdmin ? { $in: ['admin', 'super_admin'] } : 'sales'
+    };
+    const count = await db.collection('users').countDocuments(query);
+    if (countAdmin && count + 1 > limits.maxAdminUsers) {
+      const error = new Error(`管理员数量已达到上限 ${limits.maxAdminUsers}`);
+      error.statusCode = 409;
+      throw error;
+    }
+    if (!countAdmin && count + 1 > limits.maxSalesUsers) {
+      const error = new Error(`销售员数量已达到上限 ${limits.maxSalesUsers}`);
+      error.statusCode = 409;
+      throw error;
+    }
+    return;
+  }
+  const rows = await queryAll(`
+    SELECT ${quoteIdentifier('id')}, ${quoteIdentifier('role')}
+    FROM ${quoteTable('users')}
+    WHERE ${quoteIdentifier('companyId')} = ?
+      AND COALESCE(${quoteIdentifier('status')}, 'active') = 'active'
+      ${targetUserId ? `AND ${quoteIdentifier('id')} != ?` : ''}
+  `, targetUserId ? [companyId, targetUserId] : [companyId]);
+  const count = rows.filter((row) => countAdmin ? ['admin', 'super_admin'].includes(row.role) : row.role === 'sales').length;
+  if (countAdmin && count + 1 > limits.maxAdminUsers) {
+    const error = new Error(`管理员数量已达到上限 ${limits.maxAdminUsers}`);
+    error.statusCode = 409;
+    throw error;
+  }
+  if (!countAdmin && count + 1 > limits.maxSalesUsers) {
+    const error = new Error(`销售员数量已达到上限 ${limits.maxSalesUsers}`);
+    error.statusCode = 409;
+    throw error;
+  }
+}
+
+async function memberById(companyId, memberId) {
+  if (useMongoAuth()) {
+    const db = await getMongoDb();
+    return db.collection('users').findOne({ id: memberId, companyId });
+  }
+  return queryGet(`SELECT * FROM ${quoteTable('users')} WHERE ${quoteIdentifier('id')} = ? AND ${quoteIdentifier('companyId')} = ? LIMIT 1`, [memberId, companyId]);
 }
 
 function prepareRecord(table, record, deviceId, companyId) {
@@ -2332,7 +2457,8 @@ app.post('/api/auth/register', asyncHandler(async (req, res) => {
         username,
         email,
         passwordHash: await withTimeout(hashPasswordAsync(password), 15000, 'Password hash'),
-        role: 'admin',
+        role: 'super_admin',
+        status: 'active',
         companyName,
         companyId: id(),
         name: name || username
@@ -2354,9 +2480,9 @@ app.post('/api/auth/register', asyncHandler(async (req, res) => {
   if (existingUsername) return res.status(409).json({ error: '用户名已注册，请换一个用户名' });
 
   const now = nowIso();
-  const company = { id: id(), name: companyName, createdAt: now, updatedAt: now };
+  const company = { id: id(), name: companyName, maxAdminUsers: 99, maxSalesUsers: 999, createdAt: now, updatedAt: now };
   const passwordHash = await withTimeout(hashPasswordAsync(password), 15000, 'Password hash');
-  const user = { id: id(), companyId: company.id, email, passwordHash, name: name || username, role: 'admin', createdAt: now, updatedAt: now };
+  const user = { id: id(), companyId: company.id, username, email, passwordHash, name: name || username, role: 'super_admin', status: 'active', phone: '', note: '', lastLoginAt: '', createdAt: now, updatedAt: now };
   await withTransaction(async (client) => {
     await upsertRecord('companies', company, client);
     await upsertRecord('users', user, client);
@@ -2372,7 +2498,11 @@ app.post('/api/auth/login', asyncHandler(async (req, res) => {
   if (useMongoAuth()) {
     const mongoUser = await findMongoUserByLogin(login);
     if (mongoUser && (await verifyPasswordAsync(password, mongoUser.passwordHash))) {
-      res.json(authResponse({ ...mongoUser, authStore: 'mongo' }, { id: mongoUser.companyId, name: mongoUser.companyName || '' }));
+      if ((mongoUser.status || 'active') !== 'active') return res.status(403).json({ error: '账号已被禁用' });
+      const lastLoginAt = nowIso();
+      const mongoDb = await getMongoDb();
+      await mongoDb.collection('users').updateOne({ id: mongoUser.id }, { $set: { lastLoginAt, updatedAt: lastLoginAt } });
+      res.json(authResponse({ ...mongoUser, lastLoginAt, authStore: 'mongo' }, { id: mongoUser.companyId, name: mongoUser.companyName || '' }));
       return;
     }
 
@@ -2389,6 +2519,7 @@ app.post('/api/auth/login', asyncHandler(async (req, res) => {
             name: legacySqlUser.name || mongoUser.name || mongoUser.username || ''
           })
         : await createMongoUserFromSqlUser(legacySqlUser);
+      if ((migratedUser.status || 'active') !== 'active') return res.status(403).json({ error: '账号已被禁用' });
       res.json(authResponse({ ...migratedUser, authStore: 'mongo' }, { id: migratedUser.companyId, name: migratedUser.companyName || company.name || '' }));
       return;
     }
@@ -2402,8 +2533,15 @@ app.post('/api/auth/login', asyncHandler(async (req, res) => {
   if (!user || !(await verifyPasswordAsync(password, user.passwordHash))) {
     return res.status(401).json({ error: '邮箱或密码不正确' });
   }
+  if ((user.status || 'active') !== 'active') return res.status(403).json({ error: '账号已被禁用' });
+  const lastLoginAt = nowIso();
+  await run(`
+    UPDATE ${quoteTable('users')}
+    SET ${quoteIdentifier('lastLoginAt')} = ?, ${quoteIdentifier('updatedAt')} = ?
+    WHERE ${quoteIdentifier('id')} = ?
+  `, [lastLoginAt, lastLoginAt, user.id]);
   const company = await sqlCompanyForUser(user);
-  res.json(authResponse(user, company || { id: user.companyId, name: '' }));
+  res.json(authResponse({ ...user, lastLoginAt }, company || { id: user.companyId, name: '' }));
 }));
 
 app.get('/api/auth/me', requireAuth, asyncHandler(async (req, res) => {
@@ -2413,6 +2551,184 @@ app.get('/api/auth/me', requireAuth, asyncHandler(async (req, res) => {
   }
   const company = await queryGet(`SELECT * FROM ${quoteTable('companies')} WHERE ${quoteIdentifier('id')} = ? LIMIT 1`, [req.user.companyId]);
   res.json({ user: req.user, company: company || { id: req.user.companyId, name: '' } });
+}));
+
+app.get('/api/admin/members', requireAuth, requireAdmin, asyncHandler(async (req, res) => {
+  if (useMongoAuth()) {
+    const db = await getMongoDb();
+    const members = await db.collection('users')
+      .find({ companyId: req.user.companyId })
+      .sort({ createdAt: 1 })
+      .toArray();
+    res.json({ members: members.map(publicMember), limits: await getCompanyLimits(req.user.companyId) });
+    return;
+  }
+  const members = await queryAll(`
+    SELECT * FROM ${quoteTable('users')}
+    WHERE ${quoteIdentifier('companyId')} = ?
+    ORDER BY ${quoteIdentifier('createdAt')} ASC
+  `, [req.user.companyId]);
+  res.json({ members: members.map(publicMember), limits: await getCompanyLimits(req.user.companyId) });
+}));
+
+app.post('/api/admin/members', requireAuth, requireAdmin, asyncHandler(async (req, res) => {
+  const email = String(req.body.email || '').trim().toLowerCase();
+  const name = String(req.body.name || '').trim();
+  const password = String(req.body.password || '');
+  const role = normalizeMemberRole(req.body.role);
+  const status = normalizeMemberStatus(req.body.status);
+  const phone = String(req.body.phone || '').trim();
+  const note = String(req.body.note || '').trim();
+  if (!email || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) return res.status(400).json({ error: '请输入有效邮箱' });
+  if (password.length < 6) return res.status(400).json({ error: '密码至少 6 位' });
+  await assertMemberQuota({ companyId: req.user.companyId, role });
+  const now = nowIso();
+  const passwordHash = await withTimeout(hashPasswordAsync(password), 15000, 'Password hash');
+  if (useMongoAuth()) {
+    const existing = await findMongoUserByEmail(email);
+    if (existing) return res.status(409).json({ error: '邮箱已注册' });
+    const company = req.company || await findMongoCompanyById(req.user.companyId) || { id: req.user.companyId, name: req.user.companyName || '' };
+    const user = await createMongoUser({
+      id: id(),
+      username: email,
+      email,
+      passwordHash,
+      role,
+      status,
+      companyName: company.name || req.user.companyName || '',
+      companyId: req.user.companyId,
+      name: name || email,
+      phone,
+      note
+    });
+    res.status(201).json({ member: publicMember(user) });
+    return;
+  }
+  const existing = await findSqlUserByEmail(email);
+  if (existing) return res.status(409).json({ error: '邮箱已注册' });
+  const user = {
+    id: id(),
+    companyId: req.user.companyId,
+    username: email,
+    email,
+    passwordHash,
+    name: name || email,
+    role,
+    status,
+    phone,
+    note,
+    lastLoginAt: '',
+    createdAt: now,
+    updatedAt: now
+  };
+  await upsertRecord('users', user);
+  res.status(201).json({ member: publicMember(user) });
+}));
+
+app.put('/api/admin/members/:id', requireAuth, requireAdmin, asyncHandler(async (req, res) => {
+  const target = await memberById(req.user.companyId, req.params.id);
+  if (!target) return res.status(404).json({ error: '成员不存在' });
+  if (!canManageMember(req.user, target)) return res.status(403).json({ error: '没有权限管理该成员' });
+  const role = target.role === 'super_admin'
+    ? 'super_admin'
+    : normalizeMemberRole(req.body.role ?? target.role);
+  const status = normalizeMemberStatus(req.body.status ?? target.status);
+  if (role !== target.role && status === 'active') await assertMemberQuota({ companyId: req.user.companyId, role, targetUserId: target.id });
+  if (target.id === req.user.id && status === 'disabled') return res.status(400).json({ error: '不能禁用自己' });
+  const update = {
+    name: String(req.body.name ?? target.name ?? '').trim(),
+    username: String(req.body.email ?? target.email ?? '').trim().toLowerCase(),
+    email: String(req.body.email ?? target.email ?? '').trim().toLowerCase(),
+    role,
+    status,
+    phone: String(req.body.phone ?? target.phone ?? '').trim(),
+    note: String(req.body.note ?? target.note ?? '').trim(),
+    updatedAt: nowIso()
+  };
+  if (!update.email || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(update.email)) return res.status(400).json({ error: '请输入有效邮箱' });
+  if (useMongoAuth()) {
+    const existing = await findMongoUserByEmail(update.email);
+    if (existing && existing.id !== target.id) return res.status(409).json({ error: '邮箱已注册' });
+    const db = await getMongoDb();
+    await db.collection('users').updateOne({ id: target.id, companyId: req.user.companyId }, { $set: update });
+    res.json({ member: publicMember({ ...target, ...update }) });
+    return;
+  }
+  const existing = await findSqlUserByEmail(update.email);
+  if (existing && existing.id !== target.id) return res.status(409).json({ error: '邮箱已注册' });
+  await run(`
+    UPDATE ${quoteTable('users')}
+    SET ${quoteIdentifier('name')} = ?,
+        ${quoteIdentifier('username')} = ?,
+        ${quoteIdentifier('email')} = ?,
+        ${quoteIdentifier('role')} = ?,
+        ${quoteIdentifier('status')} = ?,
+        ${quoteIdentifier('phone')} = ?,
+        ${quoteIdentifier('note')} = ?,
+        ${quoteIdentifier('updatedAt')} = ?
+    WHERE ${quoteIdentifier('id')} = ? AND ${quoteIdentifier('companyId')} = ?
+  `, [update.name, update.username, update.email, update.role, update.status, update.phone, update.note, update.updatedAt, target.id, req.user.companyId]);
+  res.json({ member: publicMember({ ...target, ...update }) });
+}));
+
+app.post('/api/admin/members/:id/reset-password', requireAuth, requireAdmin, asyncHandler(async (req, res) => {
+  const target = await memberById(req.user.companyId, req.params.id);
+  if (!target) return res.status(404).json({ error: '成员不存在' });
+  if (!canManageMember(req.user, target)) return res.status(403).json({ error: '没有权限管理该成员' });
+  const password = String(req.body.password || '');
+  if (password.length < 6) return res.status(400).json({ error: '密码至少 6 位' });
+  const passwordHash = await withTimeout(hashPasswordAsync(password), 15000, 'Password hash');
+  const updatedAt = nowIso();
+  if (useMongoAuth()) {
+    const db = await getMongoDb();
+    await db.collection('users').updateOne({ id: target.id, companyId: req.user.companyId }, { $set: { passwordHash, updatedAt } });
+    res.json({ ok: true });
+    return;
+  }
+  await run(`
+    UPDATE ${quoteTable('users')}
+    SET ${quoteIdentifier('passwordHash')} = ?, ${quoteIdentifier('updatedAt')} = ?
+    WHERE ${quoteIdentifier('id')} = ? AND ${quoteIdentifier('companyId')} = ?
+  `, [passwordHash, updatedAt, target.id, req.user.companyId]);
+  res.json({ ok: true });
+}));
+
+async function setMemberStatus(req, res, status) {
+  const target = await memberById(req.user.companyId, req.params.id);
+  if (!target) return res.status(404).json({ error: '成员不存在' });
+  if (!canManageMember(req.user, target)) return res.status(403).json({ error: '没有权限管理该成员' });
+  if (target.id === req.user.id && status === 'disabled') return res.status(400).json({ error: '不能禁用自己' });
+  if (status === 'active') await assertMemberQuota({ companyId: req.user.companyId, role: target.role, targetUserId: target.id });
+  const updatedAt = nowIso();
+  if (useMongoAuth()) {
+    const db = await getMongoDb();
+    await db.collection('users').updateOne({ id: target.id, companyId: req.user.companyId }, { $set: { status, updatedAt } });
+    return res.json({ member: publicMember({ ...target, status, updatedAt }) });
+  }
+  await run(`
+    UPDATE ${quoteTable('users')}
+    SET ${quoteIdentifier('status')} = ?, ${quoteIdentifier('updatedAt')} = ?
+    WHERE ${quoteIdentifier('id')} = ? AND ${quoteIdentifier('companyId')} = ?
+  `, [status, updatedAt, target.id, req.user.companyId]);
+  return res.json({ member: publicMember({ ...target, status, updatedAt }) });
+}
+
+app.post('/api/admin/members/:id/enable', requireAuth, requireAdmin, asyncHandler(async (req, res) => setMemberStatus(req, res, 'active')));
+app.post('/api/admin/members/:id/disable', requireAuth, requireAdmin, asyncHandler(async (req, res) => setMemberStatus(req, res, 'disabled')));
+
+app.delete('/api/admin/members/:id', requireAuth, requireAdmin, asyncHandler(async (req, res) => {
+  const target = await memberById(req.user.companyId, req.params.id);
+  if (!target) return res.status(404).json({ error: '成员不存在' });
+  if (!canManageMember(req.user, target)) return res.status(403).json({ error: '没有权限管理该成员' });
+  if (target.id === req.user.id) return res.status(400).json({ error: '不能删除自己' });
+  if (useMongoAuth()) {
+    const db = await getMongoDb();
+    await db.collection('users').deleteOne({ id: target.id, companyId: req.user.companyId });
+    res.json({ ok: true });
+    return;
+  }
+  await run(`DELETE FROM ${quoteTable('users')} WHERE ${quoteIdentifier('id')} = ? AND ${quoteIdentifier('companyId')} = ?`, [target.id, req.user.companyId]);
+  res.json({ ok: true });
 }));
 
 function frontendBaseUrl(req) {

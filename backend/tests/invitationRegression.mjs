@@ -90,7 +90,7 @@ assert.equal(register.success, true);
 
 const session = await json('POST', '/api/auth/login', { login: adminEmail, password }, { auth: false });
 authToken = session.token;
-assert.equal(session.user.role, 'admin');
+assert.ok(['admin', 'super_admin'].includes(session.user.role));
 
 const created = await json('POST', '/api/invitations', { email: memberEmail, role: 'user' });
 assert.equal(created.success, true);

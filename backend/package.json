@@ -7,6 +7,7 @@
     "dev": "node --watch src/server.js",
     "start": "node src/server.js",
     "test:auth": "node tests/authRegression.mjs",
+    "test:members": "node tests/memberRegression.mjs",
     "test:sync-push": "node tests/syncPushRegression.mjs",
     "test:invitations": "node tests/invitationRegression.mjs"
   },
