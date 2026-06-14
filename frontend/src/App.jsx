@@ -159,6 +159,14 @@ export default function App() {
     return <div className="auth-shell"><div className="auth-card">正在验证登录状态...</div></div>;
   }
 
+  if (window.location.pathname.startsWith('/invite/')) {
+    return (
+      <Routes>
+        <Route path="/invite/:token" element={<InvitationAcceptPage onAuthenticated={setAuthState} />} />
+      </Routes>
+    );
+  }
+
   if (window.location.hostname.includes('invoice-frontend-ufq4.onrender.com') && !localStorage.getItem('authToken')) {
     return <AuthPageFixed onAuthenticated={setAuthState} />;
   }
@@ -186,6 +194,7 @@ export default function App() {
           <Route path="/suppliers" element={<RequireAuth session={authSession}><SupplierPage /></RequireAuth>} />
           <Route path="/suppliers/:id/invoices" element={<RequireAuth session={authSession}><SupplierInvoiceHistoryPage /></RequireAuth>} />
           <Route path="/account-connections" element={<RequireAuth session={authSession}><AccountConnectionPage /></RequireAuth>} />
+          <Route path="/invite/:token" element={<InvitationAcceptPage onAuthenticated={setAuthState} />} />
           <Route path="/analytics" element={<RequireAuth session={authSession}><PurchaseAnalysisPage /></RequireAuth>} />
           <Route path="/settings" element={<RequireAuth session={authSession}><SettingsPage /></RequireAuth>} />
         </Routes>
@@ -260,6 +269,59 @@ function AuthPageFixed({ onAuthenticated }) {
         {mode === 'register' && <label className="field"><span>确认密码</span><input type="password" autoComplete="new-password" value={form.confirmPassword} onChange={(event) => setForm({ ...form, confirmPassword: event.target.value })} /></label>}
         {message && <p className="error">{message}</p>}
         <button className="primary-button" disabled={loading}>{loading ? '处理中...' : mode === 'login' ? '登录' : '注册'}</button>
+      </form>
+    </div>
+  );
+}
+
+function InvitationAcceptPage({ onAuthenticated }) {
+  const { token } = useParams();
+  const navigate = useNavigate();
+  const [invitation, setInvitation] = useState(null);
+  const [form, setForm] = useState({ username: '', password: '' });
+  const [message, setMessage] = useState('');
+  const [loading, setLoading] = useState(false);
+
+  useEffect(() => {
+    api.getInvitation(token)
+      .then((data) => setInvitation(data.invitation))
+      .catch((error) => setMessage(error.message || '邀请链接无效'));
+  }, [token]);
+
+  async function accept(event) {
+    event.preventDefault();
+    setLoading(true);
+    setMessage('');
+    try {
+      const session = await api.acceptInvitation({ token, ...form });
+      setAuthSession(session);
+      onAuthenticated?.(getAuthSession());
+      setMessage('已加入公司');
+      navigate('/');
+    } catch (error) {
+      setMessage(error.message || '接受邀请失败');
+    } finally {
+      setLoading(false);
+    }
+  }
+
+  return (
+    <div className="auth-shell">
+      <form className="auth-card" onSubmit={accept}>
+        <h1>接受邀请</h1>
+        {invitation ? (
+          <>
+            <p>加入 {invitation.companyName || '公司'}，角色：{invitation.role === 'admin' ? '管理员' : '普通成员'}</p>
+            <label className="field"><span>邮箱</span><input value={invitation.email || ''} readOnly /></label>
+            <label className="field"><span>用户名（新账号需要）</span><input value={form.username} onChange={(event) => setForm({ ...form, username: event.target.value })} /></label>
+            <label className="field"><span>密码（新账号需要）</span><input type="password" value={form.password} onChange={(event) => setForm({ ...form, password: event.target.value })} /></label>
+            <p className="hint">如果该邮箱已经注册，系统会直接把该账号加入被邀请公司；如果没有注册，请填写用户名和密码。</p>
+          </>
+        ) : (
+          <p>正在读取邀请...</p>
+        )}
+        {message && <p className={message.includes('失败') || message.includes('无效') ? 'error' : 'success-text'}>{message}</p>}
+        <button className="primary-button" disabled={loading || !invitation}>{loading ? '处理中...' : '接受邀请'}</button>
       </form>
     </div>
   );
@@ -1236,6 +1298,8 @@ function InvoiceDetailPage() {
 
 function HomeDashboardPage() {
   const [dashboard, setDashboard] = useState(null);
+  const session = getAuthSession();
+  const isAdmin = (session?.user?.role || 'admin') === 'admin';
   useLocalReload(() => localDb.getDashboardMetrics().then(setDashboard));
 
   return (
@@ -1263,6 +1327,7 @@ function HomeDashboardPage() {
         <ActionLink to="/invoices/batch" icon={<Upload />} title="批量导入发票" subtitle="多张图片队列识别" />
         <ActionLink to="/recognition-tasks" icon={<RefreshCw />} title="识别记录/任务列表" subtitle="查看后台 AI 识别状态和历史结果" />
         <ActionLink to="/suppliers" icon={<Building2 />} title="供应商管理" subtitle="维护供应商和模板" />
+        {isAdmin && <ActionLink to="/settings" icon={<UserPlus />} title="邀请成员" subtitle="生成邀请链接，让成员加入当前公司" />}
         <ActionLink to="/settings" icon={<Settings />} title="设置/导出" subtitle="查看本地统计、导出云端 CSV/Excel" />
       </Section>
     </Page>
@@ -2196,9 +2261,81 @@ function connectionStatusLabel(status) {
   return '待处理';
 }
 
+function InviteMembersPanel() {
+  const [email, setEmail] = useState('');
+  const [role, setRole] = useState('user');
+  const [invitations, setInvitations] = useState([]);
+  const [message, setMessage] = useState('');
+  const [loading, setLoading] = useState(false);
+
+  async function loadInvitations() {
+    const data = await api.getInvitations();
+    setInvitations(data.invitations || []);
+  }
+
+  useEffect(() => {
+    loadInvitations().catch((error) => setMessage(error.message || '读取邀请记录失败'));
+  }, []);
+
+  async function createInvitation(event) {
+    event.preventDefault();
+    setLoading(true);
+    setMessage('');
+    try {
+      const data = await api.createInvitation({ email, role });
+      setEmail('');
+      setRole('user');
+      setMessage(`邀请已创建：${data.invitation?.inviteLink || ''}`);
+      await loadInvitations();
+    } catch (error) {
+      setMessage(error.message || '创建邀请失败');
+    } finally {
+      setLoading(false);
+    }
+  }
+
+  async function copyLink(link) {
+    try {
+      await navigator.clipboard.writeText(link);
+      setMessage('邀请链接已复制');
+    } catch {
+      setMessage(link);
+    }
+  }
+
+  return (
+    <Section title="邀请成员">
+      <form className="toolbar" onSubmit={createInvitation}>
+        <input type="email" placeholder="成员邮箱" value={email} onChange={(event) => setEmail(event.target.value)} />
+        <select value={role} onChange={(event) => setRole(event.target.value)}>
+          <option value="user">普通成员</option>
+          <option value="admin">管理员</option>
+        </select>
+        <button className="primary-button" disabled={loading}>{loading ? '创建中...' : '邀请成员'}</button>
+      </form>
+      <p className="hint">邀请 7 天内有效。已存在账号会直接加入当前公司；未注册邮箱打开链接后可创建账号并加入。</p>
+      {message && <p className={message.includes('失败') ? 'error' : 'success-text'}>{message}</p>}
+      <div className="card-list">
+        {invitations.map((invitation) => (
+          <div className="row-card" key={invitation.id}>
+            <div>
+              <h3>{invitation.email}</h3>
+              <p>{invitation.role === 'admin' ? '管理员' : '普通成员'} · {invitation.status} · {invitation.created_at ? new Date(invitation.created_at).toLocaleString() : ''}</p>
+              <p className="long-text">{invitation.inviteLink}</p>
+            </div>
+            <button type="button" onClick={() => copyLink(invitation.inviteLink)}>复制链接</button>
+          </div>
+        ))}
+        {invitations.length === 0 && <EmptyState text="暂无邀请记录" />}
+      </div>
+    </Section>
+  );
+}
+
 function SettingsPage() {
   const [stats, setStats] = useState({});
   const session = getAuthSession();
+  const isAdmin = (session?.user?.role || 'admin') === 'admin';
   const load = () => localDb.getStats().then(setStats);
   useLocalReload(load);
 
@@ -2217,6 +2354,7 @@ function SettingsPage() {
         <button className="secondary-button" type="button" onClick={() => setAuthSession(null)}>退出到登录/注册页面</button>
         <p className="hint">退出会清除本机保存的 token、user 和 company 信息。</p>
       </Section>
+      {isAdmin && <InviteMembersPanel />}
       <Section title="导出">
         <button className="primary-button" type="button" onClick={() => api.downloadExportCsv()}><Upload size={18} />导出云端 CSV</button>
         <button className="secondary-button" type="button" onClick={() => api.downloadExportExcel()}><Upload size={18} />导出云端 Excel</button>

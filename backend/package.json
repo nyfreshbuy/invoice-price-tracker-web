@@ -6,7 +6,8 @@
   "scripts": {
     "dev": "node --watch src/server.js",
     "start": "node src/server.js",
-    "test:sync-push": "node tests/syncPushRegression.mjs"
+    "test:sync-push": "node tests/syncPushRegression.mjs",
+    "test:invitations": "node tests/invitationRegression.mjs"
   },
   "dependencies": {
     "better-sqlite3": "^11.8.1",

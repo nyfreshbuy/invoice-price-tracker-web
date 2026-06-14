@@ -87,7 +87,9 @@ async function request(path, options = {}) {
   const token = getAuthToken();
   const pathname = path.split('?')[0];
   const publicPaths = ['/api/auth/login', '/api/auth/register'];
-  if (!token && !publicPaths.includes(pathname)) {
+  const isPublicInvitationRead = options.method !== 'POST' && pathname.startsWith('/api/invitations/');
+  const isPublicInvitationAccept = pathname === '/api/invitations/accept';
+  if (!token && !publicPaths.includes(pathname) && !isPublicInvitationRead && !isPublicInvitationAccept) {
     throw new Error('请先登录');
   }
   const headers = options.body instanceof FormData ? {} : { 'Content-Type': 'application/json' };
@@ -152,6 +154,10 @@ export const api = {
   getReceivedConnections: () => request('/api/account-connections/received'),
   approveConnection: (id) => request(`/api/account-connections/${encodeURIComponent(id)}/approve`, { method: 'POST' }),
   rejectConnection: (id) => request(`/api/account-connections/${encodeURIComponent(id)}/reject`, { method: 'POST' }),
+  createInvitation: (payload) => request('/api/invitations', { method: 'POST', body: JSON.stringify(payload) }),
+  getInvitations: () => request('/api/invitations'),
+  getInvitation: (token) => request(`/api/invitations/${encodeURIComponent(token)}`),
+  acceptInvitation: (payload) => request('/api/invitations/accept', { method: 'POST', body: JSON.stringify(payload), timeoutMs: 15000 }),
 
   getInvoices: () => request('/api/invoices'),
   getInvoice: (id) => request(`/api/invoices/${id}`),

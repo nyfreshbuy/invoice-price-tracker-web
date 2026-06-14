@@ -309,6 +309,25 @@ textarea {
   resize: vertical;
 }
 
+.toolbar {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(120px, 180px) auto;
+  gap: 8px;
+  align-items: center;
+  max-width: 100%;
+}
+
+.long-text {
+  overflow-wrap: anywhere;
+  word-break: break-word;
+}
+
+@media (max-width: 640px) {
+  .toolbar {
+    grid-template-columns: 1fr;
+  }
+}
+
 .grid-2 {
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));

@@ -71,7 +71,8 @@ export const tableColumns = {
   invoice_recognition_tasks: ['id', 'companyId', 'batchId', 'supplierHint', 'status', 'imagePath', 'filePath', 'originalName', 'mimeType', 'fileSize', 'source', 'recognitionSource', 'ocrLanguage', 'usedTemplate', 'usedAI', 'invoiceId', 'resultJson', 'error', 'retryCount', 'createdAt', 'updatedAt', 'startedAt', 'completedAt', 'deviceId'],
   invoice_templates: ['id', 'companyId', 'supplierName', 'invoiceLayoutType', 'supplierKeywords', 'tableHeaderKeywords', 'columns', 'totalKeywords', 'invoiceNoKeywords', 'dateKeywords', 'tableRegion', 'handwrittenRegions', 'sampleImageHash', 'successCount', 'failCount', 'lastUsedAt', 'accuracyScore', 'isActive', 'createdAt', 'updatedAt'],
   companies: ['id', 'name', 'createdAt', 'updatedAt'],
-  users: ['id', 'companyId', 'email', 'passwordHash', 'name', 'createdAt', 'updatedAt']
+  users: ['id', 'companyId', 'email', 'passwordHash', 'name', 'role', 'createdAt', 'updatedAt'],
+  company_invitations: ['id', 'company_id', 'email', 'role', 'token', 'status', 'created_by', 'created_at', 'accepted_at', 'expires_at']
 };
 
 const numericColumns = new Set([
@@ -273,6 +274,9 @@ export async function migrate() {
   await execute(`CREATE INDEX IF NOT EXISTS ${quoteIdentifier('idx_recognition_tasks_company_status')} ON ${quoteTable('invoice_recognition_tasks')} (${quoteIdentifier('companyId')}, ${quoteIdentifier('status')});`);
   await execute(`CREATE INDEX IF NOT EXISTS ${quoteIdentifier('idx_recognition_tasks_batch')} ON ${quoteTable('invoice_recognition_tasks')} (${quoteIdentifier('companyId')}, ${quoteIdentifier('batchId')});`);
   await execute(`CREATE UNIQUE INDEX IF NOT EXISTS ${quoteIdentifier('idx_users_email_unique')} ON ${quoteTable('users')} (LOWER(${quoteIdentifier('email')}));`);
+  await execute(`CREATE INDEX IF NOT EXISTS ${quoteIdentifier('idx_company_invitations_company')} ON ${quoteTable('company_invitations')} (${quoteIdentifier('company_id')});`);
+  await execute(`CREATE UNIQUE INDEX IF NOT EXISTS ${quoteIdentifier('idx_company_invitations_token')} ON ${quoteTable('company_invitations')} (${quoteIdentifier('token')});`);
+  await execute(`CREATE INDEX IF NOT EXISTS ${quoteIdentifier('idx_company_invitations_email_status')} ON ${quoteTable('company_invitations')} (${quoteIdentifier('email')}, ${quoteIdentifier('status')});`);
 }
 
 function convertPlaceholders(sql) {

@@ -201,7 +201,7 @@ function authResponse(user, company) {
     companyId: user.companyId,
     email: user.email,
     username: user.username || user.name || '',
-    role: user.role || 'user',
+    role: user.role || 'admin',
     authStore: user.authStore || 'sql',
     exp: Math.floor(Date.now() / 1000) + 60 * 60 * 24 * 30
   });
@@ -212,7 +212,7 @@ function authResponse(user, company) {
       username: user.username || user.name || '',
       email: user.email,
       name: user.name || user.username || '',
-      role: user.role || 'user',
+      role: user.role || 'admin',
       companyId: user.companyId,
       companyName: user.companyName || company.name || ''
     },
@@ -252,7 +252,15 @@ async function requireAuth(req, res, next) {
     res.status(401).json({ error: '登录已失效' });
     return;
   }
-  req.user = { id: user.id, email: user.email, name: user.name || '', companyId: user.companyId };
+  req.user = { id: user.id, email: user.email, name: user.name || '', role: user.role || 'admin', companyId: user.companyId };
+  next();
+}
+
+function requireAdmin(req, res, next) {
+  if ((req.user?.role || 'admin') !== 'admin') {
+    res.status(403).json({ error: 'Only admins can invite members.' });
+    return;
+  }
   next();
 }
 
@@ -2204,7 +2212,7 @@ app.post('/api/auth/register', asyncHandler(async (req, res) => {
         username,
         email,
         passwordHash: await withTimeout(hashPasswordAsync(password), 15000, 'Password hash'),
-        role: 'user',
+        role: 'admin',
         companyName,
         companyId: id(),
         name: name || username
@@ -2226,7 +2234,7 @@ app.post('/api/auth/register', asyncHandler(async (req, res) => {
   const now = nowIso();
   const company = { id: id(), name: companyName, createdAt: now, updatedAt: now };
   const passwordHash = await withTimeout(hashPasswordAsync(password), 15000, 'Password hash');
-  const user = { id: id(), companyId: company.id, email, passwordHash, name, createdAt: now, updatedAt: now };
+  const user = { id: id(), companyId: company.id, email, passwordHash, name, role: 'admin', createdAt: now, updatedAt: now };
   await withTransaction(async (client) => {
     await upsertRecord('companies', company, client);
     await upsertRecord('users', user, client);
@@ -2262,6 +2270,146 @@ app.get('/api/auth/me', requireAuth, asyncHandler(async (req, res) => {
   }
   const company = await queryGet(`SELECT * FROM ${quoteTable('companies')} WHERE ${quoteIdentifier('id')} = ? LIMIT 1`, [req.user.companyId]);
   res.json({ user: req.user, company: company || { id: req.user.companyId, name: '' } });
+}));
+
+function frontendBaseUrl(req) {
+  const configured = (process.env.FRONTEND_URL || process.env.CORS_ORIGIN || '').split(',').map((entry) => entry.trim()).find(Boolean);
+  if (configured) return configured.replace(/\/$/, '');
+  return `${req.protocol}://${req.get('host')}`;
+}
+
+function normalizeInviteRole(value) {
+  return String(value || '').toLowerCase() === 'admin' ? 'admin' : 'user';
+}
+
+async function invitationByToken(token) {
+  if (!token) return null;
+  return queryGet(`
+    SELECT invitations.*, companies.${quoteIdentifier('name')} AS "companyName"
+    FROM ${quoteTable('company_invitations')} invitations
+    LEFT JOIN ${quoteTable('companies')} companies
+      ON companies.${quoteIdentifier('id')} = invitations.${quoteIdentifier('company_id')}
+    WHERE invitations.${quoteIdentifier('token')} = ?
+    LIMIT 1
+  `, [token]);
+}
+
+app.post('/api/invitations', requireAuth, requireAdmin, asyncHandler(async (req, res) => {
+  const email = String(req.body.email || '').trim().toLowerCase();
+  const role = normalizeInviteRole(req.body.role);
+  if (!email || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) {
+    res.status(400).json({ error: 'Please enter a valid email address.' });
+    return;
+  }
+  const now = nowIso();
+  const invitation = {
+    id: id(),
+    company_id: req.user.companyId,
+    email,
+    role,
+    token: crypto.randomBytes(32).toString('hex'),
+    status: 'pending',
+    created_by: req.user.id,
+    created_at: now,
+    accepted_at: '',
+    expires_at: new Date(Date.now() + 7 * 24 * 60 * 60 * 1000).toISOString()
+  };
+  await upsertRecord('company_invitations', invitation);
+  const inviteLink = `${frontendBaseUrl(req)}/invite/${invitation.token}`;
+  res.json({ success: true, invitation: { ...invitation, inviteLink } });
+}));
+
+app.get('/api/invitations', requireAuth, requireAdmin, asyncHandler(async (req, res) => {
+  const invitations = await queryAll(`
+    SELECT invitations.*, users.${quoteIdentifier('email')} AS "createdByEmail"
+    FROM ${quoteTable('company_invitations')} invitations
+    LEFT JOIN ${quoteTable('users')} users
+      ON users.${quoteIdentifier('id')} = invitations.${quoteIdentifier('created_by')}
+    WHERE invitations.${quoteIdentifier('company_id')} = ?
+    ORDER BY invitations.${quoteIdentifier('created_at')} DESC
+  `, [req.user.companyId]);
+  const baseUrl = frontendBaseUrl(req);
+  res.json({ invitations: invitations.map((entry) => ({ ...entry, inviteLink: `${baseUrl}/invite/${entry.token}` })) });
+}));
+
+app.get('/api/invitations/:token', asyncHandler(async (req, res) => {
+  const invitation = await invitationByToken(String(req.params.token || '').trim());
+  if (!invitation) {
+    res.status(404).json({ error: 'Invitation not found.' });
+    return;
+  }
+  const expired = invitation.status === 'pending' && invitation.expires_at && new Date(invitation.expires_at).getTime() < Date.now();
+  if (expired) {
+    await run(`UPDATE ${quoteTable('company_invitations')} SET ${quoteIdentifier('status')} = 'expired' WHERE ${quoteIdentifier('id')} = ?`, [invitation.id]);
+    invitation.status = 'expired';
+  }
+  res.json({
+    invitation: {
+      email: invitation.email,
+      role: invitation.role,
+      status: invitation.status,
+      companyName: invitation.companyName || '',
+      expiresAt: invitation.expires_at
+    }
+  });
+}));
+
+app.post('/api/invitations/accept', asyncHandler(async (req, res) => {
+  const token = String(req.body.token || '').trim();
+  const invitation = await invitationByToken(token);
+  if (!invitation) {
+    res.status(404).json({ error: 'Invitation not found.' });
+    return;
+  }
+  if (invitation.status !== 'pending') {
+    res.status(409).json({ error: `Invitation is ${invitation.status}.` });
+    return;
+  }
+  if (invitation.expires_at && new Date(invitation.expires_at).getTime() < Date.now()) {
+    await run(`UPDATE ${quoteTable('company_invitations')} SET ${quoteIdentifier('status')} = 'expired' WHERE ${quoteIdentifier('id')} = ?`, [invitation.id]);
+    res.status(410).json({ error: 'Invitation has expired.' });
+    return;
+  }
+
+  const now = nowIso();
+  let user = await queryGet(`SELECT * FROM ${quoteTable('users')} WHERE LOWER(${quoteIdentifier('email')}) = ? LIMIT 1`, [String(invitation.email || '').toLowerCase()]);
+  if (!user) {
+    const password = String(req.body.password || '');
+    if (password.length < 6) {
+      res.status(400).json({ error: 'Password must be at least 6 characters for a new account.' });
+      return;
+    }
+    user = {
+      id: id(),
+      companyId: invitation.company_id,
+      email: invitation.email,
+      passwordHash: await withTimeout(hashPasswordAsync(password), 15000, 'Password hash'),
+      name: String(req.body.username || req.body.name || invitation.email).trim(),
+      role: invitation.role,
+      createdAt: now,
+      updatedAt: now
+    };
+    await upsertRecord('users', user);
+  } else {
+    await run(`
+      UPDATE ${quoteTable('users')}
+      SET ${quoteIdentifier('companyId')} = ?,
+          ${quoteIdentifier('role')} = ?,
+          ${quoteIdentifier('updatedAt')} = ?
+      WHERE ${quoteIdentifier('id')} = ?
+    `, [invitation.company_id, invitation.role, now, user.id]);
+    user = { ...user, companyId: invitation.company_id, role: invitation.role, updatedAt: now };
+  }
+
+  await run(`
+    UPDATE ${quoteTable('company_invitations')}
+    SET ${quoteIdentifier('status')} = 'accepted',
+        ${quoteIdentifier('accepted_at')} = ?
+    WHERE ${quoteIdentifier('id')} = ?
+  `, [now, invitation.id]);
+
+  const company = await queryGet(`SELECT * FROM ${quoteTable('companies')} WHERE ${quoteIdentifier('id')} = ? LIMIT 1`, [invitation.company_id]);
+  res.json({ success: true, message: 'Invitation accepted.', ...authResponse(user, company || { id: invitation.company_id, name: invitation.companyName || '' }) });
 }));
 
 app.get('/api/users/search', requireAccountAuth, asyncHandler(async (req, res) => {
