@@ -1,5 +1,7 @@
 node_modules/
 dist/
+frontend/debug.log
+frontend/test-results/
 backend/data/
 backend/uploads/
 backend/regression-fixtures/

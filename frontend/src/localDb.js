@@ -423,6 +423,19 @@ function approvedForStats(invoice = {}) {
   return !pendingReviewInvoice(invoice) && !abnormalInvoice(invoice);
 }
 
+function priceHistoryEligibleItem(item = {}, invoice = {}) {
+  if (!approvedForStats(invoice)) return false;
+  if (!active(item)) return false;
+  if (Number(item.isDiscountLine || 0) || Number(item.candidateOnly || 0) || Number(item.isFreeItem || 0)) return false;
+  const name = String(item.productNameOriginal || item.productNameNormalized || item.rawName || '').trim().toLowerCase();
+  if (!name || /^(remark|remarks|note|notes|memo|subtotal|total)$/.test(name)) return false;
+  if (name.includes('discount') || name.includes('折扣')) return false;
+  if (Number(item.quantity || item.actualQty || item.totalQty || 0) <= 0) return false;
+  if (Number(item.unitPrice || item.effectiveUnitCost || 0) <= 0) return false;
+  if (Number(item.totalPrice || 0) <= 0) return false;
+  return true;
+}
+
 function invoiceIdSet(invoices = []) {
   return new Set(invoices.flatMap((invoice) => idsFor(invoice)));
 }
@@ -548,7 +561,29 @@ export const localDb = {
       if (local) await put(table, { ...local, syncStatus: 'conflict', conflictRecord: JSON.stringify(result.record || {}) });
       return;
     }
-    if (result.status === 'duplicate' || result.status === 'skipped_duplicate_invoice') return;
+    if (result.status === 'duplicate') {
+      const records = await all(table);
+      const local = records.find((record) => record.localId === result.localId || record.id === result.localId || record.serverId === result.serverId);
+      if (local) await put(table, {
+        ...local,
+        syncStatus: 'conflict',
+        duplicateStatus: result.duplicateStatus || 'duplicate',
+        duplicateOfInvoiceId: result.serverId || result.duplicateCheck?.duplicateInvoiceId || result.duplicate?.id || '',
+        conflictRecord: JSON.stringify(result)
+      });
+      return;
+    }
+    if (result.status === 'skipped_duplicate_invoice' || result.status === 'skipped_integrity_generated') {
+      const records = await all(table);
+      const local = records.find((record) => record.localId === result.localId || record.id === result.localId || record.serverId === result.serverId);
+      if (local) await put(table, {
+        ...local,
+        serverId: result.serverId || local.serverId || local.id,
+        syncStatus: 'synced',
+        syncNote: result.status
+      });
+      return;
+    }
     const records = await all(table);
     const local = records.find((record) => record.localId === result.localId || record.id === result.localId || record.serverId === result.serverId);
     if (!local) return;
@@ -559,6 +594,8 @@ export const localDb = {
       localId: local.localId || result.localId || local.id,
       serverId: result.serverId || serverRecord.serverId || serverRecord.id,
       syncStatus: 'synced',
+      status: result.status === 'needs_review' ? 'PENDING_REVIEW' : (serverRecord.status || local.status),
+      syncNote: result.reason || result.status || '',
       version: Number(serverRecord.version || local.version || 1)
     });
   },
@@ -829,7 +866,7 @@ export const localDb = {
       await putMany('price_history', existingRows.map((row) => syncFields({ ...row, deletedAt: nowIso(), status: 'deleted' }, 'deleted')));
     }
     const rows = [];
-    for (const item of detail.items.filter((entry) => active(entry) && !Number(entry.isDiscountLine || 0) && !Number(entry.candidateOnly || 0))) {
+    for (const item of detail.items.filter((entry) => priceHistoryEligibleItem(entry, detail.invoice))) {
       const product = await upsertProductForItem(item);
       rows.push(syncFields({
         productId: product?.id || item.productId || '',
@@ -854,7 +891,13 @@ export const localDb = {
     const { productItems, discountItems } = splitInvoiceRows((payload.items || []).filter((item) => (item.productNameOriginal || item.name || item.rawName || '').trim()));
     const items = applyGiftAccounting(productItems);
     const itemTotal = items.reduce((sum, item) => sum + Number(item.totalPrice || 0), 0);
+    const discountTotal = discountItems.reduce((sum, item) => sum + Number(item.totalPrice ?? item.amount ?? 0), 0);
     const totalAmount = Number(payload.totalAmount || 0) > 0 ? Number(payload.totalAmount) : itemTotal;
+    const integrityWarnings = [];
+    if (items.length === 0) integrityWarnings.push('EMPTY_ITEMS');
+    const totalDifference = Math.abs(itemTotal + discountTotal - totalAmount);
+    if (Number(totalAmount || 0) > 0 && totalDifference > 0.05) integrityWarnings.push('AMOUNT_MISMATCH');
+    const invoiceStatus = integrityWarnings.length ? 'PENDING_REVIEW' : (payload.status || 'APPROVED');
     const existingInvoices = (await localDb.getInvoices()).filter((invoice) => idsFor(invoice).every((idValue) => idValue !== invoiceId));
     const duplicateInvoice = existingInvoices.find((invoice) => {
       const sameSupplier = supplier?.id && invoice.supplierId
@@ -899,12 +942,13 @@ export const localDb = {
       tax: Number(payload.tax || 0),
       totalAmount,
       calculatedTotal: itemTotal,
-      totalDifference: Math.abs(itemTotal - totalAmount),
+      totalDifference,
       duplicateStatus: duplicateInvoice ? 'duplicate' : (payload.duplicateStatus || 'none'),
       duplicateOfInvoiceId: duplicateInvoice?.id || payload.duplicateOfInvoiceId || '',
       isMultiPage: payload.isMultiPage ? 1 : 0,
       mergedInvoiceIds: payload.mergedInvoiceIds || '[]',
-      status: 'APPROVED'
+      recognitionWarnings: [payload.recognitionWarnings || '', ...integrityWarnings].filter(Boolean).join(' | '),
+      status: invoiceStatus
     });
     await put('invoices', invoice);
 
@@ -951,18 +995,20 @@ export const localDb = {
       });
       await put('invoice_items', item);
       const product = await upsertProductForItem(item);
-      await put('price_history', syncFields({
-        productId: product?.id || '',
-        invoiceId: invoice.id,
-        invoiceItemId: item.id,
-        supplierId: supplier?.id || '',
-        price: item.discountedEffectiveUnitCost || item.effectiveUnitCost || item.unitPrice,
-        quantity: item.actualQty || item.totalQty || item.quantity,
-        unit: item.unit,
-        invoiceDate,
-        invoiceNo: invoice.invoiceNo || '',
-        status: approvedForStats(invoice) ? 'confirmed' : 'pending_review'
-      }));
+      if (priceHistoryEligibleItem(item, invoice)) {
+        await put('price_history', syncFields({
+          productId: product?.id || '',
+          invoiceId: invoice.id,
+          invoiceItemId: item.id,
+          supplierId: supplier?.id || '',
+          price: item.discountedEffectiveUnitCost || item.effectiveUnitCost || item.unitPrice,
+          quantity: item.actualQty || item.totalQty || item.quantity,
+          unit: item.unit,
+          invoiceDate,
+          invoiceNo: invoice.invoiceNo || '',
+          status: 'confirmed'
+        }));
+      }
     }
     for (const rawDiscount of discountItems) {
       await put('invoice_discounts', syncFields({
@@ -992,7 +1038,6 @@ export const localDb = {
         itemTotal: items.reduce((sum, item) => sum + Number(item.totalPrice || 0), 0),
         itemTotalQuantity: items.reduce((sum, item) => sum + Number(item.quantity || 0), 0)
       };
-      return { ...invoice, supplierName: supplierDisplayName(supplier) };
     }).sort((a, b) => `${b.invoiceDate || ''}${b.createdAt || ''}`.localeCompare(`${a.invoiceDate || ''}${a.createdAt || ''}`));
   },
 
@@ -1131,11 +1176,19 @@ export const localDb = {
     const calculatedTotal = savedItems
       .filter((item) => !Number(item.isDiscountLine || 0) && !Number(item.candidateOnly || 0))
       .reduce((sum, item) => sum + Number(item.totalPrice || 0), 0);
-    await put('invoices', syncFields({
+    const nextDifference = Math.abs(calculatedTotal - Number(invoice.totalAmount || 0));
+    const nextWarnings = [];
+    if (savedItems.length === 0) nextWarnings.push('EMPTY_ITEMS');
+    if (Number(invoice.totalAmount || 0) > 0 && nextDifference > 0.05) nextWarnings.push('AMOUNT_MISMATCH');
+    const updatedInvoice = syncFields({
       ...invoice,
       calculatedTotal,
-      totalDifference: Math.abs(calculatedTotal - Number(invoice.totalAmount || 0)),
-      status: 'APPROVED'
+      totalDifference: nextDifference,
+      recognitionWarnings: nextWarnings.length ? [invoice.recognitionWarnings || '', ...nextWarnings].filter(Boolean).join(' | ') : invoice.recognitionWarnings,
+      status: nextWarnings.length ? 'PENDING_REVIEW' : 'APPROVED'
+    });
+    await put('invoices', syncFields({
+      ...updatedInvoice
     }));
 
     const correctionFields = ['nameCn', 'nameEn', 'spec', 'productNameOriginal', 'productNameNormalized', 'quantity', 'unit', 'unitPrice', 'totalPrice', 'isFreeItem', 'promoGroupId', 'promoGroupName', 'chargedQty', 'freeQty', 'actualQty', 'effectiveUnitCost'];
@@ -1166,7 +1219,7 @@ export const localDb = {
       await putMany('price_history', existingPrices.map((row) => syncFields({ ...row, deletedAt: nowIso(), status: 'deleted' }, 'deleted')));
     }
 
-    for (const item of savedItems.filter((entry) => !Number(entry.isDiscountLine || 0) && !Number(entry.candidateOnly || 0))) {
+    for (const item of savedItems.filter((entry) => priceHistoryEligibleItem(entry, updatedInvoice))) {
       const product = await upsertProductForItem(item);
       await put('product_aliases', syncFields({
         keyword: normalizeProductName(item.rawName || item.productNameOriginal || ''),
@@ -1186,14 +1239,14 @@ export const localDb = {
       await put('price_history', syncFields({
         productId: product?.id || item.productId || '',
         invoiceItemId: item.id,
-        supplierId: invoice.supplierId || '',
+        supplierId: updatedInvoice.supplierId || '',
         price: item.discountedEffectiveUnitCost || item.effectiveUnitCost || item.unitPrice,
         quantity: item.actualQty || item.totalQty || item.quantity,
         unit: item.unit || '',
-        invoiceDate: invoice.invoiceDate || today(),
-        invoiceNo: invoice.invoiceNo || '',
-        invoiceId: invoice.id,
-        status: approvedForStats(invoice) ? 'confirmed' : 'pending_review'
+        invoiceDate: updatedInvoice.invoiceDate || today(),
+        invoiceNo: updatedInvoice.invoiceNo || '',
+        invoiceId: updatedInvoice.id,
+        status: 'confirmed'
       }));
     }
 

@@ -9,8 +9,10 @@
     "test:auth": "node tests/authRegression.mjs",
     "test:members": "node tests/memberRegression.mjs",
     "test:sync-push": "node tests/syncPushRegression.mjs",
+    "test:mongo-duplicate": "node tests/mongoDuplicateRegression.mjs",
     "test:invitations": "node tests/invitationRegression.mjs",
     "test:invoice-integrity": "node tests/invoiceDataIntegrityRegression.mjs",
+    "test:invoice-save-integrity": "node tests/invoiceSaveIntegrityRegression.mjs",
     "audit:invoices": "node scripts/audit_invoices.js"
   },
   "dependencies": {

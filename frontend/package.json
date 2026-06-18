@@ -6,15 +6,20 @@
   "scripts": {
     "dev": "vite --host 0.0.0.0",
     "build": "vite build",
-    "preview": "vite preview --host 0.0.0.0"
+    "preview": "vite preview --host 0.0.0.0",
+    "test:ui": "node scripts/run-ui-tests.mjs",
+    "test:ui:headed": "node scripts/run-ui-tests.mjs --headed",
+    "test:ui:install": "playwright install chromium"
   },
   "dependencies": {
     "@vitejs/plugin-react": "^4.3.4",
-    "vite": "^6.0.7",
+    "lucide-react": "^0.468.0",
     "react": "^18.3.1",
     "react-dom": "^18.3.1",
     "react-router-dom": "^6.28.1",
-    "lucide-react": "^0.468.0"
+    "vite": "^6.0.7"
   },
-  "devDependencies": {}
+  "devDependencies": {
+    "@playwright/test": "^1.61.0"
+  }
 }

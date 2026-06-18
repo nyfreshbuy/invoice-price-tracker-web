@@ -672,10 +672,12 @@ button:disabled,
 
 .status-badge {
   display: inline-flex;
+  align-items: center;
   width: fit-content;
   max-width: 100%;
   padding: 6px 10px;
   border-radius: 999px;
+  font-size: 12px;
   font-weight: 700;
   overflow-wrap: anywhere;
 }
@@ -688,6 +690,50 @@ button:disabled,
 .status-badge.abnormal {
   color: #991b1b;
   background: #fee2e2;
+}
+
+.status-badge.duplicate {
+  color: #7f1d1d;
+  background: #fecaca;
+}
+
+.status-badge.conflict {
+  color: #6b21a8;
+  background: #f3e8ff;
+}
+
+.status-badge.multipage {
+  color: #075985;
+  background: #e0f2fe;
+}
+
+.status-badge.confirmed {
+  color: #047857;
+  background: #dcfce7;
+}
+
+.status-badge.normal {
+  color: #334155;
+  background: #e2e8f0;
+}
+
+.status-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-bottom: 8px;
+}
+
+.issue-reason {
+  margin: 6px 0 0;
+  color: var(--muted);
+  font-size: 13px;
+  overflow-wrap: anywhere;
+  word-break: break-word;
+}
+
+.metric-grid.compact {
+  grid-template-columns: repeat(auto-fit, minmax(120px, 1fr));
 }
 
 .merge-candidate {
@@ -879,5 +925,23 @@ button:disabled,
 
   .row-card {
     align-items: flex-start;
+  }
+
+  .row-actions {
+    width: 100%;
+  }
+
+  .row-actions button,
+  .row-actions a,
+  .primary-button,
+  .secondary-button,
+  .danger-button {
+    min-height: 44px;
+  }
+
+  .dialog-actions {
+    position: sticky;
+    bottom: -16px;
+    flex-wrap: wrap;
   }
 }

@@ -107,6 +107,7 @@ export default function App() {
   });
   const [authNotice, setAuthNotice] = useState('');
   const [syncState, setSyncState] = useState({ label: '☁ 已同步', pendingCount: 0, online: navigator.onLine, syncing: false });
+  const [syncingNow, setSyncingNow] = useState(false);
 
   useEffect(() => {
     let mounted = true;
@@ -209,7 +210,12 @@ export default function App() {
   }, []);
 
   async function handleSyncNow() {
-    setSyncState(await syncNow({ force: true, reason: 'manual' }));
+    setSyncingNow(true);
+    try {
+      setSyncState(await syncNow({ force: true, reason: 'manual' }));
+    } finally {
+      setSyncingNow(false);
+    }
   }
 
   async function handleRetryAuth() {
@@ -265,7 +271,7 @@ export default function App() {
 
   return (
     <div className="app-shell">
-      <SyncBar state={syncState} session={authSession} onSyncNow={handleSyncNow} onLogout={handleLogout} />
+      <SyncBar state={syncState} session={authSession} syncingNow={syncingNow} onSyncNow={handleSyncNow} onLogout={handleLogout} />
       <AuthStatusBanner status={authStatus} message={authNotice} onRetry={handleRetryAuth} />
       <main className="main">
         <Routes>
@@ -487,13 +493,14 @@ function AuthPage({ onAuthenticated }) {
   );
 }
 
-function SyncBar({ state, session, onSyncNow, onLogout }) {
+function SyncBar({ state, session, syncingNow, onSyncNow, onLogout }) {
+  const busy = Boolean(state.syncing || syncingNow);
   return (
     <div className={`sync-bar ${state.online ? '' : 'offline'}`}>
       <span>{session?.company?.name || 'InvoicePriceTracker'} · {state.label}</span>
-      <button onClick={onSyncNow} disabled={state.syncing || !state.online}>
-        <RefreshCw size={15} className={state.syncing ? 'spin' : ''} />
-        立即同步
+      <button onClick={onSyncNow} disabled={busy || !state.online}>
+        <RefreshCw size={15} className={busy ? 'spin' : ''} />
+        {busy ? '同步中...' : '立即同步'}
       </button>
       <button type="button" onClick={onLogout}>退出</button>
     </div>
@@ -532,12 +539,29 @@ function InvoiceListPage() {
   const filteredItems = items.filter((invoice) => {
     if (filter === 'pending') return isPendingInvoice(invoice);
     if (filter === 'abnormal') return isAbnormalInvoice(invoice);
+    if (filter === 'duplicate') return isDuplicateInvoice(invoice);
+    if (filter === 'conflict') return isConflictInvoice(invoice);
+    if (filter === 'multipage') return isPossibleMultiPageInvoice(invoice);
     return true;
   });
+  const counts = {
+    pending: items.filter(isPendingInvoice).length,
+    abnormal: items.filter(isAbnormalInvoice).length,
+    duplicate: items.filter(isDuplicateInvoice).length,
+    conflict: items.filter(isConflictInvoice).length
+  };
 
   return (
     <Page title="发票列表" action={<div className="row-actions"><Link className="icon-button" to="/invoices/batch"><Upload size={18} />批量</Link><Link className="icon-button" to="/invoices/new"><Plus size={18} />新增</Link></div>}>
-      {filter && <p className="hint">当前筛选：{filter === 'pending' ? '待确认发票' : '异常发票'} <Link to="/invoices">查看全部</Link></p>}
+      <Section title="待处理">
+        <div className="metric-grid compact">
+          <Metric label="待确认" value={counts.pending} to="/invoices?filter=pending" />
+          <Metric label="重复发票" value={counts.duplicate} to="/invoices?filter=duplicate" />
+          <Metric label="同步冲突" value={counts.conflict} to="/invoices?filter=conflict" />
+          <Metric label="异常发票" value={counts.abnormal} to="/invoices?filter=abnormal" />
+        </div>
+      </Section>
+      {filter && <p className="hint">当前筛选：{filterLabel(filter)} <Link to="/invoices">查看全部</Link></p>}
       {filteredItems.length === 0 && <EmptyState text="暂无发票" />}
       {message && <p className={message.includes('失败') || message.includes('没有') ? 'error' : 'success-text'}>{message}</p>}
       <div className="card-list">
@@ -546,7 +570,8 @@ function InvoiceListPage() {
             <div>
               <h3>{invoice.supplierName || '未命名供应商'}</h3>
               <p>日期 {invoice.invoiceDate || '-'} · 金额 {money(invoice.totalAmount)}</p>
-              <p>{invoiceStatusLabel(invoice)} · {statusText(invoice.syncStatus)}{invoice.invoiceNo ? ` · 发票号 ${invoice.invoiceNo}` : ''}</p>
+              <p><span className={`status-badge ${invoiceBadgeClass(invoice)}`}>{invoiceStatusLabel(invoice)}</span> <span className={`status-badge ${syncBadgeClass(invoice.syncStatus)}`}>{statusText(invoice.syncStatus)}</span>{invoice.invoiceNo ? ` · 发票号 ${invoice.invoiceNo}` : ''}</p>
+              <p className="issue-reason">原因：{invoiceIssueReason(invoice)}</p>
             </div>
             <div className="row-actions">
               <button type="button" onClick={() => setMergeInvoice(invoice)}>合并</button>
@@ -667,6 +692,7 @@ function BatchImportPage() {
   const [saving, setSaving] = useState(false);
   const [batchId, setBatchId] = useState('');
   const [selectedMergeIds, setSelectedMergeIds] = useState([]);
+  const [batchAction, setBatchAction] = useState('');
 
   useLocalReload(() => localDb.getInvoices().then(setExistingInvoices));
 
@@ -812,18 +838,22 @@ function BatchImportPage() {
       return;
     }
     const invoiceIds = selected.map((entry) => entry.task?.invoiceId || entry.result?.invoiceId).filter(Boolean);
+    setBatchAction('merge');
     try {
       const result = await api.mergeInvoice(invoiceIds[0], invoiceIds.slice(1));
       await pullFromCloud({ full: true });
-      setMessage(result.message || '合并成功');
+      setMessage(result.message || '✓ 已合并');
       navigate(`/invoices/${encodeURIComponent(result.invoiceId || invoiceIds[0])}`);
     } catch (error) {
       setMessage(error.message || '合并失败');
+    } finally {
+      setBatchAction('');
     }
   }
 
   async function controlBatch(action) {
     if (!batchId) return;
+    setBatchAction(action);
     try {
       if (action === 'pause') await api.pauseRecognitionBatch(batchId);
       if (action === 'resume') await api.resumeRecognitionBatch(batchId);
@@ -831,6 +861,8 @@ function BatchImportPage() {
       setMessage(action === 'pause' ? '已暂停本批次等待中的任务。' : action === 'resume' ? '已继续识别本批次。' : '已取消本批次剩余等待任务。');
     } catch (error) {
       setMessage(error.message || '批次控制失败');
+    } finally {
+      setBatchAction('');
     }
   }
 
@@ -856,9 +888,9 @@ function BatchImportPage() {
         </div>
         {batchId && (
           <div className="row-actions">
-            <button type="button" onClick={() => controlBatch('resume')}>继续识别</button>
-            <button type="button" onClick={() => controlBatch('pause')}>暂停识别</button>
-            <button type="button" className="danger-button" onClick={() => controlBatch('cancel')}>取消剩余识别</button>
+            <button type="button" disabled={Boolean(batchAction)} onClick={() => controlBatch('resume')}>{batchAction === 'resume' ? '处理中...' : '继续识别'}</button>
+            <button type="button" disabled={Boolean(batchAction)} onClick={() => controlBatch('pause')}>{batchAction === 'pause' ? '处理中...' : '暂停识别'}</button>
+            <button type="button" className="danger-button" disabled={Boolean(batchAction)} onClick={() => controlBatch('cancel')}>{batchAction === 'cancel' ? '处理中...' : '取消剩余识别'}</button>
           </div>
         )}
       </Section>
@@ -878,7 +910,7 @@ function BatchImportPage() {
           </div>
         )}
         {mergeableEntries.length >= 2 && (
-          <button type="button" className="secondary-button" onClick={mergeSelectedBatchInvoices}>合并选中的发票</button>
+          <button type="button" className="secondary-button" disabled={Boolean(batchAction)} onClick={mergeSelectedBatchInvoices}>{batchAction === 'merge' ? '合并中...' : '合并选中的发票'}</button>
         )}
       </Section>
 
@@ -936,6 +968,7 @@ function RecognitionTaskListPage() {
   const [tasks, setTasks] = useState([]);
   const [message, setMessage] = useState('');
   const [taskActions, setTaskActions] = useState({});
+  const [taskMessages, setTaskMessages] = useState({});
   const pulledCompletedTaskIds = useRef(new Set());
 
   async function load() {
@@ -976,14 +1009,19 @@ function RecognitionTaskListPage() {
     };
   }, []);
 
+  function setTaskMessage(taskId, text, type = 'info') {
+    setTaskMessages((current) => ({ ...current, [taskId]: { text, type } }));
+  }
+
   async function retry(taskId) {
     setTaskActions((current) => ({ ...current, [taskId]: 'retry' }));
+    setTaskMessage(taskId, '重新识别处理中...', 'info');
     try {
       await api.retryRecognitionTask(taskId);
-      setMessage('已重新加入后台识别队列');
+      setTaskMessage(taskId, '✓ 已重新加入后台识别队列', 'success');
       load();
     } catch (error) {
-      setMessage(error.message || '重新识别失败');
+      setTaskMessage(taskId, error.message || '重新识别失败', 'error');
       alert(`操作失败：${error.message || '重新识别失败'}`);
     } finally {
       setTaskActions((current) => ({ ...current, [taskId]: '' }));
@@ -992,13 +1030,14 @@ function RecognitionTaskListPage() {
 
   async function forceSave(taskId) {
     setTaskActions((current) => ({ ...current, [taskId]: 'force' }));
+    setTaskMessage(taskId, '强制保存处理中...', 'info');
     try {
       await api.forceSaveRecognitionTask(taskId);
-      setMessage('已强制保存该识别结果');
+      setTaskMessage(taskId, '✓ 已强制保存该识别结果', 'success');
       await pullFromCloud({ full: true });
       load();
     } catch (error) {
-      setMessage(error.message || '强制保存失败');
+      setTaskMessage(taskId, error.message || '强制保存失败', 'error');
       alert(`操作失败：${error.message || '强制保存失败'}`);
     } finally {
       setTaskActions((current) => ({ ...current, [taskId]: '' }));
@@ -1007,27 +1046,29 @@ function RecognitionTaskListPage() {
 
   async function reuploadTaskImage(task, file) {
     if (!file) return;
+    setTaskMessage(task.id, '重新上传处理中...', 'info');
     try {
       const data = new FormData();
       data.append('image', file);
       if (task.batchId) data.append('batchId', task.batchId);
       const created = await api.createRecognitionTask(data);
-      setMessage(`已重新上传并创建任务：${created.taskId}`);
+      setTaskMessage(task.id, `✓ 已重新上传并创建任务：${created.taskId}`, 'success');
       load();
     } catch (error) {
-      setMessage(error.message || '重新上传失败');
+      setTaskMessage(task.id, error.message || '重新上传失败', 'error');
     }
   }
 
   async function decideTask(taskId, action) {
     setTaskActions((current) => ({ ...current, [taskId]: action }));
+    setTaskMessage(taskId, '处理中...', 'info');
     try {
       await api.decideRecognitionTask(taskId, action);
-      setMessage(action === 'merge' ? '✓ 已合并' : action === 'duplicate' ? '✓ 已标记重复' : '✓ 已保留');
+      setTaskMessage(taskId, action === 'merge' ? '✓ 已合并' : action === 'duplicate' ? '✓ 已标记重复' : '✓ 已保留', 'success');
       await pullFromCloud({ full: true });
       load();
     } catch (error) {
-      setMessage(error.message || '人工确认失败');
+      setTaskMessage(taskId, error.message || '人工确认失败', 'error');
       alert(`操作失败：${error.message || '人工确认失败'}`);
     } finally {
       setTaskActions((current) => ({ ...current, [taskId]: action === 'merge' ? 'merged' : action === 'duplicate' ? 'duplicated' : action === 'independent' ? 'kept' : '' }));
@@ -1041,6 +1082,7 @@ function RecognitionTaskListPage() {
       <div className="card-list">
         {tasks.map((task) => {
           const action = taskActions[task.id] || '';
+          const taskMessage = taskMessages[task.id];
           const handled = ['merged', 'duplicated', 'kept'].includes(action);
           return (
           <div className="row-card" key={task.id}>
@@ -1057,6 +1099,7 @@ function RecognitionTaskListPage() {
               {task.result?.duplicateCheck?.autoMerged && <p className="success-text">{task.result.duplicateCheck.autoMergeMessage || `已自动合并：发票号 ${task.result?.parsed?.invoiceNo || '-'}，总金额 ${money(task.result.duplicateCheck.invoiceTotal || task.result?.parsed?.totalAmount)}`}</p>}
               {task.result?.duplicateCheck?.sameInvoiceGroup && !task.result?.duplicateCheck?.isDuplicate && !task.result?.duplicateCheck?.autoMerged && <p className="warning-text">{task.result.duplicateCheck.sameInvoiceGroupReason}</p>}
               {task.error && <p className="error">{task.error}</p>}
+              {taskMessage?.text && <p className={taskMessage.type === 'error' ? 'error' : taskMessage.type === 'success' ? 'success-text' : 'hint'}>{taskMessage.text}</p>}
             </div>
             <div className="row-actions">
               {task.invoiceId && <Link className="icon-button" to={`/invoices/${task.invoiceId}`}>{task.result?.duplicateCheck?.autoMerged ? '查看合并明细' : '发票'}</Link>}
@@ -1437,9 +1480,19 @@ function InvoiceDetailPage() {
 
 function HomeDashboardPage() {
   const [dashboard, setDashboard] = useState(null);
+  const [workflowMetrics, setWorkflowMetrics] = useState({ pending: 0, duplicate: 0, conflict: 0, abnormal: 0 });
   const session = getAuthSession();
   const isAdmin = isAdminRole(session?.user?.role || '');
-  useLocalReload(() => localDb.getDashboardMetrics().then(setDashboard));
+  useLocalReload(async () => {
+    const [metrics, invoices] = await Promise.all([localDb.getDashboardMetrics(), localDb.getInvoices()]);
+    setDashboard(metrics);
+    setWorkflowMetrics({
+      pending: invoices.filter(isPendingInvoice).length,
+      duplicate: invoices.filter(isDuplicateInvoice).length,
+      conflict: invoices.filter(isConflictInvoice).length,
+      abnormal: invoices.filter(isAbnormalInvoice).length
+    });
+  });
 
   return (
     <Page title="InvoicePriceTracker" subtitle="采购数据库、供应商数据库、历史价格数据库">
@@ -1456,6 +1509,8 @@ function HomeDashboardPage() {
           <Metric label="折扣总金额" value={money(dashboard?.discountTotal)} />
           <Metric label="异常发票数量" value={dashboard?.abnormalInvoiceCount ?? 0} to="/invoices?filter=abnormal" />
           <Metric label="待确认发票数量" value={dashboard?.pendingInvoiceCount ?? 0} to="/invoices?filter=pending" />
+          <Metric label="重复发票数量" value={workflowMetrics.duplicate} to="/invoices?filter=duplicate" />
+          <Metric label="同步冲突数量" value={workflowMetrics.conflict} to="/invoices?filter=conflict" />
         </div>
       </Section>
       <Section title="采购中心">
@@ -1610,36 +1665,44 @@ function InvoiceDetailPageWithGifts() {
   if (!detail) return <Page title="发票详情"><EmptyState text="未找到发票" /></Page>;
 
   const { invoice, items, discounts = [], mergedInvoices = [] } = detail;
-  console.log('Invoice image fields', {
-    imageUrl: invoice.imageUrl || '',
-    imagePath: invoice.imagePath || '',
-    imageId: invoice.imageId || ''
-  });
   const giftSummary = summarizeGiftAccounting(items);
   const promoGroups = summarizePromoGroups(items);
   const finalSavedResult = { invoice, items, discounts, mergedInvoices };
   return (
     <Page title="发票详情" action={<div className="row-actions"><button type="button" onClick={() => setEditingInvoice(true)}>编辑发票</button><button className="danger-button" onClick={remove}><Trash2 size={16} />删除</button></div>}>
       {detailMessage && <p className="success-text">{detailMessage}</p>}
-      {(isPendingInvoice(invoice) || isAbnormalInvoice(invoice)) && (
-        <Section title="处理状态">
-          {isPendingInvoice(invoice) && <p className="status-badge pending">待确认发票</p>}
-          {isAbnormalInvoice(invoice) && <p className="status-badge abnormal">异常发票</p>}
-          {isAbnormalInvoice(invoice) && (
-            <p className="warning-text">异常原因：{invoice.recognitionWarnings || '商品明细总额与发票总额不一致'}{Number(invoice.totalDifference || 0) > 0.05 ? `，差额：${money(invoice.totalDifference)}` : ''}</p>
-          )}
+      <Section title="处理状态">
+        <div className="status-row">
+          <span className={`status-badge ${invoiceBadgeClass(invoice)}`}>{invoiceStatusLabel(invoice)}</span>
+          <span className={`status-badge ${syncBadgeClass(invoice.syncStatus)}`}>{statusText(invoice.syncStatus)}</span>
+        </div>
+        <p className="issue-reason">原因：{invoiceIssueReason(invoice)}</p>
+        {isDuplicateInvoice(invoice) && <p className="error">重复候选：{invoice.duplicateOfInvoiceId || '-'}</p>}
+        {isConflictInvoice(invoice) && <p className="warning-text">同步冲突需要人工确认。请编辑后保存，或保留为独立发票。</p>}
+        {(isDuplicateInvoice(invoice) || isConflictInvoice(invoice) || invoice.duplicateStatus === 'possible') && (
+          <div className="row-actions">
+            <button className="secondary-button" type="button" onClick={() => setEditingInvoice(true)}>编辑发票</button>
+            <button className="secondary-button" type="button" disabled={!items.length} onClick={() => items[0] && setEditingItem(items[0])}>编辑商品明细</button>
+            {invoice.duplicateStatus === 'possible' && <button className="danger-button" type="button" disabled={operation === 'mark-duplicate'} onClick={markDuplicate}>{operation === 'mark-duplicate' ? '标记中...' : '标记重复'}</button>}
+            <button className="primary-button success-button" type="button" disabled={operation === 'keep-independent'} onClick={keepIndependent}>{operation === 'keep-independent' ? '处理中...' : '保留为独立发票'}</button>
+          </div>
+        )}
+        {(isPendingInvoice(invoice) || isAbnormalInvoice(invoice)) && (
+          <>
+            {isAbnormalInvoice(invoice) && (
+              <p className="warning-text">异常原因：{invoice.recognitionWarnings || '商品明细总额与发票总额不一致'}{Number(invoice.totalDifference || 0) > 0.05 ? `，差额：${money(invoice.totalDifference)}` : ''}</p>
+            )}
           <div className="row-actions">
             <button className="primary-button success-button" type="button" disabled={operation === 'confirm-invoice'} onClick={() => confirmInvoice('CONFIRMED')}>
               {operation === 'confirm-invoice' ? '处理中...' : '确认发票'}
             </button>
-            {invoice.duplicateStatus === 'possible' && <button className="danger-button" type="button" disabled={operation === 'mark-duplicate'} onClick={markDuplicate}>{operation === 'mark-duplicate' ? '标记中...' : '标记重复'}</button>}
-            {invoice.duplicateStatus === 'possible' && <button className="primary-button success-button" type="button" disabled={operation === 'keep-independent'} onClick={keepIndependent}>{operation === 'keep-independent' ? '处理中...' : '保留为独立发票'}</button>}
             {isAbnormalInvoice(invoice) && <button className="secondary-button" type="button" onClick={() => setEditingInvoice(true)}>编辑发票</button>}
             {isAbnormalInvoice(invoice) && <button className="secondary-button" type="button" disabled={!items.length} onClick={() => items[0] && setEditingItem(items[0])}>编辑商品明细</button>}
             {isAbnormalInvoice(invoice) && <button className="primary-button success-button" type="button" disabled={operation === 'confirm-invoice'} onClick={() => confirmInvoice('CONFIRMED')}>{operation === 'confirm-invoice' ? '处理中...' : '确认无误'}</button>}
           </div>
-        </Section>
-      )}
+          </>
+        )}
+      </Section>
       <Section title="发票信息">
         <Info label="供应商" value={invoice.supplierName || '未命名供应商'} />
         <Info label="发票号" value={invoice.invoiceNo || '-'} />
@@ -1826,6 +1889,8 @@ function InvoiceItemEditDialog({ item, onClose, onSave }) {
     unitPrice: Number(item.unitPrice || 0),
     totalPrice: Number(item.totalPrice || 0),
     isFreeItem: Boolean(Number(item.isFreeItem || 0)),
+    isDiscountLine: Boolean(Number(item.isDiscountLine || 0)),
+    candidateOnly: Boolean(Number(item.candidateOnly || 0)),
     participatesInGiftAllocation: Boolean(Number(item.participatesInGiftAllocation || 0))
   }));
 
@@ -1864,6 +1929,8 @@ function InvoiceItemEditDialog({ item, onClose, onSave }) {
         totalQty: Number(form.actualQty || form.totalQty || form.quantity || 0),
         effectiveUnitCost: Number(form.effectiveUnitCost || 0),
         isFreeItem: form.isFreeItem ? 1 : 0,
+        isDiscountLine: form.isDiscountLine ? 1 : 0,
+        candidateOnly: form.candidateOnly ? 1 : 0,
         participatesInGiftAllocation: form.participatesInGiftAllocation ? 1 : 0,
         correctedByUser: 1
       });
@@ -1894,6 +1961,8 @@ function InvoiceItemEditDialog({ item, onClose, onSave }) {
         </div>
         {mismatch && <p className="warning-text">总价与 数量 × 单价 不一致，计算值：{money(calculatedTotal)}。允许保存。</p>}
         <SwitchField label="是否赠品" checked={Boolean(form.isFreeItem)} onChange={(checked) => update('isFreeItem', checked)} />
+        <SwitchField label="是否折扣行" checked={Boolean(form.isDiscountLine)} onChange={(checked) => update('isDiscountLine', checked)} />
+        <SwitchField label="备注/候选行不计入价格" checked={Boolean(form.candidateOnly)} onChange={(checked) => update('candidateOnly', checked)} />
         <SwitchField label="参与赠品分摊" checked={Boolean(form.participatesInGiftAllocation)} onChange={(checked) => update('participatesInGiftAllocation', checked)} />
         <label className="field"><span>备注</span><input value={form.notes || ''} onChange={(event) => update('notes', event.target.value)} /></label>
         <CollapsibleSection title="高级信息">
@@ -1901,7 +1970,6 @@ function InvoiceItemEditDialog({ item, onClose, onSave }) {
           <label className="field"><span>单位</span><input value={form.unit || ''} onChange={(event) => update('unit', event.target.value)} /></label>
           <label className="field"><span>分摊组 ID</span><input value={form.promoGroupId || ''} onChange={(event) => update('promoGroupId', event.target.value)} /></label>
           <label className="field"><span>分摊组名称</span><input value={form.promoGroupName || ''} onChange={(event) => update('promoGroupName', event.target.value)} /></label>
-          <SwitchField label="候选行不保存" checked={Boolean(form.candidateOnly)} onChange={(checked) => update('candidateOnly', checked)} />
           <SwitchField label="圈选" checked={Boolean(form.isCircled)} onChange={(checked) => update('isCircled', checked)} />
           <SwitchField label="勾选" checked={Boolean(form.isChecked)} onChange={(checked) => update('isChecked', checked)} />
         </CollapsibleSection>
@@ -2729,6 +2797,7 @@ function SettingsPage() {
   const [cloudStatus, setCloudStatus] = useState(null);
   const [syncSnapshot, setSyncSnapshot] = useState(null);
   const [syncPrefs, setSyncPrefs] = useState({ autoSync: true, wifiOnly: false, allowCellular: false });
+  const [syncingManual, setSyncingManual] = useState(false);
   const session = getAuthSession();
   const isAdmin = isAdminRole(session?.user?.role || '');
   const loadSyncCenter = async () => {
@@ -2758,11 +2827,18 @@ function SettingsPage() {
   }
 
   async function runSyncNow() {
+    setSyncingManual(true);
     setSyncMessage('正在同步...');
-    const snapshot = await syncNow({ force: true, reason: 'manual' });
-    setSyncMessage(snapshot.lastError ? `同步失败：${snapshot.lastError}` : '同步完成');
-    api.syncStatus().then(setCloudStatus).catch(() => {});
-    load();
+    try {
+      const snapshot = await syncNow({ force: true, reason: 'manual' });
+      setSyncMessage(snapshot.lastError ? `同步失败：${snapshot.lastError}` : '同步完成');
+      api.syncStatus().then(setCloudStatus).catch(() => {});
+      load();
+    } catch (error) {
+      setSyncMessage(`同步失败：${error.message || '未知错误'}`);
+    } finally {
+      setSyncingManual(false);
+    }
   }
 
   async function restoreFromCloud() {
@@ -2814,7 +2890,7 @@ function SettingsPage() {
         <SwitchField label="仅 WiFi 同步" checked={Boolean(syncPrefs.wifiOnly)} onChange={(checked) => updateSyncPreference({ wifiOnly: checked, allowCellular: checked ? false : syncPrefs.allowCellular })} />
         <SwitchField label="允许蜂窝网络同步" checked={Boolean(syncPrefs.allowCellular)} onChange={(checked) => updateSyncPreference({ allowCellular: checked, wifiOnly: checked ? false : syncPrefs.wifiOnly })} />
         <div className="row-actions">
-          <button className="primary-button" type="button" onClick={runSyncNow}><RefreshCw size={16} />立即同步</button>
+          <button className="primary-button" type="button" disabled={syncingManual} onClick={runSyncNow}><RefreshCw size={16} className={syncingManual ? 'spin' : ''} />{syncingManual ? '同步中...' : '立即同步'}</button>
           <button className="secondary-button" type="button" onClick={restoreFromCloud}>从云端恢复</button>
           <button className="secondary-button" type="button" onClick={cleanupSyncedCache}>清理已同步缓存</button>
           <button className="secondary-button" type="button" onClick={clearCacheAndRestore}>清空本地缓存后重新拉取</button>
@@ -3217,8 +3293,36 @@ function useLocalReload(loader, deps = []) {
 function statusText(status) {
   if (status === 'pending') return '待同步';
   if (status === 'deleted') return '待删除同步';
-  if (status === 'conflict') return '需要人工确认';
+  if (status === 'conflict') return '同步冲突';
+  if (status === 'needs_review') return '待确认';
+  if (status === 'duplicate') return '重复发票';
+  if (status === 'failed') return '同步失败';
   return '已同步';
+}
+
+function isDuplicateInvoice(invoice = {}) {
+  return ['duplicate', 'confirmed'].includes(String(invoice.duplicateStatus || '').toLowerCase())
+    || String(invoice.status || '').toUpperCase() === 'DUPLICATE';
+}
+
+function isConflictInvoice(invoice = {}) {
+  return String(invoice.syncStatus || '').toLowerCase() === 'conflict'
+    || String(invoice.status || '').toUpperCase() === 'CONFLICT';
+}
+
+function isPossibleMultiPageInvoice(invoice = {}) {
+  const reason = `${invoice.reason || ''} ${invoice.syncNote || ''} ${invoice.recognitionWarnings || ''}`.toUpperCase();
+  return Boolean(invoice.sameInvoiceGroup || invoice.possibleSameInvoicePages || reason.includes('MULTI_PAGE'));
+}
+
+function filterLabel(filter) {
+  return {
+    pending: '待确认发票',
+    abnormal: '异常发票',
+    duplicate: '重复发票',
+    conflict: '同步冲突',
+    multipage: '疑似多页'
+  }[filter] || filter;
 }
 
 function isConfirmedInvoice(invoice = {}) {
@@ -3238,13 +3342,62 @@ function isAbnormalInvoice(invoice = {}) {
 }
 
 function invoiceStatusLabel(invoice = {}) {
-  if (['duplicate', 'confirmed'].includes(String(invoice.duplicateStatus || '').toLowerCase())) return '重复';
-  if (String(invoice.status || '').toLowerCase() === 'duplicate') return '重复';
+  if (isConflictInvoice(invoice)) return '同步冲突';
+  if (isDuplicateInvoice(invoice)) return '重复发票';
+  if (isPossibleMultiPageInvoice(invoice)) return '疑似多页';
   if (isConfirmedInvoice(invoice)) return '已确认';
   if (isAbnormalInvoice(invoice)) return '异常';
   if (isPendingInvoice(invoice)) return '待确认';
   if (String(invoice.status || '').toLowerCase() === 'merged') return '已合并';
   return invoice.status || '正常';
+}
+
+function invoiceBadgeClass(invoice = {}) {
+  if (isDuplicateInvoice(invoice)) return 'duplicate';
+  if (isConflictInvoice(invoice)) return 'conflict';
+  if (isAbnormalInvoice(invoice)) return 'abnormal';
+  if (isPossibleMultiPageInvoice(invoice)) return 'multipage';
+  if (isPendingInvoice(invoice)) return 'pending';
+  if (isConfirmedInvoice(invoice)) return 'confirmed';
+  return 'normal';
+}
+
+function syncBadgeClass(syncStatus = '') {
+  if (syncStatus === 'conflict') return 'conflict';
+  if (syncStatus === 'pending' || syncStatus === 'deleted') return 'pending';
+  if (syncStatus === 'failed') return 'abnormal';
+  return 'confirmed';
+}
+
+function invoiceIssueReason(invoice = {}) {
+  const conflictRecord = parseMaybeJson(invoice.conflictRecord);
+  const reasons = [
+    invoice.reason,
+    invoice.syncNote,
+    invoice.recognitionWarnings,
+    invoice.duplicateReason,
+    invoice.possibleDuplicateReason,
+    invoice.sameInvoiceGroupReason,
+    conflictRecord.reason,
+    conflictRecord.status,
+    conflictRecord.duplicateCheck?.duplicateReason,
+    conflictRecord.duplicateCheck?.possibleDuplicateReason
+  ].filter(Boolean);
+  if (Number(invoice.totalDifference || 0) > 0.05) reasons.push(`金额差异 ${money(invoice.totalDifference)}`);
+  if (isConflictInvoice(invoice) && reasons.length === 0) reasons.push('本地与云端数据冲突');
+  if (isDuplicateInvoice(invoice) && reasons.length === 0) reasons.push('后端检测到重复发票');
+  if (isPendingInvoice(invoice) && reasons.length === 0) reasons.push('需要人工确认后进入正式统计');
+  if (isAbnormalInvoice(invoice) && reasons.length === 0) reasons.push('识别结果或金额校验异常');
+  return reasons.join(' | ') || '无';
+}
+
+function parseMaybeJson(value) {
+  if (!value || typeof value !== 'string') return {};
+  try {
+    return JSON.parse(value);
+  } catch {
+    return {};
+  }
 }
 
 function isAdminRole(role) {

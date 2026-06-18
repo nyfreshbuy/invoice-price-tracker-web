@@ -220,11 +220,18 @@ function pgColumnType(column) {
   return 'TEXT';
 }
 
+function columnDefault(table, column, postgres = false) {
+  if (table === 'price_history' && column === 'status') return " DEFAULT 'active'";
+  return '';
+}
+
+function columnDefinition(table, column, postgres = false) {
+  const type = postgres ? pgColumnType(column) : columnType(column);
+  return `${quoteIdentifier(column)} ${type}${columnDefault(table, column, postgres)}${column === 'id' ? ' PRIMARY KEY' : ''}`;
+}
+
 function createTableSql(table, columns, postgres = false) {
-  const defs = columns.map((column) => {
-    const type = postgres ? pgColumnType(column) : columnType(column);
-    return `${quoteIdentifier(column)} ${type}${column === 'id' ? ' PRIMARY KEY' : ''}`;
-  });
+  const defs = columns.map((column) => columnDefinition(table, column, postgres));
   return `CREATE TABLE IF NOT EXISTS ${quoteTable(table)} (${defs.join(', ')});`;
 }
 
@@ -232,13 +239,46 @@ function hasSqliteColumn(table, column) {
   return sqliteDb.prepare(`PRAGMA table_info(${quoteIdentifier(table)})`).all().some((entry) => entry.name === column);
 }
 
+function sqliteColumnInfo(table, column) {
+  if (!sqliteDb) return null;
+  return sqliteDb.prepare(`PRAGMA table_info(${quoteIdentifier(table)})`).all().find((entry) => entry.name === column) || null;
+}
+
 async function ensureColumn(table, column) {
   if (usingPostgres) {
-    await execute(`ALTER TABLE ${quoteTable(table)} ADD COLUMN IF NOT EXISTS ${quoteIdentifier(column)} ${pgColumnType(column)};`);
+    await execute(`ALTER TABLE ${quoteTable(table)} ADD COLUMN IF NOT EXISTS ${quoteIdentifier(column)} ${pgColumnType(column)}${columnDefault(table, column, true)};`);
     return;
   }
   if (!hasSqliteColumn(table, column)) {
-    sqliteDb.exec(`ALTER TABLE ${quoteTable(table)} ADD COLUMN ${quoteIdentifier(column)} ${columnType(column)};`);
+    sqliteDb.exec(`ALTER TABLE ${quoteTable(table)} ADD COLUMN ${columnDefinition(table, column, false)};`);
+  }
+}
+
+function hasPriceHistoryStatusDefault() {
+  const info = sqliteColumnInfo('price_history', 'status');
+  return String(info?.dflt_value || '').replaceAll('"', "'").toLowerCase() === "'active'";
+}
+
+function rebuildSqliteTable(table) {
+  const columns = tableColumns[table];
+  const tempTable = `_${table}_migration_${Date.now()}`;
+  const existingColumns = sqliteDb.prepare(`PRAGMA table_info(${quoteIdentifier(table)})`).all().map((entry) => entry.name);
+  const copyColumns = columns.filter((column) => existingColumns.includes(column));
+  sqliteDb.exec('PRAGMA foreign_keys = OFF');
+  try {
+    sqliteDb.exec(`ALTER TABLE ${quoteTable(table)} RENAME TO ${quoteIdentifier(tempTable)}`);
+    sqliteDb.exec(createTableSql(table, columns, false));
+    if (copyColumns.length) {
+      const columnList = copyColumns.map(quoteIdentifier).join(', ');
+      sqliteDb.exec(`
+        INSERT INTO ${quoteTable(table)} (${columnList})
+        SELECT ${columnList}
+        FROM ${quoteIdentifier(tempTable)}
+      `);
+    }
+    sqliteDb.exec(`DROP TABLE ${quoteIdentifier(tempTable)}`);
+  } finally {
+    sqliteDb.exec('PRAGMA foreign_keys = ON');
   }
 }
 
@@ -251,6 +291,10 @@ export async function migrate() {
     for (const column of columns) {
       await ensureColumn(table, column);
     }
+  }
+
+  if (!usingPostgres && !hasPriceHistoryStatusDefault()) {
+    rebuildSqliteTable('price_history');
   }
 
   await execute(`CREATE INDEX IF NOT EXISTS ${quoteIdentifier('idx_suppliers_company')} ON ${quoteTable('suppliers')} (${quoteIdentifier('companyId')});`);

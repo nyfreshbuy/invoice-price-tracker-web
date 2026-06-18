@@ -92,13 +92,52 @@ function amountSame(left, right) {
   return Math.abs(Number(left || 0) - Number(right || 0)) < 0.01;
 }
 
-async function findMongoDuplicateInvoice(db, incoming, companyId) {
+function normalizeComparable(value = '') {
+  return String(value || '').trim().toLowerCase().replace(/[^a-z0-9\u3400-\u9fff]+/g, '');
+}
+
+function itemSignature(items = []) {
+  return items
+    .filter((item) => !Number(item.isDiscountLine || 0) && !Number(item.candidateOnly || 0) && !Number(item.isFreeItem || 0))
+    .map((item) => `${normalizeComparable(item.productNameNormalized || item.normalizedName || item.productNameOriginal || item.name || item.rawName || '')}:${Number(item.quantity || item.actualQty || item.totalQty || 0)}:${Number(item.totalPrice || 0).toFixed(2)}`)
+    .filter((part) => !part.startsWith(':'))
+    .sort()
+    .join('|');
+}
+
+function daysBetween(a, b) {
+  if (!a || !b) return Number.POSITIVE_INFINITY;
+  const left = new Date(`${String(a).slice(0, 10)}T00:00:00Z`).getTime();
+  const right = new Date(`${String(b).slice(0, 10)}T00:00:00Z`).getTime();
+  if (!Number.isFinite(left) || !Number.isFinite(right)) return Number.POSITIVE_INFINITY;
+  return Math.abs(left - right) / 86400000;
+}
+
+function idsFor(record = {}) {
+  return [record.id, record.localId, record.serverId].filter(Boolean);
+}
+
+async function invoiceItemsFor(db, invoice, incomingItems = []) {
+  const invoiceIds = idsFor(invoice);
+  const localItems = incomingItems.filter((item) => invoiceIds.includes(item.invoiceId));
+  if (localItems.length) return localItems;
+  return db.collection('invoice_items').find({
+    companyId: invoice.companyId,
+    invoiceId: { $in: invoiceIds },
+    deletedAt: { $in: [null, ''] }
+  }).toArray();
+}
+
+async function findMongoDuplicateInvoice(db, incoming, companyId, syncContext = {}) {
   const collection = db.collection('invoices');
   const invoiceNo = String(incoming.invoiceNo || '').trim();
   const invoiceDate = String(incoming.invoiceDate || '').trim();
   const supplierId = String(incoming.supplierId || '').trim();
+  const supplierNameKey = normalizeComparable(incoming.supplierName || incoming.supplierDisplayName || '');
   const totalAmount = Number(incoming.totalAmount || 0);
   const selfIds = [incoming.id, incoming.serverId, incoming.localId].filter(Boolean);
+  const incomingItems = Array.isArray(syncContext.changes?.invoice_items) ? syncContext.changes.invoice_items : [];
+  const currentSignature = itemSignature(await invoiceItemsFor(db, incoming, incomingItems));
   const base = {
     companyId,
     deletedAt: { $in: [null, ''] },
@@ -111,11 +150,23 @@ async function findMongoDuplicateInvoice(db, incoming, companyId) {
     const candidates = await collection.find({
       ...base,
       invoiceNo,
-      invoiceDate,
       totalAmount: { $gte: totalAmount - 0.009, $lte: totalAmount + 0.009 },
       ...(supplierId ? { supplierId } : {})
-    }).limit(5).toArray();
-    if (candidates.length) return candidates[0];
+    }).limit(20).toArray();
+    for (const candidate of candidates) {
+      const sameSupplier = supplierId && candidate.supplierId
+        ? supplierId === candidate.supplierId
+        : normalizeComparable(candidate.supplierName || candidate.supplierDisplayName || '') === supplierNameKey;
+      if (!sameSupplier || daysBetween(invoiceDate, candidate.invoiceDate) > 1) continue;
+      const candidateSignature = itemSignature(await invoiceItemsFor(db, candidate, incomingItems));
+      if (!currentSignature || !candidateSignature || currentSignature === candidateSignature) {
+        return { status: 'duplicate', invoice: candidate };
+      }
+      const sameBatch = Boolean(incoming.batchId && candidate.batchId && incoming.batchId === candidate.batchId);
+      const sameGroup = Boolean(incoming.sameInvoiceGroup || candidate.sameInvoiceGroup || (incoming.invoiceGroupKey && incoming.invoiceGroupKey === candidate.invoiceGroupKey));
+      if (sameBatch || sameGroup) return { status: 'possible', invoice: candidate };
+      return { status: 'possible', invoice: candidate };
+    }
   }
 
   const ocrTextHash = String(incoming.ocrTextHash || '').trim();
@@ -127,16 +178,17 @@ async function findMongoDuplicateInvoice(db, incoming, companyId) {
       totalAmount: { $gte: totalAmount - 0.009, $lte: totalAmount + 0.009 },
       ...(supplierId ? { supplierId } : {})
     });
-    if (duplicate) return duplicate;
+    if (duplicate) return { status: 'duplicate', invoice: duplicate };
   }
 
-  const imageHash = String(incoming.imageHash || '').trim();
+  const imageHash = String(incoming.imageHash || incoming.sourceHash || '').trim();
   if (imageHash && totalAmount > 0) {
-    return collection.findOne({
+    const duplicate = await collection.findOne({
       ...base,
-      imageHash,
+      $or: [{ imageHash }, { sourceHash: imageHash }],
       totalAmount: { $gte: totalAmount - 0.009, $lte: totalAmount + 0.009 }
     });
+    if (duplicate) return { status: 'duplicate', invoice: duplicate };
   }
   return null;
 }
@@ -157,8 +209,9 @@ async function pushOneMongo(db, table, incoming, deviceId, companyId, syncContex
   const record = cleanRecord(table, { ...incoming, id: serverId, serverId, version: nextVersion }, companyId, deviceId);
 
   if (table === 'invoices' && !record.deletedAt) {
-    const duplicate = await findMongoDuplicateInvoice(db, record, companyId);
-    if (duplicate && !incoming.forceSave && !incoming.force) {
+    const duplicateInfo = await findMongoDuplicateInvoice(db, record, companyId, syncContext);
+    const duplicate = duplicateInfo?.invoice || null;
+    if (duplicateInfo?.status === 'duplicate' && duplicate && !incoming.forceSave && !incoming.force) {
       const invoiceIds = [incoming.id, incoming.localId, incoming.serverId, record.id, record.localId, record.serverId].filter(Boolean);
       for (const value of invoiceIds) syncContext.rejectedInvoiceIds.add(value);
       return {
@@ -176,7 +229,11 @@ async function pushOneMongo(db, table, incoming, deviceId, companyId, syncContex
         record: null
       };
     }
-    if (duplicate) {
+    if (duplicateInfo?.status === 'possible') {
+      record.status = 'PENDING_REVIEW';
+      record.duplicateStatus = 'possible';
+      record.recognitionWarnings = [record.recognitionWarnings || '', 'POSSIBLE_MULTI_PAGE_OR_DUPLICATE'].filter(Boolean).join(' | ');
+    } else if (duplicate) {
       record.duplicateStatus = 'duplicate';
       record.duplicateOfInvoiceId = duplicate.serverId || duplicate.id;
     }
@@ -193,7 +250,7 @@ async function pushOneMongo(db, table, incoming, deviceId, companyId, syncContex
 export async function mongoSyncPush({ companyId, deviceId = 'unknown', changes = {} }) {
   const db = await getDb();
   const results = [];
-  const syncContext = { rejectedInvoiceIds: new Set() };
+  const syncContext = { changes, rejectedInvoiceIds: new Set() };
   for (const table of syncTables) {
     const records = Array.isArray(changes[table]) ? changes[table] : [];
     for (const record of records) {
@@ -244,3 +301,9 @@ export async function mongoSyncStatus(companyId) {
   }
   return { ok: true, enabled: true, backend: 'mongodb', companyId, counts, serverTime: nowIso() };
 }
+
+export const __test__ = {
+  findMongoDuplicateInvoice,
+  itemSignature,
+  normalizeComparable
+};

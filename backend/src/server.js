@@ -1429,9 +1429,50 @@ function resultFromFinalPayload(payload = {}) {
   };
 }
 
-async function saveInvoicePayloadWithLearning(payload, user, options = {}) {
-  const deviceId = payload.deviceId || 'legacy-api';
-  const companyId = user.companyId;
+function shouldCreatePriceHistoryForItem(item = {}, invoice = {}) {
+  if (!['APPROVED', 'CONFIRMED'].includes(String(invoice.status || '').toUpperCase())) return false;
+  if (Number(item.isFreeItem || 0) || Number(item.isDiscountLine || 0) || Number(item.candidateOnly || 0)) return false;
+  if (Number(item.quantity || item.actualQty || item.totalQty || 0) <= 0) return false;
+  if (Number(item.unitPrice || 0) <= 0) return false;
+  if (Number(item.totalPrice || 0) <= 0) return false;
+  const name = displayRawName(item) || item.productNameOriginal || item.name || '';
+  if (!name.trim()) return false;
+  if (/^(remark|remarks|note|notes|memo|comment)$/i.test(name.trim())) return false;
+  return true;
+}
+
+function invoiceIntegrityCheck({ items = [], discountItems = [], totalAmount = 0, duplicateCheck = {} }) {
+  const warnings = [];
+  const productRows = items.filter((entry) => {
+    if (Number(entry.isDiscountLine || 0) || Number(entry.candidateOnly || 0)) return false;
+    const name = String(entry.productNameOriginal || entry.name || entry.standardName || '').trim().toLowerCase();
+    if (!name || /^(remark|remarks|note|notes|memo|subtotal|total)$/.test(name)) return false;
+    return true;
+  });
+  if (productRows.length === 0) warnings.push('EMPTY_ITEMS');
+  const itemSubtotal = items
+    .filter((entry) => !Number(entry.isDiscountLine || 0) && !Number(entry.candidateOnly || 0))
+    .reduce((sum, item) => sum + Number(item.totalPrice || 0), 0);
+  const discountTotal = discountItems.reduce((sum, item) => sum + Number(item.totalPrice ?? item.amount ?? 0), 0);
+  const expectedTotal = itemSubtotal + discountTotal;
+  const difference = Math.abs(Number(totalAmount || 0) - expectedTotal);
+  if (Number(totalAmount || 0) > 0 && difference > 0.05) warnings.push('AMOUNT_MISMATCH');
+  if (duplicateCheck.duplicateStatus === 'possible' || duplicateCheck.sameInvoiceGroup) warnings.push('POSSIBLE_MULTI_PAGE_OR_DUPLICATE');
+  return {
+    needsReview: warnings.length > 0,
+    warnings,
+    itemSubtotal,
+    discountTotal,
+    expectedTotal,
+    difference
+  };
+}
+
+async function saveInvoiceWithIntegrityCheck(payload, options = {}) {
+  const user = options.user || {};
+  const deviceId = options.deviceId || payload.deviceId || 'legacy-api';
+  const companyId = options.companyId || user.companyId;
+  if (!companyId) throw new Error('Missing companyId');
   const supplier = payload.supplierId
     ? await getByAnyId('suppliers', payload.supplierId, companyId)
     : await findOrCreateSupplierV2(payload.supplierName, deviceId, companyId);
@@ -1440,7 +1481,7 @@ async function saveInvoicePayloadWithLearning(payload, user, options = {}) {
   const items = applyDiscountAllocation(applyGiftAccounting(productItems), discountItems);
   const itemTotal = items.reduce((sum, item) => sum + Number(item.totalPrice || 0), 0);
   const totalAmount = Number(payload.totalAmount || 0) > 0 ? Number(payload.totalAmount) : itemTotal;
-  console.log('[invoice-save] confirm-invoice start:', {
+  console.log('[invoice-save] integrity start:', {
     companyId,
     supplierName: payload.supplierName || '',
     invoiceNo: payload.invoiceNo || '',
@@ -1459,13 +1500,24 @@ async function saveInvoicePayloadWithLearning(payload, user, options = {}) {
   });
   const forceSave = Boolean(payload.forceSave || payload.force || options.forceSave);
   if (duplicateCheck.isDuplicate && !forceSave) {
-    console.warn('[invoice-save] confirm-invoice duplicate blocked:', { companyId, invoiceNo: payload.invoiceNo || '', totalAmount, duplicateCheck });
+    console.warn('[invoice-save] integrity duplicate blocked:', { companyId, invoiceNo: payload.invoiceNo || '', totalAmount, duplicateCheck });
     return duplicateBlockedResponse(duplicateCheck);
   }
+  const integrity = invoiceIntegrityCheck({ items, discountItems, totalAmount, duplicateCheck });
+  const finalStatus = integrity.needsReview
+    ? 'PENDING_REVIEW'
+    : (payload.status && !['saved', 'PENDING_REVIEW'].includes(payload.status) ? payload.status : 'APPROVED');
+  const recognitionWarnings = [
+    payload.recognitionWarnings || '',
+    ...integrity.warnings,
+    integrity.difference > 0.05 ? `totalDifference=${integrity.difference.toFixed(2)}` : ''
+  ].filter(Boolean).join(' | ');
   const invoice = await prepareRecordWithReferences('invoices', {
     ...payload,
     supplierId: supplier?.serverId || supplier?.id || '',
     totalAmount,
+    calculatedTotal: integrity.itemSubtotal,
+    totalDifference: integrity.difference,
     imageHash: payload.imageHash || '',
     ocrTextHash: payload.ocrTextHash || sha256Text(payload.ocrText || ''),
     duplicateStatus: duplicateCheck.isDuplicate ? 'duplicate' : (payload.duplicateStatus || duplicateCheck.duplicateStatus || 'none'),
@@ -1474,12 +1526,14 @@ async function saveInvoicePayloadWithLearning(payload, user, options = {}) {
     pageCount: Number(payload.pageCount || 0),
     invoiceGroupKey: payload.invoiceGroupKey || '',
     invoiceLayoutType: payload.invoiceLayoutType || 'normal_invoice',
+    recognitionWarnings,
+    status: finalStatus,
     updatedAt: now
   }, deviceId, companyId);
   const itemRecords = [];
   const priceAnomalies = [];
 
-  await withTransaction(async (client) => {
+  const saveBody = async (client) => {
     await upsertRecord('invoices', invoice, client);
     const existingItemRows = await queryAll(`
       SELECT * FROM ${quoteTable('invoice_items')}
@@ -1544,8 +1598,10 @@ async function saveInvoicePayloadWithLearning(payload, user, options = {}) {
       }
       await learnProductAlias({ item, itemRecord: record, invoice, supplier, product, deviceId, companyId, client });
       await learnProductRule({ item: { ...item, unitPrice: record.unitPrice }, supplier, product, deviceId, companyId, client });
-      const anomaly = await learnPrice({ itemRecord: record, invoice, supplier, product, deviceId, companyId, client });
-      if (anomaly) priceAnomalies.push(anomaly);
+      if (shouldCreatePriceHistoryForItem(record, invoice)) {
+        const anomaly = await learnPrice({ itemRecord: record, invoice, supplier, product, deviceId, companyId, client });
+        if (anomaly) priceAnomalies.push(anomaly);
+      }
     }
     await saveInvoiceDiscounts({ discountItems, productItemRecords: itemRecords, invoice, supplier, deviceId, companyId, client });
 
@@ -1562,9 +1618,12 @@ async function saveInvoicePayloadWithLearning(payload, user, options = {}) {
         client
       });
     }
-  });
+  };
 
-  console.log('[invoice-save] confirm-invoice saved:', {
+  if (options.client) await saveBody(options.client);
+  else await withTransaction(saveBody);
+
+  console.log('[invoice-save] integrity saved:', {
     companyId,
     invoiceId: invoice.serverId || invoice.id,
     supplierId: invoice.supplierId,
@@ -1572,7 +1631,7 @@ async function saveInvoicePayloadWithLearning(payload, user, options = {}) {
     totalAmount: invoice.totalAmount,
     status: invoice.status
   });
-  await mirrorSqlSyncDataToMongo(companyId, 'confirm-invoice');
+  if (options.mirrorToMongo !== false) await mirrorSqlSyncDataToMongo(companyId, options.mirrorReason || 'invoice-save');
 
   let template = null;
   if (options.learnTemplate !== false) {
@@ -1581,12 +1640,24 @@ async function saveInvoicePayloadWithLearning(payload, user, options = {}) {
 
   return {
     success: true,
+    saved: true,
+    needsReview: integrity.needsReview,
+    duplicate: Boolean(duplicateCheck.isDuplicate),
+    forceSaved: Boolean(duplicateCheck.isDuplicate && forceSave),
+    savedAsIndependent: Boolean(duplicateCheck.isDuplicate && forceSave),
+    invoiceId: invoice.serverId || invoice.id,
+    reason: integrity.warnings.join(','),
     invoice: { ...invoice, supplierName: displaySupplierName(supplier, payload.supplierName || '') },
     items: itemRecords,
     priceAnomalies,
     template,
-    duplicateCheck
+    duplicateCheck,
+    integrity
   };
+}
+
+async function saveInvoicePayloadWithLearning(payload, user, options = {}) {
+  return saveInvoiceWithIntegrityCheck(payload, { ...options, user, mirrorReason: 'confirm-invoice' });
 }
 
 async function getCloudRecord(table, incoming, companyId, client = null) {
@@ -1620,27 +1691,66 @@ async function pushOne(table, incoming, deviceId, companyId, client = null, sync
     const invoiceIds = [incoming.id, incoming.localId, incoming.serverId, record.id, record.localId, record.serverId].filter(Boolean);
     const relatedItems = (syncContext.changes?.invoice_items || [])
       .filter((item) => invoiceIds.includes(item.invoiceId))
-      .map((item) => prepareRecord('invoice_items', item, deviceId, companyId));
-    const supplier = record.supplierId ? await getByAnyId('suppliers', record.supplierId, companyId) : null;
-    const itemTotal = relatedItems.reduce((sum, item) => sum + Number(item.totalPrice || 0), 0);
-    const totalAmount = Number(record.totalAmount || 0) > 0 ? Number(record.totalAmount) : itemTotal;
-    const duplicateCheck = await checkInvoiceDuplicateBeforeSave({
+      .map((item) => ({ ...item, invoiceId: record.serverId || record.id || item.invoiceId }));
+    const relatedDiscountItems = (syncContext.changes?.invoice_discounts || [])
+      .filter((discount) => invoiceIds.includes(discount.invoiceId))
+      .map((discount) => ({
+        ...discount,
+        invoiceId: record.serverId || record.id || discount.invoiceId,
+        productNameOriginal: discount.discountName || 'Discount',
+        productNameNormalized: 'discount',
+        name: discount.discountName || 'Discount',
+        totalPrice: Number(discount.amount ?? discount.totalPrice ?? 0),
+        unitPrice: Number(discount.amount ?? discount.totalPrice ?? 0),
+        quantity: 1,
+        isDiscountLine: 1
+      }));
+    const saveResult = await saveInvoiceWithIntegrityCheck({
+      ...record,
+      supplierName: incoming.supplierName || record.supplierName || '',
+      items: [...relatedItems, ...relatedDiscountItems],
+      forceSave: incoming.forceSave,
+      force: incoming.force
+    }, {
       companyId,
-      supplier,
-      payload: { ...record, supplierName: incoming.supplierName || '' },
-      totalAmount,
-      items: relatedItems,
-      excludeInvoiceId: record.serverId || record.id || '',
-      batchId: record.batchId || record.scanBatchId || ''
+      deviceId,
+      client,
+      learnTemplate: false,
+      mirrorToMongo: false,
+      source: 'sync-push'
     });
-    const forceSave = Boolean(incoming.forceSave || incoming.force);
-    if (duplicateCheck.isDuplicate && !forceSave) {
+    if (saveResult.duplicate && !incoming.forceSave && !incoming.force) {
       for (const value of invoiceIds) syncContext.rejectedInvoiceIds?.add(value);
-      return { table, localId: incoming.localId || incoming.id || record.localId, serverId: '', status: 'duplicate', duplicateStatus: 'duplicate', duplicateCheck, record: null };
+      return {
+        table,
+        localId: incoming.localId || incoming.id || record.localId,
+        serverId: saveResult.duplicateCheck?.duplicateOfInvoiceId || saveResult.duplicateCheck?.duplicateInvoiceId || '',
+        status: 'duplicate',
+        duplicateStatus: 'duplicate',
+        duplicateCheck: saveResult.duplicateCheck,
+        record: null
+      };
     }
-    record.duplicateStatus = duplicateCheck.isDuplicate ? 'duplicate' : (record.duplicateStatus || duplicateCheck.duplicateStatus || 'none');
-    record.duplicateOfInvoiceId = duplicateCheck.isDuplicate ? (duplicateCheck.duplicateOfInvoiceId || duplicateCheck.duplicateInvoiceId || '') : (record.duplicateOfInvoiceId || '');
-    record.ocrTextHash = record.ocrTextHash || sha256Text(record.ocrText || '');
+    for (const value of invoiceIds) syncContext.integritySavedInvoiceIds?.add(value);
+    return {
+      table,
+      localId: incoming.localId || incoming.id || record.localId,
+      serverId: saveResult.invoiceId,
+      status: saveResult.needsReview ? 'needs_review' : 'synced',
+      duplicateStatus: saveResult.duplicateCheck?.duplicateStatus || 'none',
+      needsReview: saveResult.needsReview,
+      reason: saveResult.reason || '',
+      record: saveResult.invoice || null
+    };
+  }
+  if ((table === 'invoice_items' || table === 'invoice_discounts') && syncContext.integritySavedInvoiceIds?.has(record.invoiceId)) {
+    return { table, localId: incoming.localId || incoming.id || record.localId, serverId: record.serverId || record.id, status: 'skipped_integrity_generated', record: null };
+  }
+  if (table === 'price_history') {
+    const relatedItem = (syncContext.changes?.invoice_items || []).find((item) => [item.id, item.localId, item.serverId].filter(Boolean).includes(record.invoiceItemId));
+    if (relatedItem && syncContext.integritySavedInvoiceIds?.has(relatedItem.invoiceId)) {
+      return { table, localId: incoming.localId || incoming.id || record.localId, serverId: record.serverId || record.id, status: 'skipped_integrity_generated', record: null };
+    }
   }
   await upsertRecord(table, record, client);
   return { table, localId: incoming.localId || incoming.id || record.localId, serverId: record.serverId, status: 'synced', record };
@@ -2074,7 +2184,9 @@ function compareInvoiceForDuplicateV2(current, candidate, label) {
     return result;
   }
 
-  if (sameInvoiceNo && sameOrCloseDate && !sameItems) {
+  const safeSameGroup = sameBatch || sameGroupKey;
+
+  if (sameInvoiceNo && sameOrCloseDate && !sameItems && safeSameGroup) {
     result.sameInvoiceGroup = true;
     result.possibleSameInvoicePages = true;
     result.multiPageInvoice = true;
@@ -2083,6 +2195,15 @@ function compareInvoiceForDuplicateV2(current, candidate, label) {
     result.duplicateStatus = 'none';
     result.autoMergeMessage = `已自动合并：发票号 ${current.invoiceNo}，检测到同一张多页发票。`;
     result.sameInvoiceGroupReason = result.autoMergeMessage;
+    return result;
+  }
+
+  if (sameInvoiceNo && sameOrCloseDate && !sameItems && !safeSameGroup) {
+    result.duplicateStatus = 'possible';
+    result.sameInvoiceGroup = true;
+    result.possibleSameInvoicePages = true;
+    result.possibleDuplicateReason = `${label}: same supplier and invoiceNo, but batch/account grouping is missing. Review before merging.`;
+    result.sameInvoiceGroupReason = 'POSSIBLE_MULTI_PAGE_OR_DUPLICATE';
     return result;
   }
 
@@ -2097,7 +2218,7 @@ function compareInvoiceForDuplicateV2(current, candidate, label) {
 
   result.duplicateStatus = 'possible';
   result.sameInvoiceGroup = true;
-  result.possibleSameInvoicePages = sameBatch && (!sameAmount || !sameItems);
+  result.possibleSameInvoicePages = safeSameGroup && (!sameAmount || !sameItems);
   result.multiPageInvoice = result.possibleSameInvoicePages;
   result.sameInvoiceGroupReason = sameAmount
     ? '同供应商同发票号且日期接近，金额相同但商品明细不同，请人工确认。'
@@ -3162,7 +3283,7 @@ app.post('/api/sync/push', requireAuth, asyncHandler(async (req, res) => {
     return;
   }
   const results = [];
-  const syncContext = { changes, rejectedInvoiceIds: new Set() };
+  const syncContext = { changes, rejectedInvoiceIds: new Set(), integritySavedInvoiceIds: new Set() };
 
   await withTransaction(async (client) => {
     for (const table of syncTables) {
@@ -3172,10 +3293,18 @@ app.post('/api/sync/push', requireAuth, asyncHandler(async (req, res) => {
           results.push({ table, localId: record.localId || record.id, serverId: '', status: 'skipped_duplicate_invoice', record: null });
           continue;
         }
+        if ((table === 'invoice_items' || table === 'invoice_discounts') && syncContext.integritySavedInvoiceIds.has(record.invoiceId)) {
+          results.push({ table, localId: record.localId || record.id, serverId: record.serverId || record.id || '', status: 'skipped_integrity_generated', record: null });
+          continue;
+        }
         if (table === 'price_history') {
           const relatedItem = (changes.invoice_items || []).find((item) => (item.id && item.id === record.invoiceItemId) || (item.localId && item.localId === record.invoiceItemId) || (item.serverId && item.serverId === record.invoiceItemId));
           if (relatedItem && syncContext.rejectedInvoiceIds.has(relatedItem.invoiceId)) {
             results.push({ table, localId: record.localId || record.id, serverId: '', status: 'skipped_duplicate_invoice', record: null });
+            continue;
+          }
+          if (relatedItem && syncContext.integritySavedInvoiceIds.has(relatedItem.invoiceId)) {
+            results.push({ table, localId: record.localId || record.id, serverId: record.serverId || record.id || '', status: 'skipped_integrity_generated', record: null });
             continue;
           }
         }
@@ -3468,10 +3597,30 @@ app.post('/api/learning/confirm-invoice', requireAuth, asyncHandler(async (req, 
     invoiceTemplateId: req.body.invoiceTemplateId || req.body.templateId || '',
     learnTemplate: true
   });
+  const finalPayload = req.body.finalInvoice || req.body;
+  if (result.duplicate && !finalPayload.forceSave && !finalPayload.force) {
+    res.status(409).json(result);
+    return;
+  }
   res.json({ success: true, ...result });
 }));
 
 app.post('/api/invoices', requireAuth, asyncHandler(async (req, res) => {
+  const result = await saveInvoiceWithIntegrityCheck(req.body, {
+    user: req.user,
+    learnTemplate: false,
+    mirrorReason: 'api-invoices-save'
+  });
+  if (result.duplicate && !req.body.forceSave && !req.body.force) {
+    res.status(409).json(result);
+    return;
+  }
+  res.json(result);
+}));
+
+app.post('/api/invoices-legacy-disabled', requireAuth, asyncHandler(async (req, res) => {
+  res.status(410).json({ error: 'Legacy invoice save path disabled. Use POST /api/invoices.' });
+  return;
   const deviceId = req.body.deviceId || 'legacy-api';
   const supplier = req.body.supplierId
     ? await getByAnyId('suppliers', req.body.supplierId, req.user.companyId)
