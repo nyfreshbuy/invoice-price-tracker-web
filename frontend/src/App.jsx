@@ -1463,7 +1463,11 @@ function InvoiceDetailPage() {
         <Info label="总金额" value={money(invoice.totalAmount)} />
         <Info label="同步状态" value={statusText(invoice.syncStatus)} />
       </Section>
-      {invoice.imagePath && <Section title="查看原图"><img className="invoice-image" src={invoice.imagePath} alt="发票原图" /></Section>}
+      {(invoice.imagePath || invoice.imageUrl || invoice.imageId) && (
+        <Section title="查看原图">
+          <InvoiceImageViewer invoice={invoice} onUpdated={() => localDb.getInvoice(id).then(setDetail)} />
+        </Section>
+      )}
       <Section title="商品明细">
         {items.map((item) => (
           <div className="detail-item" key={item.id}>
@@ -3018,9 +3022,12 @@ function ActionLink({ to, icon, title, subtitle }) {
   );
 }
 
+const failedInvoiceImageUrls = new Set();
+
 function InvoiceImageViewer({ invoice, onUpdated }) {
   const fileInputRef = useRef(null);
   const [imageUrl, setImageUrl] = useState('');
+  const [loadState, setLoadState] = useState('idle');
   const [diagnostic, setDiagnostic] = useState({
     source: 'Unknown',
     size: 0,
@@ -3030,6 +3037,12 @@ function InvoiceImageViewer({ invoice, onUpdated }) {
   const [uploading, setUploading] = useState(false);
   const [showDebug, setShowDebug] = useState(false);
   const [fullScreen, setFullScreen] = useState(false);
+  const imageKey = [
+    invoice?.id || '',
+    invoice?.imagePath || '',
+    invoice?.imageUrl || '',
+    invoice?.imageId || ''
+  ].join('|');
 
   useEffect(() => {
     let objectUrl = '';
@@ -3071,7 +3084,20 @@ function InvoiceImageViewer({ invoice, onUpdated }) {
       }
 
       const resolvedUrl = api.fileUrl(imagePath || rawImageUrl || '');
+      const failedKey = `${invoice?.id || ''}|${resolvedUrl}`;
+      if (failedInvoiceImageUrls.has(failedKey)) {
+        setImageUrl('');
+        setLoadState('error');
+        setDiagnostic({
+          source: /^https?:\/\//.test(resolvedUrl) || String(imagePath).startsWith('/uploads') ? 'Server' : 'Local',
+          size: 0,
+          status: '加载失败',
+          message: '图片加载失败，请重新上传'
+        });
+        return;
+      }
       setImageUrl(resolvedUrl);
+      setLoadState('loading');
       setDiagnostic({
         source: /^https?:\/\//.test(resolvedUrl) || String(imagePath).startsWith('/uploads') ? 'Server' : 'Local',
         size: 0,
@@ -3092,16 +3118,18 @@ function InvoiceImageViewer({ invoice, onUpdated }) {
       cancelled = true;
       if (objectUrl) URL.revokeObjectURL(objectUrl);
     };
-  }, [invoice]);
+  }, [imageKey]);
 
   async function rebindImage(file) {
     if (!file) return;
     setUploading(true);
+    setLoadState('loading');
     try {
       if (navigator.onLine) {
         const data = new FormData();
         data.append('image', file);
         const result = await api.uploadInvoiceImage(invoice.id, data);
+        failedInvoiceImageUrls.delete(`${invoice.id}|${api.fileUrl(result.imagePath || '')}`);
         await localDb.updateInvoiceImageFields(invoice.id, {
           imagePath: result.imagePath,
           imageId: '',
@@ -3119,6 +3147,7 @@ function InvoiceImageViewer({ invoice, onUpdated }) {
       await onUpdated?.();
     } catch (error) {
       console.error('Invoice image rebind failed', error);
+      setLoadState('error');
       setDiagnostic((current) => ({
         ...current,
         status: '缺失',
@@ -3129,34 +3158,46 @@ function InvoiceImageViewer({ invoice, onUpdated }) {
     }
   }
 
+  const imageMessage = loadState === 'error' ? '图片加载失败，请重新上传' : diagnostic.message;
+
   return (
-    <div>
+    <div className={`invoice-image-viewer image-state-${loadState}`}>
+      {loadState === 'loading' && <EmptyState text="图片加载中..." />}
       {imageUrl ? (
         <button type="button" className="image-open-button" onClick={() => setFullScreen(true)}>
           <img
             className="invoice-image"
             src={imageUrl}
+            style={{
+              display: loadState === 'error' ? 'none' : 'block',
+              opacity: loadState === 'loading' ? 0 : 1,
+              maxHeight: loadState === 'loading' ? 0 : undefined,
+              borderWidth: loadState === 'loading' ? 0 : undefined
+            }}
+            onLoadCapture={() => setLoadState('loaded')}
             alt="发票原图"
-            onLoad={() => setDiagnostic((current) => ({ ...current, status: '正常', message: '' }))}
+            onLoad={() => setDiagnostic((current) => ({ ...current, status: '已加载', message: '' }))}
             onError={() => {
               console.error('Invoice image load failed', imageUrl);
+              failedInvoiceImageUrls.add(`${invoice?.id || ''}|${imageUrl}`);
               setImageUrl('');
+              setLoadState('error');
               setDiagnostic((current) => ({
                 ...current,
-                status: current.source === 'Server' ? '缺失' : '损坏',
-                message: current.source === 'Server' ? '图片已丢失' : '图片损坏'
+                status: '加载失败',
+                message: '图片加载失败，请重新上传'
               }));
             }}
           />
         </button>
       ) : (
-        <EmptyState text={diagnostic.message || '图片不存在'} />
+        <EmptyState text={imageMessage || '图片不存在'} />
       )}
       <div className="image-diagnostics">
         <Info label="图片来源" value={diagnostic.source} />
         <Info label="图片大小" value={diagnostic.size ? formatBytes(diagnostic.size) : '-'} />
         <Info label="图片状态" value={diagnostic.status} />
-        {diagnostic.message && <p className="error">{diagnostic.message}</p>}
+        {imageMessage && <p className="error">{imageMessage}</p>}
         <button type="button" className="secondary-button" onClick={() => setShowDebug((value) => !value)}>
           {showDebug ? '隐藏调试信息' : '显示调试信息'}
         </button>

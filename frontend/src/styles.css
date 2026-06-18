@@ -514,6 +514,17 @@ button:disabled,
   padding: 8px 0;
 }
 
+.invoice-image-viewer {
+  max-width: 100%;
+  overflow-x: hidden;
+}
+
+.image-state-loading .image-open-button {
+  height: 0;
+  overflow: hidden;
+  pointer-events: none;
+}
+
 .invoice-image {
   width: 100%;
   max-width: 100%;
