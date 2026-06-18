@@ -60,7 +60,7 @@ export const tableColumns = {
   invoices: ['id', 'companyId', 'localId', 'serverId', 'syncStatus', 'version', 'batchId', 'scanBatchId', 'supplierId', 'invoiceNo', 'invoiceDate', 'pageNumber', 'pageCount', 'invoiceGroupKey', 'isMergedInvoice', 'isMultiPage', 'mergedInvoiceIds', 'invoiceLayoutType', 'imagePath', 'imageHash', 'ocrText', 'ocrTextHash', 'subtotal', 'tax', 'totalAmount', 'calculatedTotal', 'totalDifference', 'duplicateStatus', 'duplicateOfInvoiceId', 'recognitionSource', 'recognitionWarnings', 'status', 'createdAt', 'updatedAt', 'deletedAt', 'deviceId'],
   invoice_items: ['id', 'companyId', 'localId', 'serverId', 'syncStatus', 'version', 'invoiceId', 'supplierId', 'productId', 'rawName', 'nameCn', 'nameEn', 'spec', 'productNameOriginal', 'productNameNormalized', 'normalizedName', 'category', 'quantity', 'unit', 'unitPrice', 'totalPrice', 'chargedQty', 'freeQty', 'totalQty', 'actualQty', 'originalUnitCost', 'effectiveUnitCost', 'discountAmount', 'discountedEffectiveUnitCost', 'promoGroupId', 'promoGroupName', 'promoGroupRule', 'participatesInGiftAllocation', 'isFreeItem', 'isDiscountLine', 'candidateOnly', 'correctedByUser', 'isHandwrittenQuantity', 'isHandwrittenPrice', 'isHandwrittenAmount', 'isCircled', 'isChecked', 'freeReason', 'invoiceDate', 'notes', 'createdAt', 'updatedAt', 'deletedAt', 'deviceId'],
   products: ['id', 'companyId', 'localId', 'serverId', 'syncStatus', 'version', 'name', 'normalizedName', 'category', 'notes', 'createdAt', 'updatedAt', 'deletedAt', 'deviceId'],
-  price_history: ['id', 'companyId', 'localId', 'serverId', 'syncStatus', 'version', 'productId', 'invoiceItemId', 'supplierId', 'price', 'quantity', 'unit', 'invoiceDate', 'invoiceNo', 'createdAt', 'updatedAt', 'deletedAt', 'deviceId'],
+  price_history: ['id', 'companyId', 'localId', 'serverId', 'syncStatus', 'version', 'productId', 'invoiceId', 'invoiceItemId', 'supplierId', 'price', 'quantity', 'unit', 'invoiceDate', 'invoiceNo', 'status', 'createdAt', 'updatedAt', 'deletedAt', 'deviceId'],
   invoice_discounts: ['id', 'companyId', 'localId', 'serverId', 'syncStatus', 'version', 'invoiceId', 'supplierId', 'discountName', 'amount', 'discountType', 'appliedToProductIds', 'createdAt', 'updatedAt', 'deletedAt', 'deviceId'],
   gift_allocation_rules: ['id', 'companyId', 'localId', 'serverId', 'syncStatus', 'version', 'supplierId', 'ruleKey', 'productNames', 'promoGroupName', 'promoGroupRule', 'chargedQty', 'freeQty', 'actualQty', 'invoiceAmount', 'originalUnitCost', 'effectiveUnitCost', 'createdAt', 'updatedAt', 'deletedAt', 'deviceId'],
   supplier_templates: ['id', 'companyId', 'localId', 'serverId', 'syncStatus', 'version', 'supplierId', 'supplierNameKeywords', 'invoiceNoKeywords', 'dateKeywords', 'itemTableStartKeywords', 'itemTableEndKeywords', 'itemNameColumnIndex', 'quantityColumnIndex', 'unitColumnIndex', 'unitPriceColumnIndex', 'totalPriceColumnIndex', 'notes', 'createdAt', 'updatedAt', 'deletedAt', 'deviceId'],
@@ -264,6 +264,8 @@ export async function migrate() {
   await execute(`CREATE INDEX IF NOT EXISTS ${quoteIdentifier('idx_invoice_items_product_id')} ON ${quoteTable('invoice_items')} (${quoteIdentifier('companyId')}, ${quoteIdentifier('productId')});`);
   await execute(`CREATE INDEX IF NOT EXISTS ${quoteIdentifier('idx_invoice_items_promo_group')} ON ${quoteTable('invoice_items')} (${quoteIdentifier('companyId')}, ${quoteIdentifier('promoGroupId')});`);
   await execute(`CREATE INDEX IF NOT EXISTS ${quoteIdentifier('idx_invoice_discounts_invoice')} ON ${quoteTable('invoice_discounts')} (${quoteIdentifier('companyId')}, ${quoteIdentifier('invoiceId')});`);
+  await execute(`CREATE INDEX IF NOT EXISTS ${quoteIdentifier('idx_price_history_invoice')} ON ${quoteTable('price_history')} (${quoteIdentifier('companyId')}, ${quoteIdentifier('invoiceId')});`);
+  await execute(`CREATE INDEX IF NOT EXISTS ${quoteIdentifier('idx_price_history_item')} ON ${quoteTable('price_history')} (${quoteIdentifier('companyId')}, ${quoteIdentifier('invoiceItemId')});`);
   await execute(`CREATE INDEX IF NOT EXISTS ${quoteIdentifier('idx_supplier_templates_supplier')} ON ${quoteTable('supplier_templates')} (${quoteIdentifier('supplierId')});`);
   await execute(`CREATE INDEX IF NOT EXISTS ${quoteIdentifier('idx_product_aliases_company_keyword')} ON ${quoteTable('product_aliases')} (${quoteIdentifier('companyId')}, ${quoteIdentifier('keyword')});`);
   await execute(`CREATE INDEX IF NOT EXISTS ${quoteIdentifier('idx_product_aliases_normalized_alias')} ON ${quoteTable('product_aliases')} (${quoteIdentifier('companyId')}, ${quoteIdentifier('normalizedAlias')});`);
@@ -278,6 +280,28 @@ export async function migrate() {
   await execute(`CREATE INDEX IF NOT EXISTS ${quoteIdentifier('idx_company_invitations_company')} ON ${quoteTable('company_invitations')} (${quoteIdentifier('company_id')});`);
   await execute(`CREATE UNIQUE INDEX IF NOT EXISTS ${quoteIdentifier('idx_company_invitations_token')} ON ${quoteTable('company_invitations')} (${quoteIdentifier('token')});`);
   await execute(`CREATE INDEX IF NOT EXISTS ${quoteIdentifier('idx_company_invitations_email_status')} ON ${quoteTable('company_invitations')} (${quoteIdentifier('email')}, ${quoteIdentifier('status')});`);
+
+  await execute(`
+    UPDATE ${quoteTable('price_history')}
+    SET ${quoteIdentifier('status')} = 'active'
+    WHERE ${quoteIdentifier('status')} IS NULL OR ${quoteIdentifier('status')} = ''
+  `);
+  await execute(`
+    UPDATE ${quoteTable('price_history')}
+    SET ${quoteIdentifier('invoiceId')} = (
+      SELECT invoice_items.${quoteIdentifier('invoiceId')}
+      FROM ${quoteTable('invoice_items')} invoice_items
+      WHERE (invoice_items.${quoteIdentifier('companyId')} = ${quoteTable('price_history')}.${quoteIdentifier('companyId')}
+             OR (invoice_items.${quoteIdentifier('companyId')} IS NULL AND ${quoteTable('price_history')}.${quoteIdentifier('companyId')} IS NULL))
+        AND (${quoteTable('price_history')}.${quoteIdentifier('invoiceItemId')} = invoice_items.${quoteIdentifier('id')}
+             OR ${quoteTable('price_history')}.${quoteIdentifier('invoiceItemId')} = invoice_items.${quoteIdentifier('serverId')}
+             OR ${quoteTable('price_history')}.${quoteIdentifier('invoiceItemId')} = invoice_items.${quoteIdentifier('localId')})
+      LIMIT 1
+    )
+    WHERE (${quoteIdentifier('invoiceId')} IS NULL OR ${quoteIdentifier('invoiceId')} = '')
+      AND ${quoteIdentifier('invoiceItemId')} IS NOT NULL
+      AND ${quoteIdentifier('invoiceItemId')} != ''
+  `);
 }
 
 function convertPlaceholders(sql) {

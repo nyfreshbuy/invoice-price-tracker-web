@@ -826,7 +826,7 @@ export const localDb = {
     const itemIds = detail.items.flatMap(idsFor);
     const existingRows = (await all('price_history')).filter((row) => itemIds.includes(row.invoiceItemId) || invoiceIds.includes(row.invoiceId));
     if (existingRows.length) {
-      await putMany('price_history', existingRows.map((row) => syncFields({ ...row, deletedAt: nowIso() }, 'deleted')));
+      await putMany('price_history', existingRows.map((row) => syncFields({ ...row, deletedAt: nowIso(), status: 'deleted' }, 'deleted')));
     }
     const rows = [];
     for (const item of detail.items.filter((entry) => active(entry) && !Number(entry.isDiscountLine || 0) && !Number(entry.candidateOnly || 0))) {
@@ -1073,7 +1073,7 @@ export const localDb = {
     const itemIds = detail.items.flatMap(idsFor);
     const priceRows = (await all('price_history')).filter((row) => itemIds.includes(row.invoiceItemId) || (detail.invoice.invoiceNo && row.invoiceNo === detail.invoice.invoiceNo && row.supplierId === detail.invoice.supplierId));
     if (priceRows.length) {
-      await putMany('price_history', priceRows.map((row) => syncFields({ ...row, deletedAt }, 'deleted')));
+      await putMany('price_history', priceRows.map((row) => syncFields({ ...row, deletedAt, status: 'deleted' }, 'deleted')));
     }
     if (detail.invoice.batchId) {
       const activeBatchInvoices = (await all('invoices')).filter((invoice) => active(invoice) && invoice.batchId === detail.invoice.batchId && !idsFor(invoice).includes(detail.invoice.id));
@@ -1163,7 +1163,7 @@ export const localDb = {
     const savedItemIds = savedItems.flatMap(idsFor);
     const existingPrices = (await all('price_history')).filter((row) => savedItemIds.includes(row.invoiceItemId));
     if (existingPrices.length) {
-      await putMany('price_history', existingPrices.map((row) => syncFields({ ...row, deletedAt: nowIso() }, 'deleted')));
+      await putMany('price_history', existingPrices.map((row) => syncFields({ ...row, deletedAt: nowIso(), status: 'deleted' }, 'deleted')));
     }
 
     for (const item of savedItems.filter((entry) => !Number(entry.isDiscountLine || 0) && !Number(entry.candidateOnly || 0))) {

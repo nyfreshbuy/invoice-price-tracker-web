@@ -695,7 +695,7 @@ function prepareRecord(table, record, deviceId, companyId) {
     return { ...base, name: record.name || '', normalizedName: normalizeProductNameAdvanced(record.normalizedName || record.name || ''), category: record.category || '', notes: record.notes || '' };
   }
   if (table === 'price_history') {
-    return { ...base, productId: record.productId || '', invoiceItemId: record.invoiceItemId || '', supplierId: record.supplierId || '', price: Number(record.price || 0), quantity: Number(record.quantity || 0), unit: record.unit || '', invoiceDate: record.invoiceDate || today(), invoiceNo: record.invoiceNo || '' };
+    return { ...base, productId: record.productId || '', invoiceId: record.invoiceId || '', invoiceItemId: record.invoiceItemId || '', supplierId: record.supplierId || '', price: Number(record.price || 0), quantity: Number(record.quantity || 0), unit: record.unit || '', invoiceDate: record.invoiceDate || today(), invoiceNo: record.invoiceNo || '', status: record.status || (record.deletedAt ? 'deleted' : 'active') };
   }
   if (table === 'invoice_discounts') {
     return {
@@ -838,6 +838,7 @@ async function prepareRecordWithReferences(table, record, deviceId, companyId, c
   }
   if (table === 'price_history') {
     prepared.productId = await resolveReference('products', prepared.productId, deviceId, companyId, client);
+    prepared.invoiceId = await resolveReference('invoices', prepared.invoiceId, deviceId, companyId, client);
     prepared.invoiceItemId = await resolveReference('invoice_items', prepared.invoiceItemId, deviceId, companyId, client);
     prepared.supplierId = await resolveReference('suppliers', prepared.supplierId, deviceId, companyId, client);
   }
@@ -1250,13 +1251,15 @@ async function learnPrice({ itemRecord, invoice, supplier, product, deviceId, co
   }
   const priceRecord = await prepareRecordWithReferences('price_history', {
     productId,
+    invoiceId: invoice.serverId || invoice.id,
     invoiceItemId: itemRecord.serverId || itemRecord.id,
     supplierId: supplier?.serverId || supplier?.id || '',
     price: unitPrice,
     quantity: Number(itemRecord.actualQty || itemRecord.totalQty || itemRecord.quantity || 0),
     unit: itemRecord.unit || '',
     invoiceDate: invoice.invoiceDate,
-    invoiceNo: invoice.invoiceNo || ''
+    invoiceNo: invoice.invoiceNo || '',
+    status: 'active'
   }, deviceId, companyId, client);
   await upsertRecord('price_history', priceRecord, client);
   return anomaly;
@@ -1478,6 +1481,17 @@ async function saveInvoicePayloadWithLearning(payload, user, options = {}) {
 
   await withTransaction(async (client) => {
     await upsertRecord('invoices', invoice, client);
+    const existingItemRows = await queryAll(`
+      SELECT * FROM ${quoteTable('invoice_items')}
+      WHERE ${quoteIdentifier('companyId')} = ? AND ${quoteIdentifier('invoiceId')} = ?
+    `, [companyId, invoice.serverId], client);
+    await softDeletePriceHistory({
+      companyId,
+      invoiceIds: [invoice.serverId, invoice.id, invoice.localId],
+      itemIds: existingItemRows.flatMap(invoiceIdentityIds),
+      deletedAt: now,
+      client
+    });
     await run(`
       UPDATE ${quoteTable('invoice_items')}
       SET ${quoteIdentifier('deletedAt')} = ?, ${quoteIdentifier('updatedAt')} = ?
@@ -2278,6 +2292,32 @@ function duplicateBlockedResponse(duplicateCheck) {
   };
 }
 
+async function softDeletePriceHistory({ companyId, invoiceIds = [], itemIds = [], deletedAt = nowIso(), client = null }) {
+  const invoiceIdList = [...new Set(invoiceIds.filter(Boolean))];
+  const itemIdList = [...new Set(itemIds.filter(Boolean))];
+  if (invoiceIdList.length === 0 && itemIdList.length === 0) return;
+  const clauses = [];
+  const params = [deletedAt, deletedAt, companyId];
+  if (invoiceIdList.length) {
+    clauses.push(`${quoteIdentifier('invoiceId')} IN (${invoiceIdList.map(() => '?').join(', ')})`);
+    params.push(...invoiceIdList);
+  }
+  if (itemIdList.length) {
+    clauses.push(`${quoteIdentifier('invoiceItemId')} IN (${itemIdList.map(() => '?').join(', ')})`);
+    params.push(...itemIdList);
+  }
+  await run(`
+    UPDATE ${quoteTable('price_history')}
+    SET ${quoteIdentifier('deletedAt')} = ?,
+        ${quoteIdentifier('updatedAt')} = ?,
+        ${quoteIdentifier('status')} = 'deleted',
+        ${quoteIdentifier('syncStatus')} = 'deleted'
+    WHERE ${quoteIdentifier('companyId')} = ?
+      AND (${clauses.join(' OR ')})
+      AND ${quoteIdentifier('deletedAt')} IS NULL
+  `, params, client);
+}
+
 async function saveRecognizedInvoiceFromTask(task, result, options = {}) {
   const parsed = result.parsed || {};
   const { productItems, discountItems } = splitInvoiceRows(Array.isArray(parsed.items) ? parsed.items : []);
@@ -2415,6 +2455,17 @@ async function saveRecognizedInvoiceFromTask(task, result, options = {}) {
     await upsertRecord('invoices', invoice, client);
     if (pageInvoice) await upsertRecord('invoices', pageInvoice, client);
     if (!existingInvoice) {
+      const existingItemRows = await queryAll(`
+        SELECT * FROM ${quoteTable('invoice_items')}
+        WHERE ${quoteIdentifier('companyId')} = ? AND ${quoteIdentifier('invoiceId')} = ?
+      `, [companyId, invoice.serverId], client);
+      await softDeletePriceHistory({
+        companyId,
+        invoiceIds: [invoice.serverId, invoice.id, invoice.localId],
+        itemIds: existingItemRows.flatMap(invoiceIdentityIds),
+        deletedAt: now,
+        client
+      });
       await run(`
         UPDATE ${quoteTable('invoice_items')}
         SET ${quoteIdentifier('deletedAt')} = ?, ${quoteIdentifier('updatedAt')} = ?
@@ -3472,6 +3523,17 @@ app.post('/api/invoices', requireAuth, asyncHandler(async (req, res) => {
 
   await withTransaction(async (client) => {
     await upsertRecord('invoices', invoice, client);
+    const existingItemRows = await queryAll(`
+      SELECT * FROM ${quoteTable('invoice_items')}
+      WHERE ${quoteIdentifier('companyId')} = ? AND ${quoteIdentifier('invoiceId')} = ?
+    `, [req.user.companyId, invoice.serverId], client);
+    await softDeletePriceHistory({
+      companyId: req.user.companyId,
+      invoiceIds: [invoice.serverId, invoice.id, invoice.localId],
+      itemIds: existingItemRows.flatMap(invoiceIdentityIds),
+      deletedAt: now,
+      client
+    });
     await run(`
       UPDATE ${quoteTable('invoice_items')}
       SET ${quoteIdentifier('deletedAt')} = ?, ${quoteIdentifier('updatedAt')} = ?
@@ -3696,14 +3758,20 @@ app.delete('/api/invoices/:id', requireAuth, asyncHandler(async (req, res) => {
   if (itemIds.length) {
     await run(`
       UPDATE ${quoteTable('price_history')}
-      SET ${quoteIdentifier('deletedAt')} = ?, ${quoteIdentifier('updatedAt')} = ?
+      SET ${quoteIdentifier('deletedAt')} = ?,
+          ${quoteIdentifier('updatedAt')} = ?,
+          ${quoteIdentifier('status')} = 'deleted',
+          ${quoteIdentifier('syncStatus')} = 'deleted'
       WHERE ${quoteIdentifier('companyId')} = ? AND ${quoteIdentifier('invoiceItemId')} IN (${itemIds.map(() => '?').join(', ')})
     `, [deletedAt, deletedAt, req.user.companyId, ...itemIds]);
   }
   if (invoice?.invoiceNo) {
     await run(`
       UPDATE ${quoteTable('price_history')}
-      SET ${quoteIdentifier('deletedAt')} = ?, ${quoteIdentifier('updatedAt')} = ?
+      SET ${quoteIdentifier('deletedAt')} = ?,
+          ${quoteIdentifier('updatedAt')} = ?,
+          ${quoteIdentifier('status')} = 'deleted',
+          ${quoteIdentifier('syncStatus')} = 'deleted'
       WHERE ${quoteIdentifier('companyId')} = ? AND ${quoteIdentifier('invoiceNo')} = ? AND ${quoteIdentifier('supplierId')} = ?
     `, [deletedAt, deletedAt, req.user.companyId, invoice.invoiceNo, invoice.supplierId || '']);
   }

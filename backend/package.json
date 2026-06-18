@@ -9,7 +9,9 @@
     "test:auth": "node tests/authRegression.mjs",
     "test:members": "node tests/memberRegression.mjs",
     "test:sync-push": "node tests/syncPushRegression.mjs",
-    "test:invitations": "node tests/invitationRegression.mjs"
+    "test:invitations": "node tests/invitationRegression.mjs",
+    "test:invoice-integrity": "node tests/invoiceDataIntegrityRegression.mjs",
+    "audit:invoices": "node scripts/audit_invoices.js"
   },
   "dependencies": {
     "better-sqlite3": "^11.8.1",
