@@ -559,19 +559,21 @@ export const localDb = {
       const records = await all(table);
       const local = records.find((record) => record.localId === result.localId || record.id === result.localId || record.serverId === result.serverId);
       if (local) await put(table, { ...local, syncStatus: 'conflict', conflictRecord: JSON.stringify(result.record || {}) });
-      return;
+      return Boolean(local);
     }
-    if (result.status === 'duplicate') {
+    if (result.status === 'duplicate' || result.duplicate === true || result.already_exists === true || result.status === 'already_exists') {
       const records = await all(table);
       const local = records.find((record) => record.localId === result.localId || record.id === result.localId || record.serverId === result.serverId);
       if (local) await put(table, {
         ...local,
-        syncStatus: 'conflict',
+        serverId: result.serverId || result.duplicateCheck?.duplicateInvoiceId || result.duplicate?.id || local.serverId || local.id,
+        syncStatus: 'synced',
         duplicateStatus: result.duplicateStatus || 'duplicate',
         duplicateOfInvoiceId: result.serverId || result.duplicateCheck?.duplicateInvoiceId || result.duplicate?.id || '',
+        syncNote: result.reason || result.status || 'duplicate',
         conflictRecord: JSON.stringify(result)
       });
-      return;
+      return Boolean(local);
     }
     if (result.status === 'skipped_duplicate_invoice' || result.status === 'skipped_integrity_generated') {
       const records = await all(table);
@@ -582,11 +584,11 @@ export const localDb = {
         syncStatus: 'synced',
         syncNote: result.status
       });
-      return;
+      return Boolean(local);
     }
     const records = await all(table);
     const local = records.find((record) => record.localId === result.localId || record.id === result.localId || record.serverId === result.serverId);
-    if (!local) return;
+    if (!local) return false;
     const serverRecord = result.record || {};
     await put(table, {
       ...serverRecord,
@@ -598,6 +600,7 @@ export const localDb = {
       syncNote: result.reason || result.status || '',
       version: Number(serverRecord.version || local.version || 1)
     });
+    return true;
   },
 
   async mergeRemote(table, remote) {

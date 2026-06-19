@@ -26,6 +26,14 @@ function buildBatchChanges(records) {
   return changes;
 }
 
+function countByStatus(results = []) {
+  return results.reduce((counts, result) => {
+    const key = result?.status || 'missing_status';
+    counts[key] = (counts[key] || 0) + 1;
+    return counts;
+  }, {});
+}
+
 function connectionType() {
   const connection = navigator.connection || navigator.mozConnection || navigator.webkitConnection;
   return {
@@ -180,17 +188,36 @@ export async function syncNow({ force = false, reason = 'manual' } = {}) {
       for (let index = 0; index < pendingRecords.length; index += SYNC_BATCH_SIZE) {
         const batch = pendingRecords.slice(index, index + SYNC_BATCH_SIZE);
         try {
-          const pushed = await api.syncPush({ deviceId, companyId, changes: buildBatchChanges(batch) });
+          const batchChanges = buildBatchChanges(batch);
+          const pushed = await api.syncPush({ deviceId, companyId, changes: batchChanges });
+          const results = Array.isArray(pushed.results) ? pushed.results : [];
           console.log('[sync] push batch completed:', {
             companyId,
             batchStart: index,
             batchSize: batch.length,
-            resultCount: Array.isArray(pushed.results) ? pushed.results.length : 0,
-            backend: pushed.backend || ''
+            uploadCounts: Object.fromEntries(Object.entries(batchChanges).map(([table, records]) => [table, records.length]).filter(([, count]) => count > 0)),
+            resultCount: results.length,
+            resultStatuses: countByStatus(results),
+            backend: pushed.backend || '',
+            responseOk: Boolean(pushed.ok)
           });
-          for (const result of pushed.results || []) {
-            await localDb.markSynced(result.table, result);
+          let appliedCount = 0;
+          let notFoundCount = 0;
+          for (const result of results) {
+            const applied = await localDb.markSynced(result.table, result);
+            if (applied) appliedCount += 1;
+            else notFoundCount += 1;
           }
+          const remainingAfterBatch = await localDb.getPendingCount();
+          console.log('[sync] local apply completed:', {
+            companyId,
+            batchStart: index,
+            appliedCount,
+            notFoundCount,
+            successCount: results.length - notFoundCount,
+            failedCount: notFoundCount,
+            remainingPending: remainingAfterBatch
+          });
         } catch (error) {
           syncProgress.failed += batch.length;
           lastError = error.message || '同步失败';
@@ -200,6 +227,12 @@ export async function syncNow({ force = false, reason = 'manual' } = {}) {
           emitSyncStateChange();
         }
       }
+      console.log('[sync] push finished:', {
+        companyId,
+        uploadedTotal: pendingRecords.length,
+        failedTotal: syncProgress.failed,
+        remainingPending: await localDb.getPendingCount()
+      });
     }
 
     const metaKey = `lastPullAt:${companyId}`;
