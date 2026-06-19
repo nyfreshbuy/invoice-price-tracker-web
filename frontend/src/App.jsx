@@ -1442,7 +1442,7 @@ function InvoiceDetailPage() {
   const navigate = useNavigate();
   const [detail, setDetail] = useState(null);
 
-  useLocalReload(() => localDb.getInvoice(id).then(setDetail), [id]);
+  useLocalReload(() => localDb.getInvoice(id).then(setDetail), [id], { listenToEvents: false });
 
   async function remove() {
     if (!confirm('确认删除这张发票？')) return;
@@ -1547,7 +1547,7 @@ function InvoiceDetailPageWithGifts() {
   const [operation, setOperation] = useState('');
 
   const loadDetail = () => localDb.getInvoice(id).then(setDetail);
-  useLocalReload(loadDetail, [id]);
+  useLocalReload(loadDetail, [id], { listenToEvents: false });
 
   useEffect(() => {
     let cancelled = false;
@@ -2881,6 +2881,7 @@ function SettingsPage() {
         <div className="grid-2">
           <Info label="同步状态" value={syncSnapshot?.label || '-'} />
           <Info label="待同步总数" value={syncSnapshot?.pendingCount ?? 0} />
+          <Info label="同步失败数量" value={syncSnapshot?.failedCount ?? 0} />
           <Info label="最后同步时间" value={syncSnapshot?.lastSyncAt || '-'} />
           <Info label="网络类型" value={syncSnapshot?.connection?.type || syncSnapshot?.connection?.effectiveType || 'unknown'} />
           <Info label="待同步发票" value={syncSnapshot?.pendingByTable?.invoices ?? 0} />
@@ -3023,6 +3024,7 @@ function ActionLink({ to, icon, title, subtitle }) {
 }
 
 const failedInvoiceImageUrls = new Set();
+const invoiceImageRetryCounts = new Map();
 
 function InvoiceImageViewer({ invoice, onUpdated }) {
   const fileInputRef = useRef(null);
@@ -3041,18 +3043,21 @@ function InvoiceImageViewer({ invoice, onUpdated }) {
     invoice?.id || '',
     invoice?.imagePath || '',
     invoice?.imageUrl || '',
+    invoice?.originalImageUrl || '',
     invoice?.imageId || ''
   ].join('|');
 
   useEffect(() => {
     let objectUrl = '';
     let cancelled = false;
+    let retryTimer = 0;
 
     async function resolveImage() {
       const imagePath = invoice?.imagePath || '';
       const rawImageUrl = invoice?.imageUrl || '';
+      const originalImageUrl = invoice?.originalImageUrl || '';
       const imageId = invoice?.imageId || '';
-      if (!imagePath && !rawImageUrl && !imageId) {
+      if (!imagePath && !rawImageUrl && !originalImageUrl && !imageId) {
         setImageUrl('');
         setDiagnostic({ source: 'Unknown', size: 0, status: '缺失', message: '图片不存在' });
         return;
@@ -3083,7 +3088,7 @@ function InvoiceImageViewer({ invoice, onUpdated }) {
         return;
       }
 
-      const resolvedUrl = api.fileUrl(imagePath || rawImageUrl || '');
+      const resolvedUrl = api.fileUrl(imagePath || rawImageUrl || originalImageUrl || '');
       const failedKey = `${invoice?.id || ''}|${resolvedUrl}`;
       if (failedInvoiceImageUrls.has(failedKey)) {
         setImageUrl('');
@@ -3096,7 +3101,7 @@ function InvoiceImageViewer({ invoice, onUpdated }) {
         });
         return;
       }
-      setImageUrl(resolvedUrl);
+      setImageUrl('');
       setLoadState('loading');
       setDiagnostic({
         source: /^https?:\/\//.test(resolvedUrl) || String(imagePath).startsWith('/uploads') ? 'Server' : 'Local',
@@ -3104,6 +3109,41 @@ function InvoiceImageViewer({ invoice, onUpdated }) {
         status: '加载中',
         message: ''
       });
+      const tester = new Image();
+      tester.onload = () => {
+        if (cancelled) return;
+        invoiceImageRetryCounts.delete(failedKey);
+        setImageUrl(resolvedUrl);
+        setLoadState('loaded');
+        setDiagnostic({
+          source: /^https?:\/\//.test(resolvedUrl) || String(imagePath).startsWith('/uploads') ? 'Server' : 'Local',
+          size: 0,
+          status: '已加载',
+          message: ''
+        });
+      };
+      tester.onerror = () => {
+        if (cancelled) return;
+        const nextRetryCount = Number(invoiceImageRetryCounts.get(failedKey) || 0) + 1;
+        invoiceImageRetryCounts.set(failedKey, nextRetryCount);
+        if (nextRetryCount < 2) {
+          retryTimer = window.setTimeout(() => {
+            if (!cancelled) resolveImage();
+          }, 500);
+          return;
+        }
+        failedInvoiceImageUrls.add(failedKey);
+        setImageUrl('');
+        setLoadState('error');
+        setDiagnostic({
+          source: /^https?:\/\//.test(resolvedUrl) || String(imagePath).startsWith('/uploads') ? 'Server' : 'Local',
+          size: 0,
+          status: '加载失败',
+          message: '图片加载失败，请重新上传图片'
+        });
+      };
+      tester.src = resolvedUrl;
+      return;
     }
 
     resolveImage().catch((error) => {
@@ -3116,6 +3156,7 @@ function InvoiceImageViewer({ invoice, onUpdated }) {
 
     return () => {
       cancelled = true;
+      if (retryTimer) window.clearTimeout(retryTimer);
       if (objectUrl) URL.revokeObjectURL(objectUrl);
     };
   }, [imageKey]);
@@ -3205,6 +3246,7 @@ function InvoiceImageViewer({ invoice, onUpdated }) {
           <div className="debug-fields">
             <Info label="invoice.imageUrl" value={invoice.imageUrl || '-'} />
             <Info label="invoice.imagePath" value={invoice.imagePath || '-'} />
+            <Info label="invoice.originalImageUrl" value={invoice.originalImageUrl || '-'} />
             <Info label="invoice.imageId" value={invoice.imageId || '-'} />
           </div>
         )}
@@ -3313,20 +3355,25 @@ function BottomNav() {
   );
 }
 
-function useLocalReload(loader, deps = []) {
+function useLocalReload(loader, deps = [], options = {}) {
   useEffect(() => {
     let cancelled = false;
+    const listenToEvents = options.listenToEvents !== false;
     const run = () => Promise.resolve(loader()).catch(() => {}).then(() => undefined);
     const guardedRun = () => {
       if (!cancelled) run();
     };
     guardedRun();
-    window.addEventListener('local-db-change', guardedRun);
-    window.addEventListener('sync-state-change', guardedRun);
+    if (listenToEvents) {
+      window.addEventListener('local-db-change', guardedRun);
+      window.addEventListener('sync-state-change', guardedRun);
+    }
     return () => {
       cancelled = true;
-      window.removeEventListener('local-db-change', guardedRun);
-      window.removeEventListener('sync-state-change', guardedRun);
+      if (listenToEvents) {
+        window.removeEventListener('local-db-change', guardedRun);
+        window.removeEventListener('sync-state-change', guardedRun);
+      }
     };
   }, deps);
 }

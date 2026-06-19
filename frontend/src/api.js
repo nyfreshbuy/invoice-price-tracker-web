@@ -216,6 +216,7 @@ export const api = {
   },
   createRecognitionTask: (formData) => request('/api/invoice-recognition/tasks', { method: 'POST', body: formData, timeoutMs: 60000 }),
   getRecognitionTasks: () => request('/api/invoice-recognition/tasks'),
+  getRecognitionStats: (limit = 100) => request(`/api/invoice-recognition/stats?limit=${encodeURIComponent(limit)}`),
   getRecognitionTask: (id) => request(`/api/invoice-recognition/tasks/${id}`),
   retryRecognitionTask: (id) => request(`/api/invoice-recognition/tasks/${id}/retry`, { method: 'POST' }),
   forceSaveRecognitionTask: (id) => request(`/api/invoice-recognition/tasks/${id}/force-save`, { method: 'POST' }),
@@ -224,7 +225,7 @@ export const api = {
   resumeRecognitionBatch: (batchId) => request(`/api/invoice-recognition/batches/${encodeURIComponent(batchId)}/resume`, { method: 'POST' }),
   cancelRecognitionBatch: (batchId) => request(`/api/invoice-recognition/batches/${encodeURIComponent(batchId)}/cancel`, { method: 'POST' }),
   fileUrl,
-  syncPush: (payload) => request('/api/sync/push', { method: 'POST', body: JSON.stringify(payload) }),
+  syncPush: (payload) => request('/api/sync/push', { method: 'POST', body: JSON.stringify(payload), timeoutMs: 60000 }),
   syncPull: (since) => request(`/api/sync/pull${since ? `?since=${encodeURIComponent(since)}` : ''}`),
   syncStatus: () => request('/api/sync/status')
 };

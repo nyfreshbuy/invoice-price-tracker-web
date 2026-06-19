@@ -546,6 +546,11 @@ export const localDb = {
     return groups.reduce((sum, count) => sum + count, 0);
   },
 
+  async getFailedCount() {
+    const groups = await Promise.all(syncTables.map(async (table) => (await all(table)).filter((record) => belongsToCurrentCompany(record) && record.syncStatus === 'failed').length));
+    return groups.reduce((sum, count) => sum + count, 0);
+  },
+
   async getPendingChanges() {
     const entries = await Promise.all(syncTables.map(async (table) => [
       table,
@@ -561,7 +566,7 @@ export const localDb = {
       if (local) await put(table, { ...local, syncStatus: 'conflict', conflictRecord: JSON.stringify(result.record || {}) });
       return Boolean(local);
     }
-    if (result.status === 'duplicate' || result.duplicate === true || result.already_exists === true || result.status === 'already_exists') {
+    if (result.status === 'duplicate' || result.duplicate === true || result.already_exists === true || result.alreadyExists === true || result.status === 'already_exists' || result.status === 'alreadyExists') {
       const records = await all(table);
       const local = records.find((record) => record.localId === result.localId || record.id === result.localId || record.serverId === result.serverId);
       if (local) await put(table, {
@@ -599,6 +604,21 @@ export const localDb = {
       status: result.status === 'needs_review' ? 'PENDING_REVIEW' : (serverRecord.status || local.status),
       syncNote: result.reason || result.status || '',
       version: Number(serverRecord.version || local.version || 1)
+    });
+    return true;
+  },
+
+  async markSyncFailed(table, localId, errorMessage = 'Sync result missing') {
+    if (!table || !localId) return false;
+    const records = await all(table);
+    const local = records.find((record) => record.localId === localId || record.id === localId || record.serverId === localId);
+    if (!local) return false;
+    await put(table, {
+      ...local,
+      syncStatus: 'failed',
+      syncNote: errorMessage,
+      syncError: errorMessage,
+      updatedAt: local.updatedAt || nowIso()
     });
     return true;
   },

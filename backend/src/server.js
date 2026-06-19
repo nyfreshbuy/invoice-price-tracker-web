@@ -4066,6 +4066,49 @@ app.get('/api/invoice-recognition/tasks', requireAuth, asyncHandler(async (req, 
   res.json(rows.map(parseTaskRow));
 }));
 
+app.get('/api/invoice-recognition/stats', requireAuth, asyncHandler(async (req, res) => {
+  const limit = Math.min(Math.max(Number(req.query.limit || 100), 1), 500);
+  const rows = await queryAll(`
+    SELECT * FROM ${quoteTable('invoice_recognition_tasks')}
+    WHERE ${quoteIdentifier('companyId')} = ?
+    ORDER BY ${quoteIdentifier('createdAt')} DESC
+    LIMIT ${limit}
+  `, [req.user.companyId]);
+  const tasks = rows.map(parseTaskRow);
+  const templateCount = tasks.filter((task) => task.usedTemplate || String(task.recognitionSource || '').toLowerCase().includes('template') || String(task.recognitionSource || '').includes('模板')).length;
+  const aiVisionCount = tasks.filter((task) => task.usedAI || String(task.recognitionSource || '').toLowerCase().includes('ai')).length;
+  const ocrCount = tasks.filter((task) => !task.usedTemplate && !task.usedAI && String(task.recognitionSource || '').toLowerCase().includes('ocr')).length;
+  const completedCount = tasks.filter((task) => task.status === 'completed').length;
+  const templateHitRate = completedCount ? Number((templateCount / completedCount).toFixed(4)) : 0;
+  res.json({
+    ok: true,
+    companyId: req.user.companyId,
+    limit,
+    total: tasks.length,
+    completedCount,
+    templateCount,
+    aiVisionCount,
+    ocrCount,
+    templateHitRate,
+    sources: tasks.reduce((counts, task) => {
+      const key = task.recognitionSource || task.source || 'unknown';
+      counts[key] = (counts[key] || 0) + 1;
+      return counts;
+    }, {}),
+    recent: tasks.map((task) => ({
+      id: task.id,
+      status: task.status,
+      recognitionSource: task.recognitionSource || task.source || '',
+      usedTemplate: task.usedTemplate,
+      usedAI: task.usedAI,
+      supplierHint: task.supplierHint || '',
+      invoiceId: task.invoiceId || '',
+      createdAt: task.createdAt,
+      completedAt: task.completedAt
+    }))
+  });
+}));
+
 app.get('/api/invoice-recognition/tasks/:id', requireAuth, asyncHandler(async (req, res) => {
   const task = await queryGet(`
     SELECT * FROM ${quoteTable('invoice_recognition_tasks')}

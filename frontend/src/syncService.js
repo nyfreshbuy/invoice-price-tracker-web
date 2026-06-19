@@ -34,6 +34,22 @@ function countByStatus(results = []) {
   }, {});
 }
 
+function resultKey(result = {}) {
+  return [result.localId, result.serverId].filter(Boolean).map(String);
+}
+
+function recordKey(entry = {}) {
+  const record = entry.record || {};
+  return [record.localId, record.id, record.serverId].filter(Boolean).map(String);
+}
+
+function inferResultTable(result = {}, batch = []) {
+  if (result.table) return result.table;
+  const keys = new Set(resultKey(result));
+  const match = batch.find((entry) => recordKey(entry).some((key) => keys.has(key)));
+  return match?.table || '';
+}
+
 function connectionType() {
   const connection = navigator.connection || navigator.mozConnection || navigator.webkitConnection;
   return {
@@ -88,9 +104,10 @@ function syncLabel({ session, pendingCount, conflictCount }) {
 
 export async function getSyncSnapshot() {
   const session = getAuthSession();
-  const [pendingCount, conflictCount, pendingChanges, preferences, lastSync] = await Promise.all([
+  const [pendingCount, conflictCount, failedCount, pendingChanges, preferences, lastSync] = await Promise.all([
     localDb.getPendingCount(),
     localDb.getConflictCount(),
+    localDb.getFailedCount(),
     localDb.getPendingChanges(),
     getSyncPreferences(),
     lastSyncAt()
@@ -100,6 +117,7 @@ export async function getSyncSnapshot() {
     authenticated: Boolean(session),
     pendingCount,
     conflictCount,
+    failedCount,
     pendingByTable: Object.fromEntries(Object.entries(pendingChanges).map(([table, records]) => [table, records.length])),
     syncing,
     lastError,
@@ -203,10 +221,24 @@ export async function syncNow({ force = false, reason = 'manual' } = {}) {
           });
           let appliedCount = 0;
           let notFoundCount = 0;
+          const resultKeys = new Set();
           for (const result of results) {
-            const applied = await localDb.markSynced(result.table, result);
+            const table = inferResultTable(result, batch);
+            for (const key of resultKey(result)) resultKeys.add(`${table}:${key}`);
+            const applied = await localDb.markSynced(table, { ...result, table });
             if (applied) appliedCount += 1;
             else notFoundCount += 1;
+          }
+          let missingResultCount = 0;
+          for (const entry of batch) {
+            const keys = recordKey(entry).map((key) => `${entry.table}:${key}`);
+            if (keys.some((key) => resultKeys.has(key))) continue;
+            const marked = await localDb.markSyncFailed(entry.table, entry.record.localId || entry.record.id || entry.record.serverId, 'Sync push returned no result for this record');
+            if (marked) missingResultCount += 1;
+          }
+          if (missingResultCount > 0) {
+            syncProgress.failed += missingResultCount;
+            lastError = `${missingResultCount} sync records did not receive server results`;
           }
           const remainingAfterBatch = await localDb.getPendingCount();
           console.log('[sync] local apply completed:', {
@@ -214,8 +246,9 @@ export async function syncNow({ force = false, reason = 'manual' } = {}) {
             batchStart: index,
             appliedCount,
             notFoundCount,
+            missingResultCount,
             successCount: results.length - notFoundCount,
-            failedCount: notFoundCount,
+            failedCount: notFoundCount + missingResultCount,
             remainingPending: remainingAfterBatch
           });
         } catch (error) {

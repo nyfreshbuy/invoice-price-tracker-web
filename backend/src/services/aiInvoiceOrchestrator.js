@@ -24,8 +24,22 @@ export async function recognizeInvoice(file, options = {}) {
   let ocrText = '';
   let ocrLanguage = '';
   const hintedTemplate = await findTemplateBySupplierHint(supplierHint, companyId);
+  let templateMissReason = '';
   if (hintedTemplate && hintedTemplate.failCount < 3) {
-    const ocr = await runPlainOcr(file.path);
+    console.log('[TEMPLATE MATCH]', {
+      companyId,
+      stage: 'supplier_hint',
+      supplierHint,
+      templateId: hintedTemplate.id,
+      templateName: hintedTemplate.supplierName || ''
+    });
+    const ocr = await safeRunPlainOcr(file.path, {
+      companyId,
+      stage: 'supplier_hint_ocr',
+      supplierHint,
+      templateId: hintedTemplate.id,
+      templateName: hintedTemplate.supplierName || ''
+    });
     ocrText = ocr.ocrText;
     ocrLanguage = ocr.ocrLanguage;
     const templated = parseWithTemplate(ocrText, hintedTemplate);
@@ -41,10 +55,88 @@ export async function recognizeInvoice(file, options = {}) {
         ocrLanguage
       });
     }
+    templateMissReason = templated.error || 'supplier hint template parse failed';
+    console.log('[TEMPLATE MISS]', {
+      companyId,
+      stage: 'supplier_hint_parse',
+      supplierHint,
+      templateId: hintedTemplate.id,
+      templateName: hintedTemplate.supplierName || '',
+      reason: templateMissReason
+    });
     await markTemplateFailure(hintedTemplate.id, companyId);
+  } else {
+    templateMissReason = hintedTemplate ? 'template disabled after repeated failures' : 'no supplier hint template matched';
+    console.log('[TEMPLATE MISS]', {
+      companyId,
+      stage: 'supplier_hint',
+      supplierHint,
+      templateId: hintedTemplate?.id || '',
+      templateName: hintedTemplate?.supplierName || '',
+      reason: templateMissReason
+    });
+  }
+
+  if (!ocrText) {
+    const ocr = await safeRunPlainOcr(file.path, {
+      companyId,
+      stage: 'ocr_text_before_ai',
+      supplierHint
+    });
+    ocrText = ocr.ocrText;
+    ocrLanguage = ocr.ocrLanguage;
+  }
+  const textTemplate = ocrText ? await findTemplateByOcrText(ocrText, companyId) : null;
+  if (textTemplate && textTemplate.failCount < 3) {
+    console.log('[TEMPLATE MATCH]', {
+      companyId,
+      stage: 'ocr_text',
+      supplierHint,
+      templateId: textTemplate.id,
+      templateName: textTemplate.supplierName || ''
+    });
+    const templated = parseWithTemplate(ocrText, textTemplate);
+    if (templated.success) {
+      await markTemplateSuccess(textTemplate.id, companyId);
+      return responsePayload({
+        source: 'template',
+        imagePath,
+        ocrText,
+        result: templated.result,
+        template: textTemplate,
+        sampleImageHash,
+        ocrLanguage
+      });
+    }
+    templateMissReason = templated.error || 'ocr text template parse failed';
+    console.log('[TEMPLATE MISS]', {
+      companyId,
+      stage: 'ocr_text_parse',
+      supplierHint,
+      templateId: textTemplate.id,
+      templateName: textTemplate.supplierName || '',
+      reason: templateMissReason
+    });
+    await markTemplateFailure(textTemplate.id, companyId);
+  } else {
+    const reason = textTemplate ? 'template disabled after repeated failures' : 'no OCR text template matched';
+    templateMissReason = templateMissReason ? `${templateMissReason}; ${reason}` : reason;
+    console.log('[TEMPLATE MISS]', {
+      companyId,
+      stage: 'ocr_text',
+      supplierHint,
+      templateId: textTemplate?.id || '',
+      templateName: textTemplate?.supplierName || '',
+      reason
+    });
   }
 
   try {
+    console.log('[AI VISION FALLBACK]', {
+      companyId,
+      supplierHint,
+      reason: templateMissReason || 'template not available'
+    });
     const aiResult = await recognizeInvoiceWithAI(file.path, { mimeType: file.mimetype });
     const learnedTemplate = await saveOrUpdateTemplateFromResult(aiResult, sampleImageHash, companyId);
     return responsePayload({
@@ -63,6 +155,13 @@ export async function recognizeInvoice(file, options = {}) {
 
     const template = await findTemplateByOcrText(ocrText, companyId);
     if (template && template.failCount < 3) {
+      console.log('[TEMPLATE MATCH]', {
+        companyId,
+        stage: 'ai_failure_ocr_text',
+        supplierHint,
+        templateId: template.id,
+        templateName: template.supplierName || ''
+      });
       const templated = parseWithTemplate(ocrText, template);
       if (templated.success) {
         await markTemplateSuccess(template.id, companyId);
@@ -76,7 +175,24 @@ export async function recognizeInvoice(file, options = {}) {
           ocrLanguage
         });
       }
+      console.log('[TEMPLATE MISS]', {
+        companyId,
+        stage: 'ai_failure_ocr_text_parse',
+        supplierHint,
+        templateId: template.id,
+        templateName: template.supplierName || '',
+        reason: templated.error || 'template parse failed after AI failure'
+      });
       await markTemplateFailure(template.id, companyId);
+    } else {
+      console.log('[TEMPLATE MISS]', {
+        companyId,
+        stage: 'ai_failure_ocr_text',
+        supplierHint,
+        templateId: template?.id || '',
+        templateName: template?.supplierName || '',
+        reason: template ? 'template disabled after repeated failures' : 'no template matched after AI failure'
+      });
     }
 
     return responsePayload({
@@ -101,6 +217,22 @@ export async function runPlainOcr(imagePath) {
     }
   });
   return { ocrText: result.data?.text || '', ocrLanguage };
+}
+
+async function safeRunPlainOcr(imagePath, context = {}) {
+  try {
+    return await runPlainOcr(imagePath);
+  } catch (error) {
+    console.warn('[TEMPLATE MISS]', {
+      companyId: context.companyId || '',
+      stage: context.stage || 'ocr',
+      supplierHint: context.supplierHint || '',
+      templateId: context.templateId || '',
+      templateName: context.templateName || '',
+      reason: `OCR failed before template matching: ${error?.message || error}`
+    });
+    return { ocrText: '', ocrLanguage: process.env.OCR_LANG || 'eng+chi_sim', error };
+  }
 }
 
 function responsePayload({ source, imagePath, ocrText, result, template, sampleImageHash, ocrLanguage }) {
