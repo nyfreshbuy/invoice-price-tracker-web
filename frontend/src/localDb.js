@@ -559,11 +559,32 @@ export const localDb = {
     return Object.fromEntries(entries);
   },
 
+  async getPendingDebugDetails() {
+    const pending = await this.getPendingChanges();
+    return syncTables.flatMap((table) => (pending[table] || []).map((record) => ({
+      table,
+      id: record.id || '',
+      localId: record.localId || '',
+      serverId: record.serverId || '',
+      syncStatus: record.syncStatus || '',
+      pendingSync: ['pending', 'deleted'].includes(record.syncStatus),
+      lastSyncError: record.syncError || record.syncNote || '',
+      updatedAt: record.updatedAt || '',
+      payload: record
+    })));
+  },
+
   async markSynced(table, result) {
     if (result.status === 'conflict') {
       const records = await all(table);
       const local = records.find((record) => record.localId === result.localId || record.id === result.localId || record.serverId === result.serverId);
-      if (local) await put(table, { ...local, syncStatus: 'conflict', conflictRecord: JSON.stringify(result.record || {}) });
+      if (local) await put(table, {
+        ...local,
+        serverId: result.serverId || local.serverId || local.id,
+        syncStatus: 'synced',
+        syncNote: result.reason || 'conflict',
+        conflictRecord: JSON.stringify(result.record || result)
+      });
       return Boolean(local);
     }
     if (result.status === 'duplicate' || result.duplicate === true || result.already_exists === true || result.alreadyExists === true || result.status === 'already_exists' || result.status === 'alreadyExists') {

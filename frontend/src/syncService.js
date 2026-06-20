@@ -168,20 +168,21 @@ export async function syncNow({ force = false, reason = 'manual' } = {}) {
     return getSyncSnapshot();
   }
 
+  syncing = true;
+  waitingForWifi = false;
+  syncProgress = { done: 0, total: 0, failed: 0 };
+  emitSyncStateChange();
+
   const preferences = await getSyncPreferences();
   const lastSync = await lastSyncAt();
   const skipReason = shouldSkipAutoSync({ force, reason, preferences, lastSync });
   if (skipReason) {
     waitingForWifi = skipReason === '等待 WiFi';
     lastError = '';
+    syncing = false;
     emitSyncStateChange();
     return getSyncSnapshot();
   }
-
-  syncing = true;
-  waitingForWifi = false;
-  syncProgress = { done: 0, total: 0, failed: 0 };
-  emitSyncStateChange();
 
   try {
     const deviceId = getDeviceId();
@@ -193,10 +194,12 @@ export async function syncNow({ force = false, reason = 'manual' } = {}) {
 
     const pending = await localDb.getPendingChanges();
     const pendingRecords = flattenPendingChanges(pending);
+    const pendingDetails = await localDb.getPendingDebugDetails();
     console.log('[sync] start:', {
       companyId,
       reason,
-      pendingCounts: Object.fromEntries(Object.entries(pending).map(([table, records]) => [table, records.length]))
+      pendingCounts: Object.fromEntries(Object.entries(pending).map(([table, records]) => [table, records.length])),
+      pendingDetails
     });
 
     if (pendingRecords.length) {
@@ -256,7 +259,7 @@ export async function syncNow({ force = false, reason = 'manual' } = {}) {
           lastError = error.message || '同步失败';
           console.error('[sync] push batch failed:', { batchStart: index, batchSize: batch.length, error });
         } finally {
-          syncProgress.done += batch.length;
+          syncProgress.done = Math.min(syncProgress.total, syncProgress.done + batch.length);
           emitSyncStateChange();
         }
       }
@@ -264,7 +267,8 @@ export async function syncNow({ force = false, reason = 'manual' } = {}) {
         companyId,
         uploadedTotal: pendingRecords.length,
         failedTotal: syncProgress.failed,
-        remainingPending: await localDb.getPendingCount()
+        remainingPending: await localDb.getPendingCount(),
+        remainingPendingDetails: await localDb.getPendingDebugDetails()
       });
     }
 
