@@ -3,15 +3,39 @@ import { localDb, syncTables, getDeviceId, nowIso } from './localDb.js';
 
 const SYNC_BATCH_SIZE = 20;
 const AUTO_SYNC_INTERVAL_MS = 30 * 60 * 1000;
+const SYNC_TIMEOUT_MS = 30 * 1000;
 
 let syncing = false;
 let lastError = '';
 let waitingForWifi = false;
 let syncProgress = { done: 0, total: 0, failed: 0 };
 let autoSyncTimer = null;
+let activeSyncRunId = 0;
+let syncWatchdogTimer = null;
 
 function emitSyncStateChange() {
   window.dispatchEvent(new Event('sync-state-change'));
+}
+
+function clearSyncWatchdog() {
+  if (syncWatchdogTimer) window.clearTimeout(syncWatchdogTimer);
+  syncWatchdogTimer = null;
+}
+
+function armSyncWatchdog(runId) {
+  clearSyncWatchdog();
+  syncWatchdogTimer = window.setTimeout(() => {
+    if (!syncing || activeSyncRunId !== runId) return;
+    const remaining = Math.max(0, Number(syncProgress.total || 0) - Number(syncProgress.done || 0));
+    syncing = false;
+    syncProgress.failed = syncProgress.failed || remaining || 1;
+    lastError = '同步超时，请稍后重试';
+    console.error('[sync] watchdog timeout reset:', {
+      runId,
+      progress: { ...syncProgress }
+    });
+    emitSyncStateChange();
+  }, SYNC_TIMEOUT_MS);
 }
 
 function flattenPendingChanges(changes) {
@@ -90,13 +114,14 @@ async function lastSyncAt() {
   return meta?.value || '';
 }
 
-function syncLabel({ session, pendingCount, conflictCount }) {
+function syncLabel({ session, pendingCount, conflictCount, failedCount }) {
   if (!session) return '请先登录';
   if (!navigator.onLine) return '☁ 离线模式';
   if (waitingForWifi) return '☁ 等待 WiFi';
   if (syncing && syncProgress.total > 0) return `☁ 正在同步 ${syncProgress.done}/${syncProgress.total}`;
   if (syncing) return '☁ 正在同步...';
   if (lastError) return syncProgress.failed > 0 ? `☁ 同步失败 ${syncProgress.failed} 条` : '☁ 同步失败';
+  if (failedCount > 0) return `☁ 同步失败 ${failedCount} 条`;
   if (conflictCount > 0) return `☁ 需要人工确认 ${conflictCount} 条`;
   if (pendingCount > 0) return `☁ 待同步 ${pendingCount}`;
   return '☁ 已同步';
@@ -126,7 +151,7 @@ export async function getSyncSnapshot() {
     preferences,
     lastSyncAt: lastSync,
     connection: connectionType(),
-    label: syncLabel({ session, pendingCount, conflictCount })
+    label: syncLabel({ session, pendingCount, conflictCount, failedCount })
   };
 }
 
@@ -171,20 +196,22 @@ export async function syncNow({ force = false, reason = 'manual' } = {}) {
   syncing = true;
   waitingForWifi = false;
   syncProgress = { done: 0, total: 0, failed: 0 };
+  const runId = activeSyncRunId + 1;
+  activeSyncRunId = runId;
+  armSyncWatchdog(runId);
   emitSyncStateChange();
 
-  const preferences = await getSyncPreferences();
-  const lastSync = await lastSyncAt();
-  const skipReason = shouldSkipAutoSync({ force, reason, preferences, lastSync });
-  if (skipReason) {
-    waitingForWifi = skipReason === '等待 WiFi';
-    lastError = '';
-    syncing = false;
-    emitSyncStateChange();
-    return getSyncSnapshot();
-  }
-
   try {
+    const preferences = await getSyncPreferences();
+    const lastSync = await lastSyncAt();
+    const skipReason = shouldSkipAutoSync({ force, reason, preferences, lastSync });
+    if (skipReason) {
+      waitingForWifi = skipReason === '等待 WiFi';
+      lastError = '';
+      console.log('[sync] skipped:', { reason, skipReason });
+      return getSyncSnapshot();
+    }
+
     const deviceId = getDeviceId();
     const companyId = getCompanyId();
     if (!companyId) {
@@ -288,15 +315,36 @@ export async function syncNow({ force = false, reason = 'manual' } = {}) {
         await localDb.mergeRemote(table, record);
       }
     }
-    await localDb.setMeta(metaKey, pulled.serverTime || nowIso());
-    if (syncProgress.failed === 0) lastError = '';
+    if (syncProgress.failed === 0) {
+      await localDb.setMeta(metaKey, pulled.serverTime || nowIso());
+      lastError = '';
+      console.log('[sync] success:', { companyId, serverTime: pulled.serverTime || '' });
+    } else {
+      lastError = `同步失败：剩余 ${await localDb.getPendingCount()} 条`;
+      console.warn('[sync] completed with failures:', {
+        companyId,
+        failedTotal: syncProgress.failed,
+        remainingPending: await localDb.getPendingCount(),
+        remainingPendingDetails: await localDb.getPendingDebugDetails()
+      });
+    }
   } catch (error) {
     lastError = error.message || '同步失败';
     console.error('[sync] failed:', error);
   } finally {
-    syncing = false;
-    scheduleNextAutoSync();
-    emitSyncStateChange();
+    if (activeSyncRunId === runId) {
+      clearSyncWatchdog();
+      syncing = false;
+      syncProgress.done = Math.min(syncProgress.done, syncProgress.total);
+      console.log('[sync] finally reset:', {
+        runId,
+        syncing,
+        progress: { ...syncProgress },
+        lastError
+      });
+      scheduleNextAutoSync();
+      emitSyncStateChange();
+    }
   }
 
   return getSyncSnapshot();
