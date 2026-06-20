@@ -13,6 +13,10 @@ let autoSyncTimer = null;
 let activeSyncRunId = 0;
 let syncWatchdogTimer = null;
 
+function lastSyncStorageKey(companyId) {
+  return `invoicePriceTrackerLastSyncAt:${companyId || 'default'}`;
+}
+
 function emitSyncStateChange() {
   window.dispatchEvent(new Event('sync-state-change'));
 }
@@ -28,9 +32,10 @@ function armSyncWatchdog(runId) {
     if (!syncing || activeSyncRunId !== runId) return;
     const remaining = Math.max(0, Number(syncProgress.total || 0) - Number(syncProgress.done || 0));
     syncing = false;
-    syncProgress.failed = syncProgress.failed || remaining || 1;
-    lastError = '同步超时，请稍后重试';
-    console.error('[sync] watchdog timeout reset:', {
+    syncProgress.failed = syncProgress.failed || remaining;
+    lastError = 'Sync timeout, please retry';
+    clearSyncWatchdog();
+    console.error('[SYNC] watchdog timeout reset:', {
       runId,
       progress: { ...syncProgress }
     });
@@ -76,9 +81,13 @@ function inferResultTable(result = {}, batch = []) {
 
 function connectionType() {
   const connection = navigator.connection || navigator.mozConnection || navigator.webkitConnection;
+  const online = navigator.onLine;
+  const type = String(connection?.type || '');
+  const effectiveType = String(connection?.effectiveType || '');
   return {
-    type: String(connection?.type || ''),
-    effectiveType: String(connection?.effectiveType || '')
+    type: type || (online ? 'online' : 'offline'),
+    effectiveType,
+    label: type || effectiveType || (online ? 'online' : 'offline')
   };
 }
 
@@ -111,7 +120,15 @@ export async function setSyncPreferences(preferences = {}) {
 async function lastSyncAt() {
   const companyId = getCompanyId();
   const meta = companyId ? await localDb.getMeta(`lastPullAt:${companyId}`) : null;
-  return meta?.value || '';
+  return meta?.value || localStorage.getItem(lastSyncStorageKey(companyId)) || localStorage.getItem('lastSyncTime') || '';
+}
+
+async function setLastSyncAt(companyId, value) {
+  const timestamp = value || nowIso();
+  await localDb.setMeta(`lastPullAt:${companyId}`, timestamp);
+  localStorage.setItem(lastSyncStorageKey(companyId), timestamp);
+  localStorage.setItem('lastSyncTime', timestamp);
+  return timestamp;
 }
 
 function syncLabel({ session, pendingCount, conflictCount, failedCount }) {
@@ -196,9 +213,11 @@ export async function syncNow({ force = false, reason = 'manual' } = {}) {
   syncing = true;
   waitingForWifi = false;
   syncProgress = { done: 0, total: 0, failed: 0 };
+  lastError = '';
   const runId = activeSyncRunId + 1;
   activeSyncRunId = runId;
   armSyncWatchdog(runId);
+  console.log('[SYNC] start', { reason, force, runId });
   emitSyncStateChange();
 
   try {
@@ -208,7 +227,7 @@ export async function syncNow({ force = false, reason = 'manual' } = {}) {
     if (skipReason) {
       waitingForWifi = skipReason === '等待 WiFi';
       lastError = '';
-      console.log('[sync] skipped:', { reason, skipReason });
+      console.log('[SYNC] skipped', { reason, skipReason });
       return getSyncSnapshot();
     }
 
@@ -222,7 +241,12 @@ export async function syncNow({ force = false, reason = 'manual' } = {}) {
     const pending = await localDb.getPendingChanges();
     const pendingRecords = flattenPendingChanges(pending);
     const pendingDetails = await localDb.getPendingDebugDetails();
-    console.log('[sync] start:', {
+    console.log('[SYNC] state', {
+      syncInProgress: syncing,
+      lastSyncTime: await lastSyncAt(),
+      pendingCount: pendingRecords.length
+    });
+    console.log('[SYNC] push start', {
       companyId,
       reason,
       pendingCounts: Object.fromEntries(Object.entries(pending).map(([table, records]) => [table, records.length])),
@@ -239,7 +263,7 @@ export async function syncNow({ force = false, reason = 'manual' } = {}) {
           const batchChanges = buildBatchChanges(batch);
           const pushed = await api.syncPush({ deviceId, companyId, changes: batchChanges });
           const results = Array.isArray(pushed.results) ? pushed.results : [];
-          console.log('[sync] push batch completed:', {
+          console.log('[SYNC] push batch finish', {
             companyId,
             batchStart: index,
             batchSize: batch.length,
@@ -271,7 +295,7 @@ export async function syncNow({ force = false, reason = 'manual' } = {}) {
             lastError = `${missingResultCount} sync records did not receive server results`;
           }
           const remainingAfterBatch = await localDb.getPendingCount();
-          console.log('[sync] local apply completed:', {
+          console.log('[SYNC] local apply finish', {
             companyId,
             batchStart: index,
             appliedCount,
@@ -284,27 +308,31 @@ export async function syncNow({ force = false, reason = 'manual' } = {}) {
         } catch (error) {
           syncProgress.failed += batch.length;
           lastError = error.message || '同步失败';
-          console.error('[sync] push batch failed:', { batchStart: index, batchSize: batch.length, error });
+          console.error('[SYNC] push error', { batchStart: index, batchSize: batch.length, error });
         } finally {
           syncProgress.done = Math.min(syncProgress.total, syncProgress.done + batch.length);
           emitSyncStateChange();
         }
       }
-      console.log('[sync] push finished:', {
-        companyId,
-        uploadedTotal: pendingRecords.length,
-        failedTotal: syncProgress.failed,
-        remainingPending: await localDb.getPendingCount(),
-        remainingPendingDetails: await localDb.getPendingDebugDetails()
-      });
     }
+    console.log('[SYNC] push finish', {
+      companyId,
+      uploadedTotal: pendingRecords.length,
+      failedTotal: syncProgress.failed,
+      remainingPending: await localDb.getPendingCount(),
+      remainingPendingDetails: await localDb.getPendingDebugDetails()
+    });
 
     const metaKey = `lastPullAt:${companyId}`;
     const meta = await localDb.getMeta(metaKey);
     const stats = await localDb.getStats();
     const hasLocalData = Object.values(stats).some((count) => Number(count || 0) > 0);
+    console.log('[SYNC] pull start', {
+      companyId,
+      since: hasLocalData ? (meta?.value || '') : ''
+    });
     const pulled = await api.syncPull(hasLocalData ? (meta?.value || '') : '');
-    console.log('[sync] pull completed:', {
+    console.log('[SYNC] pull finish', {
       companyId,
       since: hasLocalData ? (meta?.value || '') : '',
       backend: pulled.backend || '',
@@ -316,12 +344,12 @@ export async function syncNow({ force = false, reason = 'manual' } = {}) {
       }
     }
     if (syncProgress.failed === 0) {
-      await localDb.setMeta(metaKey, pulled.serverTime || nowIso());
+      await setLastSyncAt(companyId, pulled.serverTime || nowIso());
       lastError = '';
-      console.log('[sync] success:', { companyId, serverTime: pulled.serverTime || '' });
+      console.log('[SYNC] finish', { companyId, serverTime: pulled.serverTime || '', pendingCount: await localDb.getPendingCount() });
     } else {
       lastError = `同步失败：剩余 ${await localDb.getPendingCount()} 条`;
-      console.warn('[sync] completed with failures:', {
+      console.warn('[SYNC] finish with failures', {
         companyId,
         failedTotal: syncProgress.failed,
         remainingPending: await localDb.getPendingCount(),
@@ -330,17 +358,19 @@ export async function syncNow({ force = false, reason = 'manual' } = {}) {
     }
   } catch (error) {
     lastError = error.message || '同步失败';
-    console.error('[sync] failed:', error);
+    console.error('[SYNC] error', error);
   } finally {
     if (activeSyncRunId === runId) {
       clearSyncWatchdog();
       syncing = false;
       syncProgress.done = Math.min(syncProgress.done, syncProgress.total);
-      console.log('[sync] finally reset:', {
+      console.log('[SYNC] finally reset', {
         runId,
-        syncing,
+        syncInProgress: syncing,
         progress: { ...syncProgress },
-        lastError
+        lastError,
+        pendingCount: await localDb.getPendingCount().catch(() => null),
+        lastSyncTime: await lastSyncAt().catch(() => '')
       });
       scheduleNextAutoSync();
       emitSyncStateChange();
@@ -351,6 +381,7 @@ export async function syncNow({ force = false, reason = 'manual' } = {}) {
 }
 
 export async function pullFromCloud({ full = false } = {}) {
+  if (syncing) return getSyncSnapshot();
   if (!getAuthSession()) {
     lastError = '请先登录';
     return getSyncSnapshot();
@@ -362,6 +393,11 @@ export async function pullFromCloud({ full = false } = {}) {
   syncing = true;
   waitingForWifi = false;
   syncProgress = { done: 0, total: 0, failed: 0 };
+  lastError = '';
+  const runId = activeSyncRunId + 1;
+  activeSyncRunId = runId;
+  armSyncWatchdog(runId);
+  console.log('[SYNC] pull start', { full, runId });
   emitSyncStateChange();
   try {
     const companyId = getCompanyId();
@@ -380,18 +416,25 @@ export async function pullFromCloud({ full = false } = {}) {
         await localDb.mergeRemote(table, record);
       }
     }
-    await localDb.setMeta(metaKey, pulled.serverTime || nowIso());
+    await setLastSyncAt(companyId, pulled.serverTime || nowIso());
     lastError = '';
+    console.log('[SYNC] pull finish', { full, serverTime: pulled.serverTime || '' });
   } catch (error) {
     lastError = error.message || '从云端恢复失败';
+    console.error('[SYNC] pull error', error);
   } finally {
-    syncing = false;
-    emitSyncStateChange();
+    if (activeSyncRunId === runId) {
+      clearSyncWatchdog();
+      syncing = false;
+      console.log('[SYNC] finally reset', { runId, syncInProgress: syncing, lastError });
+      emitSyncStateChange();
+    }
   }
   return getSyncSnapshot();
 }
 
 export async function resetLocalCacheAndPull() {
+  if (syncing) return getSyncSnapshot();
   if (!getAuthSession()) {
     lastError = '请先登录';
     return getSyncSnapshot();
@@ -403,15 +446,25 @@ export async function resetLocalCacheAndPull() {
   syncing = true;
   waitingForWifi = false;
   syncProgress = { done: 0, total: 0, failed: 0 };
+  lastError = '';
+  const runId = activeSyncRunId + 1;
+  activeSyncRunId = runId;
+  armSyncWatchdog(runId);
+  console.log('[SYNC] reset local cache start', { runId });
   emitSyncStateChange();
   try {
     await localDb.clearLocalCacheForCurrentCompany();
     lastError = '';
   } catch (error) {
     lastError = error.message || '清空本地缓存失败';
+    console.error('[SYNC] reset local cache error', error);
   } finally {
-    syncing = false;
-    emitSyncStateChange();
+    if (activeSyncRunId === runId) {
+      clearSyncWatchdog();
+      syncing = false;
+      console.log('[SYNC] finally reset', { runId, syncInProgress: syncing, lastError });
+      emitSyncStateChange();
+    }
   }
   if (!lastError) return pullFromCloud({ full: true });
   return getSyncSnapshot();

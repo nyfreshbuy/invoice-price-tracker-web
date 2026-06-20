@@ -2883,7 +2883,7 @@ function SettingsPage() {
           <Info label="待同步总数" value={syncSnapshot?.pendingCount ?? 0} />
           <Info label="同步失败数量" value={syncSnapshot?.failedCount ?? 0} />
           <Info label="最后同步时间" value={syncSnapshot?.lastSyncAt || '-'} />
-          <Info label="网络类型" value={syncSnapshot?.connection?.type || syncSnapshot?.connection?.effectiveType || 'unknown'} />
+          <Info label="网络类型" value={syncSnapshot?.connection?.label || syncSnapshot?.connection?.type || syncSnapshot?.connection?.effectiveType || (syncSnapshot?.online ? 'online' : 'offline')} />
           <Info label="待同步发票" value={syncSnapshot?.pendingByTable?.invoices ?? 0} />
           <Info label="待同步商品明细" value={syncSnapshot?.pendingByTable?.invoice_items ?? 0} />
           <Info label="待同步商品" value={syncSnapshot?.pendingByTable?.products ?? 0} />
