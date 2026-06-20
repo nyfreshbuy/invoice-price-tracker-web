@@ -17,6 +17,10 @@ function lastSyncStorageKey(companyId) {
   return `invoicePriceTrackerLastSyncAt:${companyId || 'default'}`;
 }
 
+function syncDiagnosticKey(companyId) {
+  return `sync:lastResult:${companyId || 'default'}`;
+}
+
 function emitSyncStateChange() {
   window.dispatchEvent(new Event('sync-state-change'));
 }
@@ -35,6 +39,16 @@ function armSyncWatchdog(runId) {
     syncProgress.failed = syncProgress.failed || remaining;
     lastError = 'Sync timeout, please retry';
     clearSyncWatchdog();
+    const companyId = getCompanyId();
+    if (companyId) {
+      setSyncDiagnostic(companyId, {
+        status: 'failed',
+        finishedAt: nowIso(),
+        error: lastError,
+        pendingCount: remaining,
+        failedCount: syncProgress.failed
+      }).catch(() => {});
+    }
     console.error('[SYNC] watchdog timeout reset:', {
       runId,
       progress: { ...syncProgress }
@@ -131,14 +145,46 @@ async function setLastSyncAt(companyId, value) {
   return timestamp;
 }
 
-function syncLabel({ session, pendingCount, conflictCount, failedCount }) {
+async function getSyncDiagnostic(companyId = getCompanyId()) {
+  const meta = companyId ? await localDb.getMeta(syncDiagnosticKey(companyId)) : null;
+  if (meta?.value) {
+    try {
+      return JSON.parse(meta.value);
+    } catch {
+      return { status: 'unknown', error: meta.value };
+    }
+  }
+  try {
+    return JSON.parse(localStorage.getItem(syncDiagnosticKey(companyId)) || 'null') || null;
+  } catch {
+    return null;
+  }
+}
+
+async function setSyncDiagnostic(companyId, patch = {}) {
+  const current = await getSyncDiagnostic(companyId);
+  const next = {
+    ...(current || {}),
+    ...patch,
+    updatedAt: nowIso()
+  };
+  const serialized = JSON.stringify(next);
+  if (companyId) await localDb.setMeta(syncDiagnosticKey(companyId), serialized);
+  localStorage.setItem(syncDiagnosticKey(companyId), serialized);
+  return next;
+}
+
+function totalSyncRecords(changes = {}) {
+  return Object.values(changes || {}).reduce((sum, records) => sum + (Array.isArray(records) ? records.length : 0), 0);
+}
+
+function syncLabel({ session, pendingCount, conflictCount }) {
   if (!session) return '请先登录';
   if (!navigator.onLine) return '☁ 离线模式';
   if (waitingForWifi) return '☁ 等待 WiFi';
   if (syncing && syncProgress.total > 0) return `☁ 正在同步 ${syncProgress.done}/${syncProgress.total}`;
   if (syncing) return '☁ 正在同步...';
   if (lastError) return syncProgress.failed > 0 ? `☁ 同步失败 ${syncProgress.failed} 条` : '☁ 同步失败';
-  if (failedCount > 0) return `☁ 同步失败 ${failedCount} 条`;
   if (conflictCount > 0) return `☁ 需要人工确认 ${conflictCount} 条`;
   if (pendingCount > 0) return `☁ 待同步 ${pendingCount}`;
   return '☁ 已同步';
@@ -146,13 +192,15 @@ function syncLabel({ session, pendingCount, conflictCount, failedCount }) {
 
 export async function getSyncSnapshot() {
   const session = getAuthSession();
-  const [pendingCount, conflictCount, failedCount, pendingChanges, preferences, lastSync] = await Promise.all([
+  const companyId = getCompanyId();
+  const [pendingCount, conflictCount, failedCount, pendingChanges, preferences, lastSync, diagnostic] = await Promise.all([
     localDb.getPendingCount(),
     localDb.getConflictCount(),
     localDb.getFailedCount(),
     localDb.getPendingChanges(),
     getSyncPreferences(),
-    lastSyncAt()
+    lastSyncAt(),
+    getSyncDiagnostic(companyId)
   ]);
   return {
     online: navigator.onLine,
@@ -165,10 +213,11 @@ export async function getSyncSnapshot() {
     lastError,
     waitingForWifi,
     syncProgress: { ...syncProgress },
+    diagnostic,
     preferences,
     lastSyncAt: lastSync,
     connection: connectionType(),
-    label: syncLabel({ session, pendingCount, conflictCount, failedCount })
+    label: syncLabel({ session, pendingCount, conflictCount })
   };
 }
 
@@ -220,6 +269,9 @@ export async function syncNow({ force = false, reason = 'manual' } = {}) {
   console.log('[SYNC] start', { reason, force, runId });
   emitSyncStateChange();
 
+  let syncCompanyId = '';
+  let pushedTotal = 0;
+  let pulledTotal = 0;
   try {
     const preferences = await getSyncPreferences();
     const lastSync = await lastSyncAt();
@@ -233,6 +285,7 @@ export async function syncNow({ force = false, reason = 'manual' } = {}) {
 
     const deviceId = getDeviceId();
     const companyId = getCompanyId();
+    syncCompanyId = companyId;
     if (!companyId) {
       lastError = '请先登录';
       return getSyncSnapshot();
@@ -241,6 +294,16 @@ export async function syncNow({ force = false, reason = 'manual' } = {}) {
     const pending = await localDb.getPendingChanges();
     const pendingRecords = flattenPendingChanges(pending);
     const pendingDetails = await localDb.getPendingDebugDetails();
+    await setSyncDiagnostic(companyId, {
+      status: 'running',
+      startedAt: nowIso(),
+      finishedAt: '',
+      error: '',
+      reason,
+      pushCount: pendingRecords.length,
+      pullCount: 0,
+      pendingCount: pendingRecords.length
+    });
     console.log('[SYNC] state', {
       syncInProgress: syncing,
       lastSyncTime: await lastSyncAt(),
@@ -263,6 +326,7 @@ export async function syncNow({ force = false, reason = 'manual' } = {}) {
           const batchChanges = buildBatchChanges(batch);
           const pushed = await api.syncPush({ deviceId, companyId, changes: batchChanges });
           const results = Array.isArray(pushed.results) ? pushed.results : [];
+          pushedTotal += results.length;
           console.log('[SYNC] push batch finish', {
             companyId,
             batchStart: index,
@@ -332,6 +396,7 @@ export async function syncNow({ force = false, reason = 'manual' } = {}) {
       since: hasLocalData ? (meta?.value || '') : ''
     });
     const pulled = await api.syncPull(hasLocalData ? (meta?.value || '') : '');
+    pulledTotal = totalSyncRecords(pulled.data || {});
     console.log('[SYNC] pull finish', {
       companyId,
       since: hasLocalData ? (meta?.value || '') : '',
@@ -345,10 +410,28 @@ export async function syncNow({ force = false, reason = 'manual' } = {}) {
     }
     if (syncProgress.failed === 0) {
       await setLastSyncAt(companyId, pulled.serverTime || nowIso());
+      await setSyncDiagnostic(companyId, {
+        status: 'success',
+        finishedAt: nowIso(),
+        error: '',
+        pushCount: pushedTotal,
+        pullCount: pulledTotal,
+        pendingCount: await localDb.getPendingCount(),
+        failedCount: 0
+      });
       lastError = '';
       console.log('[SYNC] finish', { companyId, serverTime: pulled.serverTime || '', pendingCount: await localDb.getPendingCount() });
     } else {
       lastError = `同步失败：剩余 ${await localDb.getPendingCount()} 条`;
+      await setSyncDiagnostic(companyId, {
+        status: 'failed',
+        finishedAt: nowIso(),
+        error: lastError,
+        pushCount: pushedTotal,
+        pullCount: pulledTotal,
+        pendingCount: await localDb.getPendingCount(),
+        failedCount: syncProgress.failed
+      });
       console.warn('[SYNC] finish with failures', {
         companyId,
         failedTotal: syncProgress.failed,
@@ -358,6 +441,17 @@ export async function syncNow({ force = false, reason = 'manual' } = {}) {
     }
   } catch (error) {
     lastError = error.message || '同步失败';
+    if (syncCompanyId) {
+      await setSyncDiagnostic(syncCompanyId, {
+        status: 'failed',
+        finishedAt: nowIso(),
+        error: lastError,
+        pushCount: pushedTotal,
+        pullCount: pulledTotal,
+        pendingCount: await localDb.getPendingCount().catch(() => null),
+        failedCount: syncProgress.failed
+      }).catch(() => {});
+    }
     console.error('[SYNC] error', error);
   } finally {
     if (activeSyncRunId === runId) {
@@ -399,8 +493,19 @@ export async function pullFromCloud({ full = false } = {}) {
   armSyncWatchdog(runId);
   console.log('[SYNC] pull start', { full, runId });
   emitSyncStateChange();
+  let syncCompanyId = '';
   try {
     const companyId = getCompanyId();
+    syncCompanyId = companyId;
+    await setSyncDiagnostic(companyId, {
+      status: 'running',
+      startedAt: nowIso(),
+      finishedAt: '',
+      error: '',
+      reason: full ? 'restore-full' : 'restore',
+      pushCount: 0,
+      pullCount: 0
+    });
     const metaKey = `lastPullAt:${companyId}`;
     const meta = full ? null : await localDb.getMeta(metaKey);
     const pulled = await api.syncPull(meta?.value || '');
@@ -417,10 +522,28 @@ export async function pullFromCloud({ full = false } = {}) {
       }
     }
     await setLastSyncAt(companyId, pulled.serverTime || nowIso());
+    await setSyncDiagnostic(companyId, {
+      status: 'success',
+      finishedAt: nowIso(),
+      error: '',
+      pushCount: 0,
+      pullCount: totalSyncRecords(pulled.data || {}),
+      pendingCount: await localDb.getPendingCount()
+    });
     lastError = '';
     console.log('[SYNC] pull finish', { full, serverTime: pulled.serverTime || '' });
   } catch (error) {
     lastError = error.message || '从云端恢复失败';
+    if (syncCompanyId) {
+      await setSyncDiagnostic(syncCompanyId, {
+        status: 'failed',
+        finishedAt: nowIso(),
+        error: lastError,
+        pushCount: 0,
+        pullCount: 0,
+        pendingCount: await localDb.getPendingCount().catch(() => null)
+      }).catch(() => {});
+    }
     console.error('[SYNC] pull error', error);
   } finally {
     if (activeSyncRunId === runId) {

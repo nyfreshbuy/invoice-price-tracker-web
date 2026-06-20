@@ -1779,6 +1779,14 @@ function countSyncRecords(changes = {}) {
   return Object.fromEntries(syncTables.map((table) => [table, Array.isArray(changes[table]) ? changes[table].length : 0]));
 }
 
+function countSyncResultStatuses(results = []) {
+  return results.reduce((counts, result) => {
+    const status = result?.status || 'missing_status';
+    counts[status] = (counts[status] || 0) + 1;
+    return counts;
+  }, {});
+}
+
 async function mirrorSqlSyncDataToMongo(companyId, reason = 'server-save', since = '') {
   if (!useMongoSync()) return null;
   try {
@@ -3275,59 +3283,95 @@ app.post('/api/sync/push', requireAuth, asyncHandler(async (req, res) => {
   const deviceId = req.body.deviceId || 'unknown';
   const companyId = req.user.companyId;
   const changes = req.body.changes || {};
-  console.log('[sync/push] received:', { companyId, deviceId, backend: syncBackend, counts: countSyncRecords(changes) });
+  const counts = countSyncRecords(changes);
+  const invoiceCount = Number(counts.invoices || 0);
+  console.log('[SYNC PUSH] start:', { companyId, deviceId, backend: syncBackend, invoiceCount, counts });
   if (useMongoSync()) {
-    const result = await mongoSyncPush({ companyId, deviceId, changes });
-    console.log('[sync/push] completed:', { companyId, backend: 'mongodb', resultCount: Array.isArray(result.results) ? result.results.length : 0 });
-    res.json(result);
-    return;
+    try {
+      const result = await mongoSyncPush({ companyId, deviceId, changes });
+      const results = Array.isArray(result.results) ? result.results : [];
+      console.log('[SYNC PUSH] finish:', {
+        companyId,
+        backend: 'mongodb',
+        resultCount: results.length,
+        resultStatuses: countSyncResultStatuses(results)
+      });
+      res.json(result);
+      return;
+    } catch (error) {
+      console.error('[SYNC PUSH] error:', { companyId, backend: 'mongodb', message: error.message, stack: error.stack });
+      throw error;
+    }
   }
   const results = [];
   const syncContext = { changes, rejectedInvoiceIds: new Set(), integritySavedInvoiceIds: new Set() };
 
-  await withTransaction(async (client) => {
-    for (const table of syncTables) {
-      const records = Array.isArray(changes[table]) ? changes[table] : [];
-      for (const record of records) {
-        if ((table === 'invoice_items' || table === 'invoice_discounts') && syncContext.rejectedInvoiceIds.has(record.invoiceId)) {
-          results.push({ table, localId: record.localId || record.id, serverId: '', status: 'skipped_duplicate_invoice', record: null });
-          continue;
-        }
-        if ((table === 'invoice_items' || table === 'invoice_discounts') && syncContext.integritySavedInvoiceIds.has(record.invoiceId)) {
-          results.push({ table, localId: record.localId || record.id, serverId: record.serverId || record.id || '', status: 'skipped_integrity_generated', record: null });
-          continue;
-        }
-        if (table === 'price_history') {
-          const relatedItem = (changes.invoice_items || []).find((item) => (item.id && item.id === record.invoiceItemId) || (item.localId && item.localId === record.invoiceItemId) || (item.serverId && item.serverId === record.invoiceItemId));
-          if (relatedItem && syncContext.rejectedInvoiceIds.has(relatedItem.invoiceId)) {
+  try {
+    await withTransaction(async (client) => {
+      for (const table of syncTables) {
+        const records = Array.isArray(changes[table]) ? changes[table] : [];
+        for (const record of records) {
+          if ((table === 'invoice_items' || table === 'invoice_discounts') && syncContext.rejectedInvoiceIds.has(record.invoiceId)) {
             results.push({ table, localId: record.localId || record.id, serverId: '', status: 'skipped_duplicate_invoice', record: null });
             continue;
           }
-          if (relatedItem && syncContext.integritySavedInvoiceIds.has(relatedItem.invoiceId)) {
+          if ((table === 'invoice_items' || table === 'invoice_discounts') && syncContext.integritySavedInvoiceIds.has(record.invoiceId)) {
             results.push({ table, localId: record.localId || record.id, serverId: record.serverId || record.id || '', status: 'skipped_integrity_generated', record: null });
             continue;
           }
+          if (table === 'price_history') {
+            const relatedItem = (changes.invoice_items || []).find((item) => (item.id && item.id === record.invoiceItemId) || (item.localId && item.localId === record.invoiceItemId) || (item.serverId && item.serverId === record.invoiceItemId));
+            if (relatedItem && syncContext.rejectedInvoiceIds.has(relatedItem.invoiceId)) {
+              results.push({ table, localId: record.localId || record.id, serverId: '', status: 'skipped_duplicate_invoice', record: null });
+              continue;
+            }
+            if (relatedItem && syncContext.integritySavedInvoiceIds.has(relatedItem.invoiceId)) {
+              results.push({ table, localId: record.localId || record.id, serverId: record.serverId || record.id || '', status: 'skipped_integrity_generated', record: null });
+              continue;
+            }
+          }
+          results.push(await pushOne(table, record, deviceId, companyId, client, syncContext));
         }
-        results.push(await pushOne(table, record, deviceId, companyId, client, syncContext));
       }
-    }
-  });
+    });
+  } catch (error) {
+    console.error('[SYNC PUSH] error:', { companyId, backend: usingPostgres ? 'postgres' : 'sqlite', message: error.message, stack: error.stack });
+    throw error;
+  }
 
-  console.log('[sync/push] completed:', { companyId, backend: usingPostgres ? 'postgres' : 'sqlite', resultCount: results.length });
+  console.log('[SYNC PUSH] finish:', {
+    companyId,
+    backend: usingPostgres ? 'postgres' : 'sqlite',
+    resultCount: results.length,
+    resultStatuses: countSyncResultStatuses(results)
+  });
   res.json({ ok: true, companyId, serverTime: nowIso(), results });
 }));
 
 app.get('/api/sync/pull', requireAuth, asyncHandler(async (req, res) => {
+  const companyId = req.user.companyId;
+  const since = req.query.since || '';
+  console.log('[SYNC PULL] start:', { companyId, since, backend: syncBackend });
   if (useMongoSync()) {
-    await mirrorSqlSyncDataToMongo(req.user.companyId, 'sync-pull', req.query.since || '');
-    const result = await mongoSyncPull({ companyId: req.user.companyId, since: req.query.since || '' });
-    console.log('[sync/pull] completed:', { companyId: req.user.companyId, backend: 'mongodb', since: req.query.since || '', counts: countSyncRecords(result.data || {}) });
-    res.json(result);
-    return;
+    try {
+      await mirrorSqlSyncDataToMongo(companyId, 'sync-pull', since);
+      const result = await mongoSyncPull({ companyId, since });
+      console.log('[SYNC PULL] finish:', { companyId, backend: 'mongodb', since, counts: countSyncRecords(result.data || {}) });
+      res.json(result);
+      return;
+    } catch (error) {
+      console.error('[SYNC PULL] error:', { companyId, backend: 'mongodb', since, message: error.message, stack: error.stack });
+      throw error;
+    }
   }
-  const data = await allSyncData(req.user.companyId, req.query.since || '');
-  console.log('[sync/pull] completed:', { companyId: req.user.companyId, backend: usingPostgres ? 'postgres' : 'sqlite', since: req.query.since || '', counts: countSyncRecords(data) });
-  res.json({ companyId: req.user.companyId, serverTime: nowIso(), data });
+  try {
+    const data = await allSyncData(companyId, since);
+    console.log('[SYNC PULL] finish:', { companyId, backend: usingPostgres ? 'postgres' : 'sqlite', since, counts: countSyncRecords(data) });
+    res.json({ companyId, serverTime: nowIso(), data });
+  } catch (error) {
+    console.error('[SYNC PULL] error:', { companyId, backend: usingPostgres ? 'postgres' : 'sqlite', since, message: error.message, stack: error.stack });
+    throw error;
+  }
 }));
 
 app.get('/api/sync/status', requireAuth, asyncHandler(async (req, res) => {
