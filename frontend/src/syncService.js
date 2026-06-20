@@ -4,6 +4,7 @@ import { localDb, syncTables, getDeviceId, nowIso } from './localDb.js';
 const SYNC_BATCH_SIZE = 20;
 const AUTO_SYNC_INTERVAL_MS = 30 * 60 * 1000;
 const SYNC_TIMEOUT_MS = 30 * 1000;
+const CORE_PULL_TABLES = new Set(['purchase_batches', 'suppliers', 'invoices', 'invoice_items', 'products', 'price_history']);
 
 let syncing = false;
 let lastError = '';
@@ -176,6 +177,14 @@ async function setSyncDiagnostic(companyId, patch = {}) {
 
 function totalSyncRecords(changes = {}) {
   return Object.values(changes || {}).reduce((sum, records) => sum + (Array.isArray(records) ? records.length : 0), 0);
+}
+
+function errorDetails(error) {
+  return {
+    name: error?.name || '',
+    message: error?.message || String(error || ''),
+    stack: error?.stack || ''
+  };
 }
 
 function syncLabel({ session, pendingCount, conflictCount }) {
@@ -403,17 +412,35 @@ export async function syncNow({ force = false, reason = 'manual' } = {}) {
       backend: pulled.backend || '',
       counts: Object.fromEntries(syncTables.map((table) => [table, (pulled.data?.[table] || []).length]))
     });
+    console.log('[SYNC] pull response counts', Object.fromEntries(syncTables.map((table) => [table, (pulled.data?.[table] || []).length])));
+    const importWarnings = [];
     for (const table of syncTables) {
-      for (const record of pulled.data?.[table] || []) {
-        await localDb.mergeRemote(table, record);
+      const records = pulled.data?.[table] || [];
+      console.log(`[SYNC] importing ${table} count`, records.length);
+      try {
+        if (typeof localDb.mergeRemoteMany === 'function') {
+          const result = await localDb.mergeRemoteMany(table, records);
+          console.log(`[SYNC] imported ${table}`, result);
+        } else {
+          for (const record of records) await localDb.mergeRemote(table, record);
+          console.log(`[SYNC] imported ${table}`, { table, imported: records.length, skipped: 0 });
+        }
+      } catch (error) {
+        const details = errorDetails(error);
+        console.error('[SYNC] failed table:', table, details);
+        if (CORE_PULL_TABLES.has(table)) throw error;
+        importWarnings.push({ table, ...details });
       }
     }
+    console.log('[SYNC] import finished', { warnings: importWarnings });
     if (syncProgress.failed === 0) {
       await setLastSyncAt(companyId, pulled.serverTime || nowIso());
+      console.log('[SYNC] lastSyncAt updated', { companyId, lastSyncAt: await lastSyncAt() });
       await setSyncDiagnostic(companyId, {
         status: 'success',
         finishedAt: nowIso(),
         error: '',
+        warnings: importWarnings,
         pushCount: pushedTotal,
         pullCount: pulledTotal,
         pendingCount: await localDb.getPendingCount(),
@@ -516,16 +543,34 @@ export async function pullFromCloud({ full = false } = {}) {
       backend: pulled.backend || '',
       counts: Object.fromEntries(syncTables.map((table) => [table, (pulled.data?.[table] || []).length]))
     });
+    console.log('[SYNC] pull response counts', Object.fromEntries(syncTables.map((table) => [table, (pulled.data?.[table] || []).length])));
+    const importWarnings = [];
     for (const table of syncTables) {
-      for (const record of pulled.data?.[table] || []) {
-        await localDb.mergeRemote(table, record);
+      const records = pulled.data?.[table] || [];
+      console.log(`[SYNC] importing ${table} count`, records.length);
+      try {
+        if (typeof localDb.mergeRemoteMany === 'function') {
+          const result = await localDb.mergeRemoteMany(table, records);
+          console.log(`[SYNC] imported ${table}`, result);
+        } else {
+          for (const record of records) await localDb.mergeRemote(table, record);
+          console.log(`[SYNC] imported ${table}`, { table, imported: records.length, skipped: 0 });
+        }
+      } catch (error) {
+        const details = errorDetails(error);
+        console.error('[SYNC] failed table:', table, details);
+        if (CORE_PULL_TABLES.has(table)) throw error;
+        importWarnings.push({ table, ...details });
       }
     }
+    console.log('[SYNC] import finished', { warnings: importWarnings });
     await setLastSyncAt(companyId, pulled.serverTime || nowIso());
+    console.log('[SYNC] lastSyncAt updated', { companyId, lastSyncAt: await lastSyncAt() });
     await setSyncDiagnostic(companyId, {
       status: 'success',
       finishedAt: nowIso(),
       error: '',
+      warnings: importWarnings,
       pushCount: 0,
       pullCount: totalSyncRecords(pulled.data || {}),
       pendingCount: await localDb.getPendingCount()

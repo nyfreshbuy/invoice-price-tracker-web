@@ -1,7 +1,7 @@
 import { getCompanyId as getAuthCompanyId } from './api.js';
 
 const DB_NAME = 'InvoicePriceTrackerLocal';
-const DB_VERSION = 9;
+const DB_VERSION = 10;
 
 export const syncTables = ['purchase_batches', 'suppliers', 'invoices', 'invoice_items', 'products', 'price_history', 'invoice_discounts', 'gift_allocation_rules', 'supplier_templates', 'product_aliases', 'product_learning_rules', 'recognition_corrections', 'price_anomalies'];
 const localOnlyTables = ['invoice_images', 'meta'];
@@ -662,6 +662,48 @@ export const localDb = {
       syncStatus: remote.deletedAt ? 'deleted' : 'synced',
       version: Number(remote.version || local?.version || 1)
     });
+  },
+
+  async mergeRemoteMany(table, remotes = []) {
+    const incoming = Array.isArray(remotes) ? remotes.filter(belongsToCurrentCompany) : [];
+    if (!incoming.length) return { table, imported: 0, skipped: 0 };
+    const records = await all(table);
+    const localByKey = new Map();
+    for (const record of records) {
+      for (const key of [record.serverId, record.id].filter(Boolean)) localByKey.set(key, record);
+    }
+    const { tx, objectStore } = await store(table, 'readwrite');
+    let imported = 0;
+    let skipped = 0;
+    for (const remote of incoming) {
+      const local = localByKey.get(remote.serverId) || localByKey.get(remote.id);
+      if (local && local.syncStatus === 'pending' && local.updatedAt > remote.updatedAt) {
+        skipped += 1;
+        continue;
+      }
+      if (local && local.syncStatus === 'pending' && local.updatedAt <= remote.updatedAt && ['invoices', 'invoice_items'].includes(table)) {
+        objectStore.put({ ...local, syncStatus: 'conflict', conflictRecord: JSON.stringify(remote) });
+        imported += 1;
+        continue;
+      }
+      const id = local?.id || remote.serverId || remote.id || generateId();
+      objectStore.put({
+        ...remote,
+        id,
+        localId: local?.localId || remote.localId || id,
+        serverId: remote.serverId || remote.id,
+        syncStatus: remote.deletedAt ? 'deleted' : 'synced',
+        version: Number(remote.version || local?.version || 1)
+      });
+      imported += 1;
+    }
+    await new Promise((resolve, reject) => {
+      tx.oncomplete = resolve;
+      tx.onerror = () => reject(tx.error);
+      tx.onabort = () => reject(tx.error || new Error(`IndexedDB transaction aborted for ${table}`));
+    });
+    window.dispatchEvent(new CustomEvent('local-db-change', { detail: { table } }));
+    return { table, imported, skipped };
   },
 
   async getSuppliers() {
