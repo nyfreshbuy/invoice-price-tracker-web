@@ -3593,6 +3593,110 @@ function rowsToExcelTsv(header, rows) {
   return [header.map(escapeCell).join('\t'), ...rows.map((row) => header.map((key) => escapeCell(row[key])).join('\t'))].join('\n');
 }
 
+function activeMongoQuery(companyId) {
+  return {
+    companyId,
+    $or: [
+      { deletedAt: { $exists: false } },
+      { deletedAt: null },
+      { deletedAt: '' }
+    ]
+  };
+}
+
+async function mongoExportData(companyId) {
+  const db = await getMongoDb();
+  const tables = ['invoices', 'invoice_items', 'products', 'suppliers', 'price_history'];
+  const data = {};
+  for (const table of tables) {
+    data[table] = await db.collection(table).find(activeMongoQuery(companyId)).toArray();
+  }
+  const counts = Object.fromEntries(tables.map((table) => [table, data[table].length]));
+  console.log('[export] Mongo counts:', { companyId, counts });
+  return { data, counts };
+}
+
+function idsForExport(record = {}) {
+  return [record.id, record.serverId, record.localId].filter(Boolean).map(String);
+}
+
+function firstExportValue(record = {}, keys = []) {
+  for (const key of keys) {
+    const value = record[key];
+    if (value !== undefined && value !== null && value !== '') return value;
+  }
+  return '';
+}
+
+function mongoExportItemRows(data = {}) {
+  const invoices = data.invoices || [];
+  const suppliers = data.suppliers || [];
+  const items = data.invoice_items || [];
+  const invoiceById = new Map();
+  const supplierById = new Map();
+  for (const invoice of invoices) {
+    for (const key of idsForExport(invoice)) invoiceById.set(key, invoice);
+  }
+  for (const supplier of suppliers) {
+    for (const key of idsForExport(supplier)) supplierById.set(key, supplier);
+  }
+  return items
+    .filter((item) => Number(item.isDiscountLine || 0) === 0 && Number(item.candidateOnly || 0) === 0)
+    .map((item) => {
+      const invoice = invoiceById.get(String(item.invoiceId || '')) || {};
+      const supplier = supplierById.get(String(item.supplierId || invoice.supplierId || '')) || {};
+      return {
+        invoiceId: firstExportValue(invoice, ['id', 'serverId']) || item.invoiceId || '',
+        invoiceNo: invoice.invoiceNo || item.invoiceNo || '',
+        invoiceDate: invoice.invoiceDate || item.invoiceDate || '',
+        pageNumber: invoice.pageNumber || '',
+        pageCount: invoice.pageCount || '',
+        invoiceLayoutType: invoice.invoiceLayoutType || '',
+        supplier: supplier.displayName || supplier.supplierDisplayName || supplier.name || item.supplierName || '',
+        rawName: item.rawName || '',
+        productNameOriginal: item.productNameOriginal || item.name || '',
+        productNameNormalized: item.productNameNormalized || item.normalizedName || '',
+        category: item.category || '',
+        quantity: item.quantity || '',
+        unit: item.unit || '',
+        unitPrice: item.unitPrice || '',
+        totalPrice: item.totalPrice || '',
+        freeQty: item.freeQty || '',
+        effectiveUnitCost: item.effectiveUnitCost || '',
+        discountAmount: item.discountAmount || '',
+        promoGroupName: item.promoGroupName || '',
+        notes: item.notes || '',
+        imagePath: invoice.imagePath || ''
+      };
+    })
+    .sort((a, b) => `${b.invoiceDate || ''}${b.invoiceNo || ''}`.localeCompare(`${a.invoiceDate || ''}${a.invoiceNo || ''}`));
+}
+
+function exportRowsForTable(records = [], header = []) {
+  return records.map((record) => Object.fromEntries(header.map((key) => [key, record[key] ?? ''])));
+}
+
+function htmlEscape(value) {
+  return String(value ?? '')
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;');
+}
+
+function rowsToExcelHtml(sections = []) {
+  const body = sections.map(({ title, header, rows }) => `
+    <h2>${htmlEscape(title)}</h2>
+    <table border="1">
+      <thead><tr>${header.map((key) => `<th>${htmlEscape(key)}</th>`).join('')}</tr></thead>
+      <tbody>
+        ${rows.map((row) => `<tr>${header.map((key) => `<td>${htmlEscape(row[key])}</td>`).join('')}</tr>`).join('')}
+      </tbody>
+    </table>
+  `).join('<br/>');
+  return `<!doctype html><html><head><meta charset="utf-8"></head><body>${body}</body></html>`;
+}
+
 app.get('/api/suppliers/:id/invoices', requireAuth, asyncHandler(async (req, res) => {
   res.json(await supplierInvoiceHistoryRows(req.user.companyId, req.params.id, req.query));
 }));
@@ -4355,6 +4459,21 @@ app.get('/api/stats', requireAuth, asyncHandler(async (req, res) => {
 }));
 
 app.get('/api/export.csv', requireAuth, asyncHandler(async (req, res) => {
+  if (useMongoSync()) {
+    const { data, counts } = await mongoExportData(req.user.companyId);
+    const rows = mongoExportItemRows(data);
+    console.log('[export.csv] Mongo query:', {
+      companyId: req.user.companyId,
+      counts,
+      exportRows: rows.length
+    });
+    const header = ['invoiceId', 'invoiceNo', 'invoiceDate', 'supplier', 'productNameOriginal', 'productNameNormalized', 'category', 'quantity', 'unit', 'unitPrice', 'totalPrice', 'notes', 'imagePath'];
+    const csv = [rowToCsv(header), ...rows.map((row) => rowToCsv(header.map((key) => row[key])))].join('\n');
+    res.header('Content-Type', 'text/csv; charset=utf-8');
+    res.attachment(`InvoicePriceTrackerExport-${today()}.csv`);
+    res.send(`\uFEFF${csv}`);
+    return;
+  }
   const rows = await queryAll(`
     SELECT invoices.${quoteIdentifier('id')} AS "invoiceId", invoices.${quoteIdentifier('invoiceNo')} AS "invoiceNo", invoices.${quoteIdentifier('invoiceDate')} AS "invoiceDate",
            suppliers.${quoteIdentifier('name')} AS "supplier",
@@ -4379,6 +4498,7 @@ app.get('/api/export.csv', requireAuth, asyncHandler(async (req, res) => {
       AND COALESCE(invoice_items.${quoteIdentifier('candidateOnly')}, 0) = 0
     ORDER BY invoices.${quoteIdentifier('invoiceDate')} DESC, invoice_items.${quoteIdentifier('createdAt')} DESC
   `, [req.user.companyId]);
+  console.log('[export.csv] SQL query:', { companyId: req.user.companyId, rows: rows.length });
   const header = ['invoiceId', 'invoiceNo', 'invoiceDate', 'supplier', 'productNameOriginal', 'productNameNormalized', 'category', 'quantity', 'unit', 'unitPrice', 'totalPrice', 'notes', 'imagePath'];
   const csv = [rowToCsv(header), ...rows.map((row) => rowToCsv(header.map((key) => row[key])))].join('\n');
   res.header('Content-Type', 'text/csv; charset=utf-8');
@@ -4387,6 +4507,33 @@ app.get('/api/export.csv', requireAuth, asyncHandler(async (req, res) => {
 }));
 
 app.get('/api/export.xls', requireAuth, asyncHandler(async (req, res) => {
+  if (useMongoSync()) {
+    const { data, counts } = await mongoExportData(req.user.companyId);
+    const itemRows = mongoExportItemRows(data);
+    console.log('[export.xls] Mongo query:', {
+      companyId: req.user.companyId,
+      counts,
+      invoices: data.invoices.length,
+      items: data.invoice_items.length,
+      exportItemRows: itemRows.length
+    });
+    const itemHeader = ['invoiceId', 'invoiceNo', 'invoiceDate', 'pageNumber', 'pageCount', 'invoiceLayoutType', 'supplier', 'rawName', 'productNameOriginal', 'productNameNormalized', 'category', 'quantity', 'unit', 'unitPrice', 'totalPrice', 'freeQty', 'effectiveUnitCost', 'discountAmount', 'promoGroupName', 'imagePath'];
+    const invoiceHeader = ['id', 'invoiceNo', 'invoiceDate', 'supplierId', 'totalAmount', 'status', 'duplicateStatus', 'recognitionSource', 'imagePath', 'createdAt', 'updatedAt'];
+    const productHeader = ['id', 'name', 'normalizedName', 'category', 'createdAt', 'updatedAt'];
+    const supplierHeader = ['id', 'name', 'displayName', 'supplierDisplayName', 'phone', 'email', 'address', 'createdAt', 'updatedAt'];
+    const priceHeader = ['id', 'productId', 'invoiceId', 'invoiceItemId', 'supplierId', 'price', 'quantity', 'unit', 'invoiceDate', 'invoiceNo', 'status', 'createdAt', 'updatedAt'];
+    const html = rowsToExcelHtml([
+      { title: '发票商品明细', header: itemHeader, rows: itemRows },
+      { title: '发票', header: invoiceHeader, rows: exportRowsForTable(data.invoices, invoiceHeader) },
+      { title: '商品', header: productHeader, rows: exportRowsForTable(data.products, productHeader) },
+      { title: '供应商', header: supplierHeader, rows: exportRowsForTable(data.suppliers, supplierHeader) },
+      { title: '价格历史', header: priceHeader, rows: exportRowsForTable(data.price_history, priceHeader) }
+    ]);
+    res.header('Content-Type', 'application/vnd.ms-excel; charset=utf-8');
+    res.attachment(`InvoicePriceTrackerExport-${today()}.xls`);
+    res.send(`\uFEFF${html}`);
+    return;
+  }
   const rows = await queryAll(`
     SELECT invoices.${quoteIdentifier('id')} AS "invoiceId", invoices.${quoteIdentifier('invoiceNo')} AS "invoiceNo", invoices.${quoteIdentifier('invoiceDate')} AS "invoiceDate",
            invoices.${quoteIdentifier('pageNumber')} AS "pageNumber", invoices.${quoteIdentifier('pageCount')} AS "pageCount", invoices.${quoteIdentifier('invoiceLayoutType')} AS "invoiceLayoutType",
@@ -4416,6 +4563,7 @@ app.get('/api/export.xls', requireAuth, asyncHandler(async (req, res) => {
       AND COALESCE(invoice_items.${quoteIdentifier('candidateOnly')}, 0) = 0
     ORDER BY invoices.${quoteIdentifier('invoiceDate')} DESC, invoice_items.${quoteIdentifier('createdAt')} DESC
   `, [req.user.companyId]);
+  console.log('[export.xls] SQL query:', { companyId: req.user.companyId, rows: rows.length });
   const header = ['invoiceId', 'invoiceNo', 'invoiceDate', 'pageNumber', 'pageCount', 'invoiceLayoutType', 'supplier', 'rawName', 'productNameOriginal', 'productNameNormalized', 'category', 'quantity', 'unit', 'unitPrice', 'totalPrice', 'freeQty', 'effectiveUnitCost', 'discountAmount', 'promoGroupName', 'imagePath'];
   res.header('Content-Type', 'application/vnd.ms-excel; charset=utf-8');
   res.attachment(`InvoicePriceTrackerExport-${today()}.xls`);
