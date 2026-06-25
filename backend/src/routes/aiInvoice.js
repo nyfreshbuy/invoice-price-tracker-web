@@ -13,6 +13,38 @@ fs.mkdirSync(uploadDir, { recursive: true });
 const upload = multer({ dest: uploadDir });
 const router = express.Router();
 
+let recognitionQueue = Promise.resolve();
+let activeRecognitionCount = 0;
+let queuedRecognitionCount = 0;
+
+function enqueueRecognition(task) {
+  queuedRecognitionCount += 1;
+  const startedAt = Date.now();
+  const runTask = async () => {
+    queuedRecognitionCount = Math.max(0, queuedRecognitionCount - 1);
+    activeRecognitionCount += 1;
+    console.log('[recognition-queue] start', {
+      active: activeRecognitionCount,
+      queued: queuedRecognitionCount,
+      waitMs: Date.now() - startedAt
+    });
+    try {
+      return await task();
+    } finally {
+      activeRecognitionCount = Math.max(0, activeRecognitionCount - 1);
+      console.log('[recognition-queue] finish', {
+        active: activeRecognitionCount,
+        queued: queuedRecognitionCount,
+        durationMs: Date.now() - startedAt
+      });
+    }
+  };
+
+  const queued = recognitionQueue.then(runTask, runTask);
+  recognitionQueue = queued.catch(() => {});
+  return queued;
+}
+
 router.post('/recognize', upload.single('image'), async (req, res) => {
   if (!req.user?.companyId) {
     res.status(401).json({ success: false, error: 'Unauthorized' });
@@ -24,7 +56,7 @@ router.post('/recognize', upload.single('image'), async (req, res) => {
   }
 
   try {
-    const result = await recognizeInvoice(req.file, { companyId: req.user.companyId });
+    const result = await enqueueRecognition(() => recognizeInvoice(req.file, { companyId: req.user.companyId }));
     res.json(result);
   } catch (error) {
     res.status(500).json({
@@ -32,6 +64,14 @@ router.post('/recognize', upload.single('image'), async (req, res) => {
       error: error.message || 'AI invoice recognition failed'
     });
   }
+});
+
+router.get('/queue-status', (req, res) => {
+  res.json({
+    success: true,
+    active: activeRecognitionCount,
+    queued: queuedRecognitionCount
+  });
 });
 
 router.post('/template-success', async (req, res) => {
