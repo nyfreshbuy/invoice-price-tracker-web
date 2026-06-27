@@ -1,9 +1,9 @@
-﻿import fs from 'node:fs';
+import fs from 'node:fs';
+import crypto from 'node:crypto';
 import Tesseract from 'tesseract.js';
 import {
   findTemplateByOcrText,
   findTemplateBySupplierHint,
-  hashImageFile,
   markTemplateFailure,
   markTemplateSuccess,
   normalizeInvoiceDate,
@@ -13,210 +13,230 @@ import {
 import { recognizeInvoiceWithAI } from './aiInvoiceService.js';
 import { buildSupplierDisplayName, splitSupplierNameParts } from './supplierNormalizationService.js';
 
+const OCR_IMAGE_MAX_EDGE = Number(process.env.OCR_IMAGE_MAX_EDGE || 1800);
+const OCR_IMAGE_QUALITY = Number(process.env.OCR_IMAGE_QUALITY || 72);
+let sharpLoader;
+
 export async function recognizeInvoice(file, options = {}) {
   const companyId = options.companyId || '';
   if (!companyId) throw new Error('Missing authenticated companyId');
-  const imageBuffer = fs.readFileSync(file.path);
-  const sampleImageHash = hashImageFile(imageBuffer);
+
+  const sampleImageHash = await hashFileStreaming(file.path);
   const imagePath = `/uploads/${file.filename}`;
   const supplierHint = [options.supplierHint, file.originalname].filter(Boolean).join(' ');
-
-  let ocrText = '';
-  let ocrLanguage = '';
-  const hintedTemplate = await findTemplateBySupplierHint(supplierHint, companyId);
-  let templateMissReason = '';
-  if (hintedTemplate && hintedTemplate.failCount < 3) {
-    console.log('[TEMPLATE MATCH]', {
-      companyId,
-      stage: 'supplier_hint',
-      supplierHint,
-      templateId: hintedTemplate.id,
-      templateName: hintedTemplate.supplierName || ''
-    });
-    const ocr = await safeRunPlainOcr(file.path, {
-      companyId,
-      stage: 'supplier_hint_ocr',
-      supplierHint,
-      templateId: hintedTemplate.id,
-      templateName: hintedTemplate.supplierName || ''
-    });
-    ocrText = ocr.ocrText;
-    ocrLanguage = ocr.ocrLanguage;
-    const templated = parseWithTemplate(ocrText, hintedTemplate);
-    if (templated.success) {
-      await markTemplateSuccess(hintedTemplate.id, companyId);
-      return responsePayload({
-        source: 'template',
-        imagePath,
-        ocrText,
-        result: templated.result,
-        template: hintedTemplate,
-        sampleImageHash,
-        ocrLanguage
-      });
-    }
-    templateMissReason = templated.error || 'supplier hint template parse failed';
-    console.log('[TEMPLATE MISS]', {
-      companyId,
-      stage: 'supplier_hint_parse',
-      supplierHint,
-      templateId: hintedTemplate.id,
-      templateName: hintedTemplate.supplierName || '',
-      reason: templateMissReason
-    });
-    await markTemplateFailure(hintedTemplate.id, companyId);
-  } else {
-    templateMissReason = hintedTemplate ? 'template disabled after repeated failures' : 'no supplier hint template matched';
-    console.log('[TEMPLATE MISS]', {
-      companyId,
-      stage: 'supplier_hint',
-      supplierHint,
-      templateId: hintedTemplate?.id || '',
-      templateName: hintedTemplate?.supplierName || '',
-      reason: templateMissReason
-    });
-  }
-
-  if (!ocrText) {
-    const ocr = await safeRunPlainOcr(file.path, {
-      companyId,
-      stage: 'ocr_text_before_ai',
-      supplierHint
-    });
-    ocrText = ocr.ocrText;
-    ocrLanguage = ocr.ocrLanguage;
-  }
-  const textTemplate = ocrText ? await findTemplateByOcrText(ocrText, companyId) : null;
-  if (textTemplate && textTemplate.failCount < 3) {
-    console.log('[TEMPLATE MATCH]', {
-      companyId,
-      stage: 'ocr_text',
-      supplierHint,
-      templateId: textTemplate.id,
-      templateName: textTemplate.supplierName || ''
-    });
-    const templated = parseWithTemplate(ocrText, textTemplate);
-    if (templated.success) {
-      await markTemplateSuccess(textTemplate.id, companyId);
-      return responsePayload({
-        source: 'template',
-        imagePath,
-        ocrText,
-        result: templated.result,
-        template: textTemplate,
-        sampleImageHash,
-        ocrLanguage
-      });
-    }
-    templateMissReason = templated.error || 'ocr text template parse failed';
-    console.log('[TEMPLATE MISS]', {
-      companyId,
-      stage: 'ocr_text_parse',
-      supplierHint,
-      templateId: textTemplate.id,
-      templateName: textTemplate.supplierName || '',
-      reason: templateMissReason
-    });
-    await markTemplateFailure(textTemplate.id, companyId);
-  } else {
-    const reason = textTemplate ? 'template disabled after repeated failures' : 'no OCR text template matched';
-    templateMissReason = templateMissReason ? `${templateMissReason}; ${reason}` : reason;
-    console.log('[TEMPLATE MISS]', {
-      companyId,
-      stage: 'ocr_text',
-      supplierHint,
-      templateId: textTemplate?.id || '',
-      templateName: textTemplate?.supplierName || '',
-      reason
-    });
-  }
+  const recognitionImage = await prepareRecognitionImage(file.path);
+  const recognitionPath = recognitionImage.path;
+  const recognitionMimeType = recognitionImage.mimeType || file.mimetype || 'image/jpeg';
+  logMemory('recognition:start');
 
   try {
-    console.log('[AI VISION FALLBACK]', {
-      companyId,
-      supplierHint,
-      reason: templateMissReason || 'template not available'
-    });
-    const aiResult = await recognizeInvoiceWithAI(file.path, { mimeType: file.mimetype });
-    const learnedTemplate = await saveOrUpdateTemplateFromResult(aiResult, sampleImageHash, companyId);
-    return responsePayload({
-      source: 'ai',
-      imagePath,
-      ocrText,
-      result: aiResult,
-      template: learnedTemplate,
-      sampleImageHash,
-      ocrLanguage
-    });
-  } catch (error) {
-    const ocr = ocrText ? { ocrText, ocrLanguage } : await runPlainOcr(file.path);
-    ocrText = ocr.ocrText;
-    ocrLanguage = ocr.ocrLanguage;
-
-    const template = await findTemplateByOcrText(ocrText, companyId);
-    if (template && template.failCount < 3) {
+    let ocrText = '';
+    let ocrLanguage = '';
+    const hintedTemplate = await findTemplateBySupplierHint(supplierHint, companyId);
+    let templateMissReason = '';
+    if (hintedTemplate && hintedTemplate.failCount < 3) {
       console.log('[TEMPLATE MATCH]', {
         companyId,
-        stage: 'ai_failure_ocr_text',
+        stage: 'supplier_hint',
         supplierHint,
-        templateId: template.id,
-        templateName: template.supplierName || ''
+        templateId: hintedTemplate.id,
+        templateName: hintedTemplate.supplierName || ''
       });
-      const templated = parseWithTemplate(ocrText, template);
+      const ocr = await safeRunPlainOcr(recognitionPath, {
+        companyId,
+        stage: 'supplier_hint_ocr',
+        supplierHint,
+        templateId: hintedTemplate.id,
+        templateName: hintedTemplate.supplierName || ''
+      });
+      ocrText = ocr.ocrText;
+      ocrLanguage = ocr.ocrLanguage;
+      const templated = parseWithTemplate(ocrText, hintedTemplate);
       if (templated.success) {
-        await markTemplateSuccess(template.id, companyId);
+        await markTemplateSuccess(hintedTemplate.id, companyId);
         return responsePayload({
           source: 'template',
           imagePath,
           ocrText,
           result: templated.result,
-          template,
+          template: hintedTemplate,
           sampleImageHash,
           ocrLanguage
         });
       }
+      templateMissReason = templated.error || 'supplier hint template parse failed';
       console.log('[TEMPLATE MISS]', {
         companyId,
-        stage: 'ai_failure_ocr_text_parse',
+        stage: 'supplier_hint_parse',
         supplierHint,
-        templateId: template.id,
-        templateName: template.supplierName || '',
-        reason: templated.error || 'template parse failed after AI failure'
+        templateId: hintedTemplate.id,
+        templateName: hintedTemplate.supplierName || '',
+        reason: templateMissReason
       });
-      await markTemplateFailure(template.id, companyId);
+      await markTemplateFailure(hintedTemplate.id, companyId);
     } else {
+      templateMissReason = hintedTemplate ? 'template disabled after repeated failures' : 'no supplier hint template matched';
       console.log('[TEMPLATE MISS]', {
         companyId,
-        stage: 'ai_failure_ocr_text',
+        stage: 'supplier_hint',
         supplierHint,
-        templateId: template?.id || '',
-        templateName: template?.supplierName || '',
-        reason: template ? 'template disabled after repeated failures' : 'no template matched after AI failure'
+        templateId: hintedTemplate?.id || '',
+        templateName: hintedTemplate?.supplierName || '',
+        reason: templateMissReason
       });
     }
 
-    return responsePayload({
-      source: 'plain_ocr',
-      imagePath,
-      ocrText,
-      result: parsePlainOcrFallback(ocrText, error),
-      template: null,
-      sampleImageHash,
-      ocrLanguage
-    });
+    if (!ocrText) {
+      const ocr = await safeRunPlainOcr(recognitionPath, {
+        companyId,
+        stage: 'ocr_text_before_ai',
+        supplierHint
+      });
+      ocrText = ocr.ocrText;
+      ocrLanguage = ocr.ocrLanguage;
+    }
+    const textTemplate = ocrText ? await findTemplateByOcrText(ocrText, companyId) : null;
+    if (textTemplate && textTemplate.failCount < 3) {
+      console.log('[TEMPLATE MATCH]', {
+        companyId,
+        stage: 'ocr_text',
+        supplierHint,
+        templateId: textTemplate.id,
+        templateName: textTemplate.supplierName || ''
+      });
+      const templated = parseWithTemplate(ocrText, textTemplate);
+      if (templated.success) {
+        await markTemplateSuccess(textTemplate.id, companyId);
+        return responsePayload({
+          source: 'template',
+          imagePath,
+          ocrText,
+          result: templated.result,
+          template: textTemplate,
+          sampleImageHash,
+          ocrLanguage
+        });
+      }
+      templateMissReason = templated.error || 'ocr text template parse failed';
+      console.log('[TEMPLATE MISS]', {
+        companyId,
+        stage: 'ocr_text_parse',
+        supplierHint,
+        templateId: textTemplate.id,
+        templateName: textTemplate.supplierName || '',
+        reason: templateMissReason
+      });
+      await markTemplateFailure(textTemplate.id, companyId);
+    } else {
+      const reason = textTemplate ? 'template disabled after repeated failures' : 'no OCR text template matched';
+      templateMissReason = templateMissReason ? `${templateMissReason}; ${reason}` : reason;
+      console.log('[TEMPLATE MISS]', {
+        companyId,
+        stage: 'ocr_text',
+        supplierHint,
+        templateId: textTemplate?.id || '',
+        templateName: textTemplate?.supplierName || '',
+        reason
+      });
+    }
+
+    try {
+      console.log('[AI VISION FALLBACK]', {
+        companyId,
+        supplierHint,
+        reason: templateMissReason || 'template not available'
+      });
+      const aiResult = await recognizeInvoiceWithAI(recognitionPath, { mimeType: recognitionMimeType });
+      const learnedTemplate = await saveOrUpdateTemplateFromResult(aiResult, sampleImageHash, companyId);
+      return responsePayload({
+        source: 'ai',
+        imagePath,
+        ocrText,
+        result: aiResult,
+        template: learnedTemplate,
+        sampleImageHash,
+        ocrLanguage
+      });
+    } catch (error) {
+      const ocr = ocrText ? { ocrText, ocrLanguage } : await runPlainOcr(recognitionPath);
+      ocrText = ocr.ocrText;
+      ocrLanguage = ocr.ocrLanguage;
+
+      const template = await findTemplateByOcrText(ocrText, companyId);
+      if (template && template.failCount < 3) {
+        console.log('[TEMPLATE MATCH]', {
+          companyId,
+          stage: 'ai_failure_ocr_text',
+          supplierHint,
+          templateId: template.id,
+          templateName: template.supplierName || ''
+        });
+        const templated = parseWithTemplate(ocrText, template);
+        if (templated.success) {
+          await markTemplateSuccess(template.id, companyId);
+          return responsePayload({
+            source: 'template',
+            imagePath,
+            ocrText,
+            result: templated.result,
+            template,
+            sampleImageHash,
+            ocrLanguage
+          });
+        }
+        console.log('[TEMPLATE MISS]', {
+          companyId,
+          stage: 'ai_failure_ocr_text_parse',
+          supplierHint,
+          templateId: template.id,
+          templateName: template.supplierName || '',
+          reason: templated.error || 'template parse failed after AI failure'
+        });
+        await markTemplateFailure(template.id, companyId);
+      } else {
+        console.log('[TEMPLATE MISS]', {
+          companyId,
+          stage: 'ai_failure_ocr_text',
+          supplierHint,
+          templateId: template?.id || '',
+          templateName: template?.supplierName || '',
+          reason: template ? 'template disabled after repeated failures' : 'no template matched after AI failure'
+        });
+      }
+
+      return responsePayload({
+        source: 'plain_ocr',
+        imagePath,
+        ocrText,
+        result: parsePlainOcrFallback(ocrText, error),
+        template: null,
+        sampleImageHash,
+        ocrLanguage
+      });
+    }
+  } finally {
+    cleanupRecognitionImage(recognitionImage);
+    logMemory('recognition:finish');
   }
 }
 
 export async function runPlainOcr(imagePath) {
   const ocrLanguage = process.env.OCR_LANG || 'eng+chi_sim';
-  const result = await Tesseract.recognize(imagePath, ocrLanguage, {
-    logger: (message) => {
-      if (message.status) {
-        console.log(`[ocr] ${message.status} ${Math.round((message.progress || 0) * 100)}%`);
+  logMemory('ocr:start');
+  let result = null;
+  try {
+    result = await Tesseract.recognize(imagePath, ocrLanguage, {
+      logger: (message) => {
+        if (message.status) {
+          console.log(`[ocr] ${message.status} ${Math.round((message.progress || 0) * 100)}%`);
+        }
       }
-    }
-  });
-  return { ocrText: result.data?.text || '', ocrLanguage };
+    });
+    return { ocrText: result.data?.text || '', ocrLanguage };
+  } finally {
+    result = null;
+    logMemory('ocr:finish');
+  }
 }
 
 async function safeRunPlainOcr(imagePath, context = {}) {
@@ -235,8 +255,71 @@ async function safeRunPlainOcr(imagePath, context = {}) {
   }
 }
 
+async function prepareRecognitionImage(imagePath) {
+  const sharp = await loadSharp();
+  if (!sharp) return { path: imagePath, mimeType: 'image/jpeg', temporary: false, optimized: false };
+
+  const outputPath = `${imagePath}.recognition.jpg`;
+  try {
+    await sharp(imagePath, { limitInputPixels: 25000000 })
+      .rotate()
+      .resize({ width: OCR_IMAGE_MAX_EDGE, height: OCR_IMAGE_MAX_EDGE, fit: 'inside', withoutEnlargement: true })
+      .grayscale()
+      .jpeg({ quality: OCR_IMAGE_QUALITY, mozjpeg: true })
+      .toFile(outputPath);
+    const inputSize = fs.existsSync(imagePath) ? fs.statSync(imagePath).size : 0;
+    const outputSize = fs.existsSync(outputPath) ? fs.statSync(outputPath).size : 0;
+    console.log('[recognition-image] optimized', { inputSize, outputSize, maxEdge: OCR_IMAGE_MAX_EDGE, quality: OCR_IMAGE_QUALITY });
+    return { path: outputPath, mimeType: 'image/jpeg', temporary: true, optimized: true };
+  } catch (error) {
+    console.warn('[recognition-image] optimize failed, using original', error?.message || error);
+    cleanupRecognitionImage({ path: outputPath, temporary: true });
+    return { path: imagePath, mimeType: 'image/jpeg', temporary: false, optimized: false };
+  }
+}
+
+function cleanupRecognitionImage(image) {
+  if (!image?.temporary || !image.path) return;
+  try {
+    if (fs.existsSync(image.path)) fs.unlinkSync(image.path);
+  } catch (error) {
+    console.warn('[recognition-image] cleanup failed', error?.message || error);
+  }
+}
+
+async function loadSharp() {
+  if (sharpLoader !== undefined) return sharpLoader;
+  try {
+    const mod = await import('sharp');
+    sharpLoader = mod.default || mod;
+  } catch {
+    sharpLoader = null;
+  }
+  return sharpLoader;
+}
+
+function hashFileStreaming(filePath) {
+  return new Promise((resolve, reject) => {
+    const hash = crypto.createHash('sha256');
+    const stream = fs.createReadStream(filePath);
+    stream.on('data', (chunk) => hash.update(chunk));
+    stream.on('error', reject);
+    stream.on('end', () => resolve(hash.digest('hex')));
+  });
+}
+
+function logMemory(stage) {
+  if (process.env.LOG_MEMORY !== 'true') return;
+  const memory = process.memoryUsage();
+  console.log('[memory]', stage, {
+    rssMb: Math.round(memory.rss / 1024 / 1024),
+    heapMb: Math.round(memory.heapUsed / 1024 / 1024),
+    externalMb: Math.round(memory.external / 1024 / 1024)
+  });
+}
+
 function responsePayload({ source, imagePath, ocrText, result, template, sampleImageHash, ocrLanguage }) {
-  const recognitionSource = source === 'template' ? '妯℃澘' : source === 'ai' ? 'AI Vision' : 'OCR';
+  const recognitionSource = source === 'template' ? '模板' : source === 'ai' ? 'AI Vision' : 'OCR';
   const usedTemplate = source === 'template';
   const usedAI = source === 'ai';
   const invoiceItems = Array.isArray(result.items) ? result.items : [];
