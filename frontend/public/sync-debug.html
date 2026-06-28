@@ -1,0 +1,172 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>同步诊断 - InvoicePriceTracker</title>
+  <style>
+    :root { color-scheme: light; font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; color: #10201f; background: #f5faf9; }
+    body { margin: 0; padding: 18px; }
+    h1 { font-size: 28px; margin: 0 0 8px; }
+    h2 { font-size: 20px; margin: 22px 0 10px; }
+    .hint { color: #667775; line-height: 1.5; }
+    .grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 10px; }
+    .card { background: white; border: 1px solid #dce9e7; border-radius: 14px; padding: 14px; box-shadow: 0 1px 2px rgba(0,0,0,.03); }
+    .metric { font-size: 28px; font-weight: 800; margin-top: 4px; }
+    .bad { color: #b42318; }
+    .ok { color: #087568; }
+    button { border: 1px solid #087568; background: #087568; color: white; border-radius: 12px; padding: 11px 14px; font-size: 16px; font-weight: 700; }
+    button.secondary { background: white; color: #087568; }
+    .actions { display: flex; gap: 10px; flex-wrap: wrap; margin: 14px 0; }
+    table { width: 100%; border-collapse: collapse; background: white; border-radius: 12px; overflow: hidden; }
+    th, td { text-align: left; padding: 10px; border-bottom: 1px solid #e5eeee; font-size: 14px; vertical-align: top; }
+    th { background: #e9f6f4; }
+    .small { font-size: 12px; color: #667775; word-break: break-all; }
+    details { margin: 10px 0; }
+    summary { cursor: pointer; font-weight: 700; }
+    pre { white-space: pre-wrap; word-break: break-all; background: #0f1f1e; color: #e8fffb; padding: 12px; border-radius: 12px; max-height: 360px; overflow: auto; }
+  </style>
+</head>
+<body>
+  <h1>同步诊断</h1>
+  <p class="hint">这个页面只读取本机 IndexedDB，用来找出为什么顶部一直显示“待同步”。不会上传、不会删除数据。</p>
+  <div class="actions">
+    <button onclick="loadDiagnostics()">刷新诊断</button>
+    <button class="secondary" onclick="copyReport()">复制诊断报告</button>
+    <button class="secondary" onclick="location.href='/'">返回系统</button>
+  </div>
+
+  <div class="grid">
+    <div class="card"><div>待同步</div><div id="pendingTotal" class="metric">-</div></div>
+    <div class="card"><div>同步失败</div><div id="failedTotal" class="metric">-</div></div>
+    <div class="card"><div>同步冲突</div><div id="conflictTotal" class="metric">-</div></div>
+    <div class="card"><div>当前公司</div><div id="companyId" class="small">-</div></div>
+  </div>
+
+  <h2>按表统计</h2>
+  <table>
+    <thead><tr><th>表</th><th>pending/deleted</th><th>failed</th><th>conflict</th><th>总数</th></tr></thead>
+    <tbody id="summaryRows"></tbody>
+  </table>
+
+  <h2>待同步明细</h2>
+  <div id="pendingDetails"></div>
+
+  <h2>原始报告</h2>
+  <pre id="rawReport">点击刷新诊断</pre>
+
+<script>
+const DB_NAME = 'InvoicePriceTrackerLocal';
+const syncTables = ['purchase_batches', 'suppliers', 'invoices', 'invoice_items', 'products', 'price_history', 'invoice_discounts', 'gift_allocation_rules', 'supplier_templates', 'product_aliases', 'product_learning_rules', 'recognition_corrections', 'price_anomalies'];
+let latestReport = null;
+
+function openDb() {
+  return new Promise((resolve, reject) => {
+    const req = indexedDB.open(DB_NAME);
+    req.onsuccess = () => resolve(req.result);
+    req.onerror = () => reject(req.error || new Error('无法打开 IndexedDB'));
+  });
+}
+
+function readAll(db, table) {
+  return new Promise((resolve, reject) => {
+    if (!db.objectStoreNames.contains(table)) return resolve([]);
+    const tx = db.transaction(table, 'readonly');
+    const req = tx.objectStore(table).getAll();
+    req.onsuccess = () => resolve(req.result || []);
+    req.onerror = () => reject(req.error || new Error(`读取 ${table} 失败`));
+  });
+}
+
+function currentCompanyId() {
+  try {
+    const company = JSON.parse(localStorage.getItem('company') || 'null');
+    if (company?.id) return company.id;
+    const user = JSON.parse(localStorage.getItem('user') || 'null');
+    if (user?.companyId) return user.companyId;
+    const session = JSON.parse(localStorage.getItem('authSession') || 'null');
+    return session?.company?.id || session?.user?.companyId || '';
+  } catch { return ''; }
+}
+
+function matchesCompany(record, companyId) {
+  return !companyId || record.companyId === companyId;
+}
+
+function summarizeRecord(record) {
+  return {
+    id: record.id || '',
+    localId: record.localId || '',
+    serverId: record.serverId || '',
+    syncStatus: record.syncStatus || '',
+    status: record.status || '',
+    syncNote: record.syncNote || record.syncError || '',
+    updatedAt: record.updatedAt || '',
+    name: record.supplierName || record.productNameOriginal || record.name || record.invoiceNo || record.discountName || record.fieldName || '',
+    invoiceNo: record.invoiceNo || '',
+    totalAmount: record.totalAmount || record.totalPrice || record.price || '',
+    supplierId: record.supplierId || '',
+    invoiceId: record.invoiceId || ''
+  };
+}
+
+async function loadDiagnostics() {
+  const db = await openDb();
+  const companyId = currentCompanyId();
+  const report = { generatedAt: new Date().toISOString(), companyId, tables: {}, pendingRecords: [] };
+  let pendingTotal = 0, failedTotal = 0, conflictTotal = 0;
+  for (const table of syncTables) {
+    const records = (await readAll(db, table)).filter((record) => matchesCompany(record, companyId));
+    const pending = records.filter((record) => ['pending', 'deleted'].includes(record.syncStatus));
+    const failed = records.filter((record) => record.syncStatus === 'failed');
+    const conflict = records.filter((record) => record.syncStatus === 'conflict');
+    pendingTotal += pending.length;
+    failedTotal += failed.length;
+    conflictTotal += conflict.length;
+    report.tables[table] = { total: records.length, pending: pending.length, failed: failed.length, conflict: conflict.length };
+    for (const record of [...pending, ...failed, ...conflict].slice(0, 50)) {
+      report.pendingRecords.push({ table, ...summarizeRecord(record) });
+    }
+  }
+  report.totals = { pending: pendingTotal, failed: failedTotal, conflict: conflictTotal };
+  latestReport = report;
+  render(report);
+}
+
+function render(report) {
+  document.getElementById('pendingTotal').textContent = report.totals.pending;
+  document.getElementById('pendingTotal').className = `metric ${report.totals.pending ? 'bad' : 'ok'}`;
+  document.getElementById('failedTotal').textContent = report.totals.failed;
+  document.getElementById('conflictTotal').textContent = report.totals.conflict;
+  document.getElementById('companyId').textContent = report.companyId || '未找到 companyId';
+  document.getElementById('summaryRows').innerHTML = Object.entries(report.tables)
+    .map(([table, row]) => `<tr><td>${table}</td><td>${row.pending}</td><td>${row.failed}</td><td>${row.conflict}</td><td>${row.total}</td></tr>`)
+    .join('');
+  const byTable = report.pendingRecords.reduce((map, record) => {
+    map[record.table] = map[record.table] || [];
+    map[record.table].push(record);
+    return map;
+  }, {});
+  document.getElementById('pendingDetails').innerHTML = Object.entries(byTable).length
+    ? Object.entries(byTable).map(([table, rows]) => `
+      <details open><summary>${table}：${rows.length} 条</summary>
+        <table><thead><tr><th>名称/编号</th><th>状态</th><th>ID</th><th>错误</th></tr></thead><tbody>
+        ${rows.map((row) => `<tr><td>${row.name || row.invoiceNo || '-'}</td><td>${row.syncStatus}<br><span class="small">${row.updatedAt}</span></td><td class="small">id=${row.id}<br>local=${row.localId}<br>server=${row.serverId}</td><td class="small">${row.syncNote || '-'}</td></tr>`).join('')}
+        </tbody></table>
+      </details>`).join('')
+    : '<p class="hint">没有 pending / failed / conflict 记录。</p>';
+  document.getElementById('rawReport').textContent = JSON.stringify(report, null, 2);
+}
+
+async function copyReport() {
+  if (!latestReport) await loadDiagnostics();
+  await navigator.clipboard.writeText(JSON.stringify(latestReport, null, 2));
+  alert('诊断报告已复制');
+}
+
+loadDiagnostics().catch((error) => {
+  document.getElementById('rawReport').textContent = error.stack || error.message || String(error);
+});
+</script>
+</body>
+</html>
