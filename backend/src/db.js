@@ -40,6 +40,9 @@ export const db = sqliteDb;
 
 export const syncTables = [
   'purchase_batches',
+  'import_sessions',
+  'invoice_groups',
+  'invoice_pages',
   'suppliers',
   'invoices',
   'invoice_items',
@@ -56,8 +59,11 @@ export const syncTables = [
 
 export const tableColumns = {
   purchase_batches: ['id', 'companyId', 'localId', 'serverId', 'syncStatus', 'version', 'batchName', 'supplierCount', 'invoiceCount', 'totalAmount', 'createdAt', 'updatedAt', 'deletedAt', 'deviceId'],
+  import_sessions: ['id', 'companyId', 'localId', 'serverId', 'syncStatus', 'version', 'sessionName', 'sourceType', 'fileCount', 'groupCount', 'status', 'createdAt', 'updatedAt', 'deletedAt', 'deviceId'],
+  invoice_groups: ['id', 'companyId', 'localId', 'serverId', 'syncStatus', 'version', 'importSessionId', 'supplierId', 'supplierName', 'invoiceNo', 'invoiceDate', 'confidence', 'reason', 'status', 'pageIds', 'pageCount', 'totalAmount', 'aiSupplierNameCandidate', 'createdAt', 'updatedAt', 'deletedAt', 'deviceId'],
+  invoice_pages: ['id', 'companyId', 'localId', 'serverId', 'syncStatus', 'version', 'importSessionId', 'invoiceGroupId', 'invoiceId', 'pageIndex', 'pageNumber', 'pageCount', 'originalFileName', 'originalFilePath', 'archiveFilePath', 'archiveFolder', 'fileHash', 'fileSize', 'imageId', 'imagePath', 'mimeType', 'lightOcrText', 'lightOcrJson', 'status', 'createdAt', 'updatedAt', 'deletedAt', 'deviceId'],
   suppliers: ['id', 'companyId', 'localId', 'serverId', 'syncStatus', 'version', 'name', 'displayName', 'supplierNameChinese', 'supplierNameEnglish', 'supplierDisplayName', 'normalizedName', 'aliases', 'contactName', 'phone', 'email', 'address', 'notes', 'templateIds', 'suspectedDuplicateOf', 'status', 'createdAt', 'updatedAt', 'deletedAt', 'deviceId'],
-  invoices: ['id', 'companyId', 'localId', 'serverId', 'syncStatus', 'version', 'batchId', 'scanBatchId', 'supplierId', 'invoiceNo', 'invoiceDate', 'pageNumber', 'pageCount', 'invoiceGroupKey', 'isMergedInvoice', 'isMultiPage', 'mergedInvoiceIds', 'invoiceLayoutType', 'imagePath', 'imageHash', 'ocrText', 'ocrTextHash', 'subtotal', 'tax', 'totalAmount', 'calculatedTotal', 'totalDifference', 'duplicateStatus', 'duplicateOfInvoiceId', 'recognitionSource', 'recognitionWarnings', 'status', 'createdAt', 'updatedAt', 'deletedAt', 'deviceId'],
+  invoices: ['id', 'companyId', 'localId', 'serverId', 'syncStatus', 'version', 'batchId', 'scanBatchId', 'importSessionId', 'invoiceGroupId', 'supplierId', 'invoiceNo', 'invoiceDate', 'pageNumber', 'pageCount', 'invoiceGroupKey', 'isMergedInvoice', 'isMultiPage', 'mergedInvoiceIds', 'invoiceLayoutType', 'imagePath', 'imageHash', 'originalFilePath', 'archiveFilePath', 'fileHash', 'archiveStatus', 'archiveFolder', 'invoiceMonth', 'ocrText', 'ocrTextHash', 'subtotal', 'tax', 'totalAmount', 'calculatedTotal', 'totalDifference', 'duplicateStatus', 'duplicateOfInvoiceId', 'recognitionSource', 'recognitionWarnings', 'status', 'createdAt', 'updatedAt', 'deletedAt', 'deviceId'],
   invoice_items: ['id', 'companyId', 'localId', 'serverId', 'syncStatus', 'version', 'invoiceId', 'supplierId', 'productId', 'rawName', 'nameCn', 'nameEn', 'spec', 'productNameOriginal', 'productNameNormalized', 'normalizedName', 'category', 'quantity', 'unit', 'unitPrice', 'totalPrice', 'chargedQty', 'freeQty', 'totalQty', 'actualQty', 'originalUnitCost', 'effectiveUnitCost', 'discountAmount', 'discountedEffectiveUnitCost', 'promoGroupId', 'promoGroupName', 'promoGroupRule', 'participatesInGiftAllocation', 'isFreeItem', 'isDiscountLine', 'candidateOnly', 'correctedByUser', 'isHandwrittenQuantity', 'isHandwrittenPrice', 'isHandwrittenAmount', 'isCircled', 'isChecked', 'freeReason', 'invoiceDate', 'notes', 'createdAt', 'updatedAt', 'deletedAt', 'deviceId'],
   products: ['id', 'companyId', 'localId', 'serverId', 'syncStatus', 'version', 'name', 'normalizedName', 'category', 'notes', 'createdAt', 'updatedAt', 'deletedAt', 'deviceId'],
   price_history: ['id', 'companyId', 'localId', 'serverId', 'syncStatus', 'version', 'productId', 'invoiceId', 'invoiceItemId', 'supplierId', 'price', 'quantity', 'unit', 'invoiceDate', 'invoiceNo', 'status', 'createdAt', 'updatedAt', 'deletedAt', 'deviceId'],
@@ -68,7 +74,7 @@ export const tableColumns = {
   product_learning_rules: ['id', 'companyId', 'localId', 'serverId', 'syncStatus', 'version', 'rawName', 'nameCn', 'nameEn', 'standardName', 'barcode', 'spec', 'unit', 'supplierId', 'productId', 'minPrice', 'maxPrice', 'avgPrice', 'occurrenceCount', 'confidence', 'createdAt', 'updatedAt', 'deletedAt', 'deviceId'],
   recognition_corrections: ['id', 'companyId', 'localId', 'serverId', 'syncStatus', 'version', 'fieldName', 'beforeValue', 'afterValue', 'supplierId', 'invoiceTemplateId', 'invoiceId', 'invoiceItemId', 'createdAt', 'updatedAt', 'deletedAt', 'deviceId'],
   price_anomalies: ['id', 'companyId', 'localId', 'serverId', 'syncStatus', 'version', 'supplierId', 'productId', 'invoiceId', 'invoiceItemId', 'unitPrice', 'averagePrice', 'deviationPercent', 'invoiceDate', 'invoiceNo', 'status', 'message', 'createdAt', 'updatedAt', 'deletedAt', 'deviceId'],
-  invoice_recognition_tasks: ['id', 'companyId', 'batchId', 'supplierHint', 'status', 'imagePath', 'filePath', 'originalName', 'mimeType', 'fileSize', 'source', 'recognitionSource', 'ocrLanguage', 'usedTemplate', 'usedAI', 'invoiceId', 'resultJson', 'error', 'retryCount', 'createdAt', 'updatedAt', 'startedAt', 'completedAt', 'deviceId'],
+  invoice_recognition_tasks: ['id', 'companyId', 'batchId', 'importSessionId', 'invoiceGroupId', 'invoicePageId', 'supplierHint', 'status', 'imagePath', 'filePath', 'originalName', 'mimeType', 'fileSize', 'source', 'recognitionSource', 'ocrLanguage', 'usedTemplate', 'usedAI', 'invoiceId', 'resultJson', 'error', 'retryCount', 'createdAt', 'updatedAt', 'startedAt', 'completedAt', 'deviceId'],
   invoice_templates: ['id', 'companyId', 'supplierName', 'invoiceLayoutType', 'supplierKeywords', 'tableHeaderKeywords', 'columns', 'totalKeywords', 'invoiceNoKeywords', 'dateKeywords', 'tableRegion', 'handwrittenRegions', 'sampleImageHash', 'successCount', 'failCount', 'lastUsedAt', 'accuracyScore', 'isActive', 'createdAt', 'updatedAt'],
   companies: ['id', 'name', 'maxAdminUsers', 'maxSalesUsers', 'createdAt', 'updatedAt'],
   users: ['id', 'companyId', 'username', 'email', 'passwordHash', 'name', 'role', 'status', 'phone', 'note', 'lastLoginAt', 'createdAt', 'updatedAt'],
@@ -78,6 +84,8 @@ export const tableColumns = {
 const numericColumns = new Set([
   'supplierCount',
   'invoiceCount',
+  'fileCount',
+  'groupCount',
   'totalAmount',
   'calculatedTotal',
   'totalDifference',
@@ -101,6 +109,7 @@ const numericColumns = new Set([
   'amount',
   'pageNumber',
   'pageCount',
+  'pageIndex',
   'isMergedInvoice',
   'isMultiPage',
   'price',
@@ -132,6 +141,8 @@ const numericColumns = new Set([
 const integerColumns = new Set([
   'supplierCount',
   'invoiceCount',
+  'fileCount',
+  'groupCount',
   'isFreeItem',
   'isDiscountLine',
   'candidateOnly',
@@ -145,6 +156,7 @@ const integerColumns = new Set([
   'createdByUser',
   'pageNumber',
   'pageCount',
+  'pageIndex',
   'isMergedInvoice',
   'isMultiPage',
   'candidateOnly',
@@ -298,8 +310,15 @@ export async function migrate() {
   }
 
   await execute(`CREATE INDEX IF NOT EXISTS ${quoteIdentifier('idx_suppliers_company')} ON ${quoteTable('suppliers')} (${quoteIdentifier('companyId')});`);
+  await execute(`CREATE INDEX IF NOT EXISTS ${quoteIdentifier('idx_import_sessions_company_created')} ON ${quoteTable('import_sessions')} (${quoteIdentifier('companyId')}, ${quoteIdentifier('createdAt')});`);
+  await execute(`CREATE INDEX IF NOT EXISTS ${quoteIdentifier('idx_invoice_groups_session')} ON ${quoteTable('invoice_groups')} (${quoteIdentifier('companyId')}, ${quoteIdentifier('importSessionId')});`);
+  await execute(`CREATE INDEX IF NOT EXISTS ${quoteIdentifier('idx_invoice_pages_session')} ON ${quoteTable('invoice_pages')} (${quoteIdentifier('companyId')}, ${quoteIdentifier('importSessionId')});`);
+  await execute(`CREATE INDEX IF NOT EXISTS ${quoteIdentifier('idx_invoice_pages_hash')} ON ${quoteTable('invoice_pages')} (${quoteIdentifier('companyId')}, ${quoteIdentifier('fileHash')});`);
   await execute(`CREATE INDEX IF NOT EXISTS ${quoteIdentifier('idx_invoices_company_date')} ON ${quoteTable('invoices')} (${quoteIdentifier('companyId')}, ${quoteIdentifier('invoiceDate')});`);
   await execute(`CREATE INDEX IF NOT EXISTS ${quoteIdentifier('idx_invoices_batch')} ON ${quoteTable('invoices')} (${quoteIdentifier('batchId')});`);
+  await execute(`CREATE INDEX IF NOT EXISTS ${quoteIdentifier('idx_invoices_import_session')} ON ${quoteTable('invoices')} (${quoteIdentifier('companyId')}, ${quoteIdentifier('importSessionId')});`);
+  await execute(`CREATE INDEX IF NOT EXISTS ${quoteIdentifier('idx_invoices_invoice_group')} ON ${quoteTable('invoices')} (${quoteIdentifier('companyId')}, ${quoteIdentifier('invoiceGroupId')});`);
+  await execute(`CREATE INDEX IF NOT EXISTS ${quoteIdentifier('idx_invoices_archive')} ON ${quoteTable('invoices')} (${quoteIdentifier('companyId')}, ${quoteIdentifier('archiveFolder')}, ${quoteIdentifier('invoiceMonth')});`);
   await execute(`CREATE INDEX IF NOT EXISTS ${quoteIdentifier('idx_invoices_group_key')} ON ${quoteTable('invoices')} (${quoteIdentifier('companyId')}, ${quoteIdentifier('invoiceGroupKey')});`);
   await execute(`CREATE INDEX IF NOT EXISTS ${quoteIdentifier('idx_invoices_duplicate_status')} ON ${quoteTable('invoices')} (${quoteIdentifier('companyId')}, ${quoteIdentifier('duplicateStatus')});`);
   await execute(`CREATE INDEX IF NOT EXISTS ${quoteIdentifier('idx_invoice_items_company_product_original')} ON ${quoteTable('invoice_items')} (${quoteIdentifier('companyId')}, ${quoteIdentifier('productNameOriginal')});`);

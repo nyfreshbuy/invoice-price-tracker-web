@@ -280,6 +280,7 @@ export default function App() {
           <Route path="/invoices/new" element={<RequireAuth session={authSession}><InvoiceFormPage /></RequireAuth>} />
           <Route path="/invoices/batch" element={<RequireAuth session={authSession}><BatchImportPage /></RequireAuth>} />
           <Route path="/recognition-tasks" element={<RequireAuth session={authSession}><RecognitionTaskListPage /></RequireAuth>} />
+          <Route path="/archive" element={<RequireAuth session={authSession}><InvoiceArchivePage /></RequireAuth>} />
           <Route path="/invoices/:id" element={<RequireAuth session={authSession}><InvoiceDetailPageWithGifts /></RequireAuth>} />
           <Route path="/products" element={<RequireAuth session={authSession}><ProductSearchPage /></RequireAuth>} />
           <Route path="/products/:name" element={<RequireAuth session={authSession}><ProductDetailPage /></RequireAuth>} />
@@ -691,6 +692,7 @@ function BatchImportPage() {
   const [message, setMessage] = useState('');
   const [saving, setSaving] = useState(false);
   const [batchId, setBatchId] = useState('');
+  const [importSession, setImportSession] = useState(null);
   const [selectedMergeIds, setSelectedMergeIds] = useState([]);
   const [batchAction, setBatchAction] = useState('');
 
@@ -756,31 +758,48 @@ function BatchImportPage() {
   async function handleFilesSelected(files) {
     const fileList = Array.from(files || []);
     if (fileList.length === 0) return;
-    const nextBatchId = generateId();
+    setSaving(true);
+    let createdSession = null;
+    try {
+      createdSession = await localDb.createImportSessionFromFiles(fileList);
+      setImportSession(createdSession);
+    } catch (error) {
+      setMessage(error.message || 'Import session create failed');
+      setSaving(false);
+      return;
+    }
+    const nextBatchId = createdSession?.session?.id || generateId();
     setBatchId(nextBatchId);
     const nextEntries = fileList.map((file) => ({
-      id: `${Date.now()}-${Math.random().toString(36).slice(2)}`,
+      id: createdSession?.pages?.find((page) => page.originalFileName === file.name)?.id || `${Date.now()}-${Math.random().toString(36).slice(2)}`,
+      page: createdSession?.pages?.find((page) => page.originalFileName === file.name) || null,
+      group: createdSession?.groups?.find((group) => group.pages?.some((page) => page.originalFileName === file.name)) || null,
       file,
       fileName: file.name,
       previewUrl: URL.createObjectURL(file),
-      status: 'pending',
+      status: createdSession?.pages?.find((page) => page.originalFileName === file.name)?.status === 'skipped_duplicate' ? 'skipped' : 'pending',
       result: null,
-      error: ''
+      error: createdSession?.pages?.find((page) => page.originalFileName === file.name)?.status === 'skipped_duplicate' ? 'Duplicate file hash skipped' : ''
     }));
     setEntries(nextEntries);
-    setMessage('');
+    setMessage(`Import Session: ${createdSession?.session?.sessionName || nextBatchId}`);
 
     if (!navigator.onLine) {
       setMessage('离线模式下无法批量 OCR/AI 识别，请联网后再导入。');
       setEntries(nextEntries.map((entry) => ({ ...entry, status: 'failed', error: 'offline' })));
+      setSaving(false);
       return;
     }
 
     for (const entry of nextEntries) {
+      if (entry.status === 'skipped') continue;
       updateEntry(entry.id, { status: 'recognizing' });
       const data = new FormData();
       data.append('image', entry.file);
       data.append('batchId', nextBatchId);
+      data.append('importSessionId', createdSession?.session?.id || nextBatchId);
+      if (entry.group?.id) data.append('invoiceGroupId', entry.group.id);
+      if (entry.page?.id) data.append('invoicePageId', entry.page.id);
       try {
         const created = await api.createRecognitionTask(data);
         console.log('Batch recognition task:', entry.fileName, created);
@@ -796,6 +815,7 @@ function BatchImportPage() {
         updateEntry(entry.id, { status: 'failed', error: error.message || '识别失败' });
       }
     }
+    setSaving(false);
   }
 
   async function saveBatch() {
@@ -808,6 +828,9 @@ function BatchImportPage() {
     const data = new FormData();
     data.append('image', entry.file);
     data.append('batchId', batchId || generateId());
+    if (importSession?.session?.id) data.append('importSessionId', importSession.session.id);
+    if (entry.group?.id) data.append('invoiceGroupId', entry.group.id);
+    if (entry.page?.id) data.append('invoicePageId', entry.page.id);
     try {
       const created = await api.createRecognitionTask(data);
       updateEntry(entry.id, {
@@ -871,7 +894,7 @@ function BatchImportPage() {
       <Section title="选择图片">
         <div className="field">
           <span>发票图片</span>
-          <button type="button" className="primary-button" onClick={() => fileInputRef.current?.click()}>
+          <button type="button" className="primary-button" disabled={saving} onClick={() => fileInputRef.current?.click()}>
             <Upload size={18} />一次选择多张图片
           </button>
           <input
@@ -886,6 +909,13 @@ function BatchImportPage() {
             }}
           />
         </div>
+        {batchId && (
+          <div className="detail-item">
+            <Info label="Import Session" value={importSession?.session?.sessionName || batchId} />
+            <Info label="Invoice Groups" value={importSession?.groups?.length || 0} />
+            <Info label="Pages" value={importSession?.pages?.length || entries.length} />
+          </div>
+        )}
         {batchId && (
           <div className="row-actions">
             <button type="button" disabled={Boolean(batchAction)} onClick={() => controlBatch('resume')}>{batchAction === 'resume' ? '处理中...' : '继续识别'}</button>
@@ -1132,6 +1162,53 @@ function RecognitionTaskListPage() {
         );
         })}
       </div>
+    </Page>
+  );
+}
+
+function InvoiceArchivePage() {
+  const [q, setQ] = useState('');
+  const [tree, setTree] = useState([]);
+  const [message, setMessage] = useState('');
+  const load = () => localDb.getArchiveTree(q).then(setTree).catch((error) => setMessage(error.message || 'Archive load failed'));
+  useLocalReload(load, [q]);
+  const totalInvoices = tree.reduce((sum, supplier) => sum + Number(supplier.invoiceCount || 0), 0);
+
+  return (
+    <Page title="发票文档库" subtitle="按供应商和月份浏览 App 内置归档索引">
+      <Section title="搜索">
+        <label className="field">
+          <span>供应商 / 发票号 / 日期</span>
+          <input value={q} onChange={(event) => setQ(event.target.value)} placeholder="May Flower / INV00125 / 2026-06" />
+        </label>
+        <Info label="供应商" value={tree.length} />
+        <Info label="发票" value={totalInvoices} />
+        {message && <p className="error">{message}</p>}
+      </Section>
+      {tree.length === 0 && <EmptyState text="暂无归档发票。确认入库后的发票会出现在这里。" />}
+      {tree.map((supplier) => (
+        <Section key={supplier.supplierName} title={`${supplier.supplierName} (${supplier.invoiceCount})`}>
+          {supplier.months.map((month) => (
+            <CollapsibleSection key={`${supplier.supplierName}-${month.month}`} title={`${month.month} · ${month.invoiceCount} 张`}>
+              <div className="card-list">
+                {month.invoices.map((invoice) => (
+                  <div className="row-card" key={invoice.id}>
+                    <div>
+                      <h3>{invoice.invoiceDate || '-'} · {invoice.invoiceNo || 'No Invoice #'}</h3>
+                      <p>{money(invoice.totalAmount)} · {invoice.status || '-'}</p>
+                      <p className="long-text">{invoice.archiveFilePath || invoice.imagePath || 'No archive path'}</p>
+                      {invoice.pages?.length > 0 && <p>Pages: {invoice.pages.length}</p>}
+                    </div>
+                    <div className="row-actions">
+                      <Link className="icon-button" to={`/invoices/${encodeURIComponent(invoice.id)}`}>查看</Link>
+                    </div>
+                  </div>
+                ))}
+              </div>
+            </CollapsibleSection>
+          ))}
+        </Section>
+      ))}
     </Page>
   );
 }
@@ -3340,6 +3417,7 @@ function Dialog({ title, onClose, children }) {
 
 function BottomNav() {
   const items = [
+    ['/archive', FileText, '文档'],
     ['/', Home, '首页'],
     ['/invoices', FileText, '发票'],
     ['/supplier-center', Building2, '采购'],
@@ -3511,6 +3589,7 @@ function duplicateStatusLabel(status) {
 }
 
 function batchStatusText(entry) {
+  if (entry.status === 'skipped') return 'Skipped duplicate file';
   if (entry.status === 'recognizing') return '🔄 识别中';
   if (entry.status === 'failed') return '❌ 失败';
   if (entry.status === 'success' && entry.autoMerged) return '✅ 已自动合并';

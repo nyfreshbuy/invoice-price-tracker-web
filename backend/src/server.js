@@ -1860,6 +1860,9 @@ async function createRecognitionTask(file, user, deviceId = 'web', options = {})
     id: id(),
     companyId: user.companyId,
     batchId: options.batchId || '',
+    importSessionId: options.importSessionId || options.batchId || '',
+    invoiceGroupId: options.invoiceGroupId || '',
+    invoicePageId: options.invoicePageId || '',
     supplierHint: options.supplierHint || '',
     status: 'waiting',
     imagePath: `/uploads/${file.filename}`,
@@ -1887,6 +1890,9 @@ async function createRecognitionTask(file, user, deviceId = 'web', options = {})
     taskId: task.id,
     companyId: task.companyId,
     batchId: task.batchId,
+    importSessionId: task.importSessionId,
+    invoiceGroupId: task.invoiceGroupId,
+    invoicePageId: task.invoicePageId,
     imagePath: task.imagePath,
     fileSize: task.fileSize
   });
@@ -2250,6 +2256,37 @@ function sha256Text(value = '') {
   return text ? crypto.createHash('sha256').update(text).digest('hex') : '';
 }
 
+function safeArchiveSegment(value = '') {
+  const cleaned = String(value || '')
+    .trim()
+    .replace(/[<>:"/\\|?*\u0000-\u001f]+/g, ' ')
+    .replace(/\s+/g, ' ')
+    .slice(0, 80);
+  return cleaned || 'Unknown Supplier';
+}
+
+function invoiceMonthValue(value = '') {
+  const text = String(value || '').trim();
+  return /^\d{4}-\d{2}/.test(text) ? text.slice(0, 7) : 'undated';
+}
+
+function buildArchiveFields({ supplierName = '', invoiceDate = '', invoiceNo = '', pageNumber = 1, fileHash = '', originalName = '', status = '' } = {}) {
+  const supplierFolder = safeArchiveSegment(supplierName);
+  const month = invoiceMonthValue(invoiceDate);
+  const datePart = /^\d{4}-\d{2}-\d{2}$/.test(String(invoiceDate || '')) ? invoiceDate : 'undated';
+  const invoicePart = safeArchiveSegment(invoiceNo || (fileHash ? fileHash.slice(0, 8) : path.parse(originalName || 'invoice').name));
+  const ext = path.extname(originalName || '').toLowerCase() || '.jpg';
+  const page = Math.max(1, Number(pageNumber || 1));
+  const archiveFolder = `InvoiceArchive/${supplierFolder}/${month}`;
+  return {
+    originalFilePath: originalName || '',
+    archiveStatus: String(status || '').toUpperCase() === 'PENDING_REVIEW' ? 'pending' : 'archived',
+    archiveFolder,
+    invoiceMonth: month,
+    archiveFilePath: `${archiveFolder}/${datePart}_${invoicePart}_page${page}${ext}`
+  };
+}
+
 function invoiceIdentityIds(invoice = {}) {
   return [invoice.id, invoice.serverId, invoice.localId].filter(Boolean);
 }
@@ -2511,6 +2548,19 @@ async function saveRecognizedInvoiceFromTask(task, result, options = {}) {
     || totalDifference > 0.05
     || Number(parsed.dateConfidence ?? 1) < 0.7
     || !parsed.invoiceDate;
+  const invoiceStatus = needsReview ? 'PENDING_REVIEW' : 'APPROVED';
+  const nextPageNumber = existingInvoice
+    ? Math.max(Number(existingInvoice.pageCount || 1) + 1, Number(parsed.pageNumber || 0), mergedInvoiceIds.length + 1)
+    : Number(parsed.pageNumber || 1);
+  const archiveFields = buildArchiveFields({
+    supplierName: parsed.supplierName || supplier?.supplierDisplayName || supplier?.displayName || supplier?.name || '',
+    invoiceDate: parsed.invoiceDate || '',
+    invoiceNo: parsed.invoiceNo || '',
+    pageNumber: nextPageNumber,
+    fileHash: imageHash,
+    originalName: task.originalName || '',
+    status: invoiceStatus
+  });
   if (existingInvoice) {
     duplicateCheck.mergedIntoInvoiceId = existingInvoice.serverId || existingInvoice.id;
     duplicateCheck.pageInvoiceId = pageInvoiceId;
@@ -2535,18 +2585,26 @@ async function saveRecognizedInvoiceFromTask(task, result, options = {}) {
     invoiceLayoutType: parsed.invoiceLayoutType || 'normal_invoice',
     batchId: task.batchId || existingInvoice?.batchId || '',
     scanBatchId: task.batchId || existingInvoice?.scanBatchId || existingInvoice?.batchId || '',
+    importSessionId: task.importSessionId || task.batchId || existingInvoice?.importSessionId || '',
+    invoiceGroupId: task.invoiceGroupId || existingInvoice?.invoiceGroupId || '',
     duplicateStatus: duplicateCheck.duplicateStatus || (duplicateCheck.isDuplicate ? 'confirmed' : duplicateCheck.sameInvoiceGroup ? 'possible' : 'none'),
     duplicateOfInvoiceId: duplicateCheck.duplicateOfInvoiceId || '',
     recognitionSource: result.recognitionSource || result.source || task.recognitionSource || '',
     recognitionWarnings: needsReview ? (parsed.warnings || duplicateCheck.sameInvoiceGroupReason || '') : '',
     imagePath: existingInvoice?.imagePath || result.imagePath || task.imagePath || '',
     imageHash: existingInvoice?.imageHash || imageHash,
+    originalFilePath: existingInvoice?.originalFilePath || archiveFields.originalFilePath,
+    archiveFilePath: existingInvoice?.archiveFilePath || archiveFields.archiveFilePath,
+    fileHash: existingInvoice?.fileHash || imageHash,
+    archiveStatus: existingInvoice?.archiveStatus || archiveFields.archiveStatus,
+    archiveFolder: existingInvoice?.archiveFolder || archiveFields.archiveFolder,
+    invoiceMonth: existingInvoice?.invoiceMonth || archiveFields.invoiceMonth,
     ocrText: [existingInvoice?.ocrText, result.ocrText].filter(Boolean).join('\n\n--- page ---\n\n'),
     ocrTextHash: sha256Text([existingInvoice?.ocrText, result.ocrText].filter(Boolean).join('\n\n--- page ---\n\n')),
     totalAmount: invoiceTotal,
     calculatedTotal,
     totalDifference,
-    status: needsReview ? 'PENDING_REVIEW' : 'APPROVED',
+    status: invoiceStatus,
     createdAt: existingInvoice?.createdAt || task.createdAt || now,
     updatedAt: now
   }, deviceId, companyId);
@@ -2567,10 +2625,19 @@ async function saveRecognizedInvoiceFromTask(task, result, options = {}) {
     invoiceLayoutType: parsed.invoiceLayoutType || 'normal_invoice',
     batchId: task.batchId || existingInvoice?.batchId || '',
     scanBatchId: task.batchId || existingInvoice?.scanBatchId || existingInvoice?.batchId || '',
+    importSessionId: task.importSessionId || task.batchId || existingInvoice?.importSessionId || '',
+    invoiceGroupId: task.invoiceGroupId || existingInvoice?.invoiceGroupId || '',
     duplicateStatus: 'none',
     recognitionSource: result.recognitionSource || result.source || task.recognitionSource || '',
     recognitionWarnings: '',
     imagePath: result.imagePath || task.imagePath || '',
+    imageHash,
+    originalFilePath: archiveFields.originalFilePath,
+    archiveFilePath: archiveFields.archiveFilePath,
+    fileHash: imageHash,
+    archiveStatus: 'archived',
+    archiveFolder: archiveFields.archiveFolder,
+    invoiceMonth: archiveFields.invoiceMonth,
     ocrText: result.ocrText || '',
     totalAmount,
     calculatedTotal: itemTotal,
@@ -2583,6 +2650,36 @@ async function saveRecognizedInvoiceFromTask(task, result, options = {}) {
   await withTransaction(async (client) => {
     await upsertRecord('invoices', invoice, client);
     if (pageInvoice) await upsertRecord('invoices', pageInvoice, client);
+    if (task.invoicePageId) {
+      const pageRecord = await prepareRecordWithReferences('invoice_pages', {
+        id: task.invoicePageId,
+        localId: task.invoicePageId,
+        serverId: task.invoicePageId,
+        importSessionId: task.importSessionId || task.batchId || '',
+        invoiceGroupId: task.invoiceGroupId || '',
+        invoiceId: invoice.serverId || invoice.id,
+        originalFileName: task.originalName || '',
+        originalFilePath: task.originalName || '',
+        archiveFilePath: archiveFields.archiveFilePath,
+        archiveFolder: archiveFields.archiveFolder,
+        fileHash: imageHash,
+        fileSize: Number(task.fileSize || 0),
+        imagePath: task.imagePath || '',
+        mimeType: task.mimeType || '',
+        lightOcrText: result.ocrText || '',
+        lightOcrJson: JSON.stringify({
+          supplierName: parsed.supplierName || '',
+          invoiceNo: parsed.invoiceNo || '',
+          invoiceDate: parsed.invoiceDate || '',
+          totalAmount
+        }),
+        pageNumber: Number(parsed.pageNumber || nextPageNumber || 0),
+        pageCount: Number(parsed.pageCount || invoice.pageCount || 0),
+        status: invoiceStatus === 'PENDING_REVIEW' ? 'needs_review' : 'recognized',
+        updatedAt: now
+      }, deviceId, companyId, client);
+      await upsertRecord('invoice_pages', pageRecord, client);
+    }
     if (!existingInvoice) {
       const existingItemRows = await queryAll(`
         SELECT * FROM ${quoteTable('invoice_items')}
@@ -4173,6 +4270,9 @@ app.post('/api/invoice-recognition/tasks', requireAuth, upload.single('image'), 
   }
   const task = await createRecognitionTask(req.file, req.user, req.body.deviceId || 'web', {
     batchId: req.body.batchId || '',
+    importSessionId: req.body.importSessionId || '',
+    invoiceGroupId: req.body.invoiceGroupId || '',
+    invoicePageId: req.body.invoicePageId || '',
     supplierHint: req.body.supplierHint || ''
   });
   res.status(202).json({ success: true, taskId: task.id, task });

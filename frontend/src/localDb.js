@@ -1,9 +1,9 @@
 import { getCompanyId as getAuthCompanyId } from './api.js';
 
 const DB_NAME = 'InvoicePriceTrackerLocal';
-const DB_VERSION = 10;
+const DB_VERSION = 11;
 
-export const syncTables = ['purchase_batches', 'suppliers', 'invoices', 'invoice_items', 'products', 'price_history', 'invoice_discounts', 'gift_allocation_rules', 'supplier_templates', 'product_aliases', 'product_learning_rules', 'recognition_corrections', 'price_anomalies'];
+export const syncTables = ['purchase_batches', 'import_sessions', 'invoice_groups', 'invoice_pages', 'suppliers', 'invoices', 'invoice_items', 'products', 'price_history', 'invoice_discounts', 'gift_allocation_rules', 'supplier_templates', 'product_aliases', 'product_learning_rules', 'recognition_corrections', 'price_anomalies'];
 const localOnlyTables = ['invoice_images', 'meta'];
 
 let dbPromise;
@@ -19,6 +19,16 @@ export function generateId() {
     Date.now().toString(36) +
     Math.random().toString(36).substring(2, 10)
   );
+}
+
+export async function hashFile(file) {
+  if (!file) return '';
+  if (typeof crypto !== 'undefined' && crypto.subtle && typeof file.arrayBuffer === 'function') {
+    const buffer = await file.arrayBuffer();
+    const digest = await crypto.subtle.digest('SHA-256', buffer);
+    return [...new Uint8Array(digest)].map((byte) => byte.toString(16).padStart(2, '0')).join('');
+  }
+  return `${file.name || 'file'}-${file.size || 0}-${file.lastModified || 0}`;
 }
 
 export function getDeviceId() {
@@ -457,6 +467,42 @@ function invoiceMonth(value = '') {
   return String(value || '').slice(0, 7) || '未 dated';
 }
 
+function safeArchiveSegment(value = '') {
+  return String(value || '')
+    .trim()
+    .replace(/[<>:"/\\|?*\u0000-\u001f]+/g, ' ')
+    .replace(/\s+/g, ' ')
+    .slice(0, 80) || 'Unknown Supplier';
+}
+
+function buildArchivePath({ supplierName = '', invoiceDate = '', invoiceNo = '', pageNumber = 1, fileHash = '', originalFileName = '' } = {}) {
+  const supplierFolder = safeArchiveSegment(supplierName);
+  const month = invoiceMonth(invoiceDate);
+  const datePart = /^\d{4}-\d{2}-\d{2}$/.test(String(invoiceDate || '')) ? invoiceDate : 'undated';
+  const invoicePart = safeArchiveSegment(invoiceNo || (fileHash ? fileHash.slice(0, 8) : String(originalFileName || 'invoice').replace(/\.[^.]+$/, '')));
+  const ext = (String(originalFileName || '').match(/\.[A-Za-z0-9]+$/)?.[0] || '.jpg').toLowerCase();
+  const archiveFolder = `InvoiceArchive/${supplierFolder}/${month}`;
+  return {
+    archiveFolder,
+    invoiceMonth: month,
+    archiveFilePath: `${archiveFolder}/${datePart}_${invoicePart}_page${Math.max(1, Number(pageNumber || 1))}${ext}`
+  };
+}
+
+function inferPageInfoFromFileName(fileName = '') {
+  const base = String(fileName || '').replace(/\.[^.]+$/, '');
+  const pageMatch = base.match(/(?:page|p|页)[\s_-]*(\d+)(?:[\s_-]*(?:of|-|\/)[\s_-]*(\d+))?/i)
+    || base.match(/(\d+)\s*(?:of|\/)\s*(\d+)/i);
+  if (!pageMatch) return { pageNumber: 0, pageCount: 0, groupKey: '' };
+  const pageNumber = Number(pageMatch[1] || 0);
+  const pageCount = Number(pageMatch[2] || 0);
+  const groupKey = base
+    .replace(pageMatch[0], '')
+    .replace(/[_\-\s]+$/g, '')
+    .trim() || base;
+  return { pageNumber, pageCount, groupKey };
+}
+
 function currentMonth() {
   return new Date().toISOString().slice(0, 7);
 }
@@ -799,6 +845,128 @@ export const localDb = {
 
   async getPurchaseBatches() {
     return (await all('purchase_batches')).filter(active).sort((a, b) => (b.createdAt || '').localeCompare(a.createdAt || ''));
+  },
+
+  async createImportSessionFromFiles(files = [], options = {}) {
+    const fileList = Array.from(files || []);
+    if (!fileList.length) throw new Error('No files selected');
+    const timestamp = nowIso();
+    const sessionId = options.id || generateId();
+    const existingPages = (await all('invoice_pages')).filter(active);
+    const existingHashes = new Set(existingPages.map((page) => page.fileHash).filter(Boolean));
+    const session = syncFields({
+      id: sessionId,
+      localId: sessionId,
+      serverId: sessionId,
+      sessionName: options.sessionName || `Import Session ${new Date().toLocaleString()}`,
+      sourceType: 'images',
+      fileCount: fileList.length,
+      groupCount: 0,
+      status: 'imported',
+      createdAt: timestamp,
+      updatedAt: timestamp
+    });
+    await put('import_sessions', session);
+
+    const pages = [];
+    const groupsByKey = new Map();
+    for (let index = 0; index < fileList.length; index += 1) {
+      const file = fileList[index];
+      const pageId = generateId();
+      const imageId = generateId();
+      const fileHash = await hashFile(file);
+      const pageInfo = inferPageInfoFromFileName(file.name || '');
+      const duplicateFile = fileHash && existingHashes.has(fileHash);
+      let imagePath = '';
+      if (!duplicateFile) {
+        await localDb.saveInvoiceImage({ id: imageId, invoiceId: pageId, file, source: 'IndexedDB' });
+        imagePath = `indexeddb:${imageId}`;
+      }
+      const groupKey = pageInfo.groupKey || pageId;
+      if (!groupsByKey.has(groupKey)) groupsByKey.set(groupKey, []);
+      const page = syncFields({
+        id: pageId,
+        localId: pageId,
+        serverId: pageId,
+        importSessionId: sessionId,
+        invoiceGroupId: '',
+        invoiceId: '',
+        pageIndex: index + 1,
+        pageNumber: pageInfo.pageNumber,
+        pageCount: pageInfo.pageCount,
+        originalFileName: file.name || `image-${index + 1}`,
+        originalFilePath: file.name || '',
+        archiveFilePath: '',
+        archiveFolder: '',
+        fileHash,
+        fileSize: Number(file.size || 0),
+        imageId: duplicateFile ? '' : imageId,
+        imagePath,
+        mimeType: file.type || 'image/jpeg',
+        lightOcrText: '',
+        lightOcrJson: '',
+        status: duplicateFile ? 'skipped_duplicate' : 'waiting'
+      });
+      pages.push(page);
+      groupsByKey.get(groupKey).push(page);
+      if (fileHash) existingHashes.add(fileHash);
+    }
+
+    const groups = [];
+    for (const [key, groupPages] of groupsByKey.entries()) {
+      const groupId = generateId();
+      const pageIds = groupPages.map((page) => page.id);
+      groups.push(syncFields({
+        id: groupId,
+        localId: groupId,
+        serverId: groupId,
+        importSessionId: sessionId,
+        supplierId: '',
+        supplierName: '',
+        invoiceNo: '',
+        invoiceDate: '',
+        confidence: key === groupPages[0]?.id ? 0.2 : 0.55,
+        reason: key === groupPages[0]?.id ? 'Initial single-page group; confirm or merge if needed.' : 'Grouped by filename page pattern.',
+        status: 'needs_review',
+        pageIds: JSON.stringify(pageIds),
+        pageCount: groupPages.length,
+        totalAmount: 0,
+        aiSupplierNameCandidate: ''
+      }));
+      for (const page of groupPages) page.invoiceGroupId = groupId;
+    }
+    await putMany('invoice_pages', pages);
+    await putMany('invoice_groups', groups);
+    await put('import_sessions', syncFields({ ...session, groupCount: groups.length, status: 'grouped' }));
+    return localDb.getImportSessionDetail(sessionId);
+  },
+
+  async getImportSessions() {
+    return (await all('import_sessions')).filter(active).sort((a, b) => (b.createdAt || '').localeCompare(a.createdAt || ''));
+  },
+
+  async getImportSessionDetail(sessionId) {
+    const session = await get('import_sessions', sessionId);
+    if (!session || !belongsToCurrentCompany(session)) return null;
+    const pages = (await all('invoice_pages'))
+      .filter((page) => active(page) && page.importSessionId === sessionId)
+      .sort((a, b) => Number(a.pageIndex || 0) - Number(b.pageIndex || 0));
+    const groups = (await all('invoice_groups'))
+      .filter((group) => active(group) && group.importSessionId === sessionId)
+      .sort((a, b) => (a.createdAt || '').localeCompare(b.createdAt || ''))
+      .map((group) => ({
+        ...group,
+        pages: pages.filter((page) => page.invoiceGroupId === group.id || page.invoiceGroupId === group.serverId)
+      }));
+    return { session, pages, groups };
+  },
+
+  async updateImportGroup(groupId, fields = {}) {
+    const group = await get('invoice_groups', groupId);
+    if (!group || !belongsToCurrentCompany(group)) throw new Error('Import group not found');
+    const updated = syncFields({ ...group, ...fields });
+    await put('invoice_groups', updated);
+    return updated;
   },
 
   async saveInvoiceImage({ id: imageId, invoiceId, file, source = 'IndexedDB' }) {
@@ -1707,6 +1875,67 @@ export const localDb = {
         recordCount: group.length
       };
     }).sort((a, b) => a.minPrice - b.minPrice);
+  },
+
+  async getArchiveTree(query = '') {
+    const q = normalizeProductName(query);
+    const [invoices, pages] = await Promise.all([localDb.getInvoices(), all('invoice_pages')]);
+    const pagesByInvoice = new Map();
+    for (const page of pages.filter(active)) {
+      const ids = [page.invoiceId].filter(Boolean);
+      for (const key of ids) {
+        const list = pagesByInvoice.get(key) || [];
+        list.push(page);
+        pagesByInvoice.set(key, list);
+      }
+    }
+    const rows = invoices
+      .filter((invoice) => active(invoice) && !['merged', 'hidden'].includes(String(invoice.status || '').toLowerCase()))
+      .filter((invoice) => {
+        if (!q) return true;
+        const haystack = normalizeProductName([
+          invoice.supplierName,
+          invoice.supplierDisplayName,
+          invoice.invoiceNo,
+          invoice.invoiceDate,
+          invoice.archiveFilePath
+        ].filter(Boolean).join(' '));
+        return haystack.includes(q);
+      })
+      .map((invoice) => {
+        const fallbackArchive = buildArchivePath({
+          supplierName: invoice.supplierName || invoice.supplierDisplayName || '',
+          invoiceDate: invoice.invoiceDate || '',
+          invoiceNo: invoice.invoiceNo || '',
+          fileHash: invoice.fileHash || invoice.imageHash || '',
+          originalFileName: invoice.originalFilePath || ''
+        });
+        return {
+          ...invoice,
+          archiveFolder: invoice.archiveFolder || fallbackArchive.archiveFolder,
+          invoiceMonth: invoice.invoiceMonth || fallbackArchive.invoiceMonth,
+          archiveFilePath: invoice.archiveFilePath || fallbackArchive.archiveFilePath,
+          pages: pagesByInvoice.get(invoice.id) || pagesByInvoice.get(invoice.serverId) || []
+        };
+      });
+    const supplierMap = new Map();
+    for (const invoice of rows) {
+      const supplierName = supplierDisplayName(invoice) || invoice.supplierName || 'Unknown Supplier';
+      const month = invoice.invoiceMonth || invoiceMonth(invoice.invoiceDate);
+      if (!supplierMap.has(supplierName)) supplierMap.set(supplierName, new Map());
+      const monthMap = supplierMap.get(supplierName);
+      if (!monthMap.has(month)) monthMap.set(month, []);
+      monthMap.get(month).push(invoice);
+    }
+    return [...supplierMap.entries()].map(([supplierName, monthMap]) => ({
+      supplierName,
+      invoiceCount: [...monthMap.values()].reduce((sum, list) => sum + list.length, 0),
+      months: [...monthMap.entries()].map(([month, monthInvoices]) => ({
+        month,
+        invoiceCount: monthInvoices.length,
+        invoices: monthInvoices.sort((a, b) => `${b.invoiceDate || ''}${b.createdAt || ''}`.localeCompare(`${a.invoiceDate || ''}${a.createdAt || ''}`))
+      })).sort((a, b) => b.month.localeCompare(a.month))
+    })).sort((a, b) => a.supplierName.localeCompare(b.supplierName));
   },
 
   async getStats() {
