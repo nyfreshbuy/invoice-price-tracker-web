@@ -989,11 +989,49 @@ function splitInvoiceRows(items = []) {
   const discountItems = [];
   const productItems = [];
   for (const item of items) {
-    if (item.candidateOnly) continue;
     if (detectDiscountLine(item)) discountItems.push(item);
     else productItems.push(item);
   }
   return { productItems, discountItems };
+}
+
+function evaluateProductNameQuality(item = {}, context = {}) {
+  const name = String(item.standardName || item.productNameNormalized || item.normalizedName || item.productNameOriginal || item.name || [item.nameCn, item.nameEn].filter(Boolean).join(' ') || '').trim();
+  const confidence = Number(item.nameConfidence ?? item.itemConfidence ?? item.confidence ?? (context.source === 'ai' || context.usedAI ? 0.82 : 0.45));
+  const reasons = [];
+  if (!name) reasons.push('empty_name');
+  if (confidence < 0.55) reasons.push('low_confidence');
+  if (/={1,}|\*{2,}|\?{2,}|[_|]{3,}/.test(name)) reasons.push('symbol_noise');
+  const compact = name.replace(/\s+/g, '');
+  if (compact.length <= 2 && !/[\u3400-\u9fff]/.test(compact)) reasons.push('too_short');
+  const symbolCount = (name.match(/[^A-Za-z0-9\u3400-\u9fff\s.&'’()\-/]/g) || []).length;
+  if (name.length > 0 && symbolCount / name.length > 0.22) reasons.push('too_many_symbols');
+  const alphaTokens = name.match(/[A-Za-z]+/g) || [];
+  const shortAlphaTokens = alphaTokens.filter((token) => token.length <= 2).length;
+  if (alphaTokens.length >= 3 && shortAlphaTokens / alphaTokens.length > 0.65) reasons.push('broken_english_tokens');
+  if (/^[a-z]{1,4}\s*[=:-]?$/i.test(name)) reasons.push('ocr_fragment');
+  if (context.source && context.source !== 'ai' && !context.usedAI) reasons.push('not_ai_verified');
+  return {
+    ok: reasons.length === 0,
+    confidence,
+    reasons
+  };
+}
+
+function applyProductNameQuality(items = [], context = {}) {
+  return items.map((item) => {
+    const quality = evaluateProductNameQuality(item, context);
+    return {
+      ...item,
+      nameConfidence: quality.confidence,
+      itemConfidence: Number(item.itemConfidence ?? item.confidence ?? quality.confidence),
+      nameQualityStatus: quality.ok ? 'trusted' : 'needs_review',
+      nameQualityReason: quality.reasons.join(', '),
+      itemRecognitionSource: item.itemRecognitionSource || context.source || '',
+      candidateOnly: Boolean(item.candidateOnly) || !quality.ok,
+      notes: [item.notes, !quality.ok ? `name_quality=${quality.reasons.join(',')}` : ''].filter(Boolean).join(' | ')
+    };
+  });
 }
 
 function applyGiftAccounting(items = []) {
@@ -1432,6 +1470,7 @@ function resultFromFinalPayload(payload = {}) {
 function shouldCreatePriceHistoryForItem(item = {}, invoice = {}) {
   if (!['APPROVED', 'CONFIRMED'].includes(String(invoice.status || '').toUpperCase())) return false;
   if (Number(item.isFreeItem || 0) || Number(item.isDiscountLine || 0) || Number(item.candidateOnly || 0)) return false;
+  if (String(item.nameQualityStatus || 'trusted') !== 'trusted') return false;
   if (Number(item.quantity || item.actualQty || item.totalQty || 0) <= 0) return false;
   if (Number(item.unitPrice || 0) <= 0) return false;
   if (Number(item.totalPrice || 0) <= 0) return false;
@@ -1477,7 +1516,11 @@ async function saveInvoiceWithIntegrityCheck(payload, options = {}) {
     ? await getByAnyId('suppliers', payload.supplierId, companyId)
     : await findOrCreateSupplierV2(payload.supplierName, deviceId, companyId);
   const now = nowIso();
-  const { productItems, discountItems } = splitInvoiceRows(Array.isArray(payload.items) ? payload.items : []);
+  const sourceContext = {
+    source: payload.source || payload.recognitionSource || payload.itemRecognitionSource || '',
+    usedAI: Boolean(payload.usedAI || String(payload.recognitionSource || '').toLowerCase().includes('ai'))
+  };
+  const { productItems, discountItems } = splitInvoiceRows(applyProductNameQuality(Array.isArray(payload.items) ? payload.items : [], sourceContext));
   const items = applyDiscountAllocation(applyGiftAccounting(productItems), discountItems);
   const itemTotal = items.reduce((sum, item) => sum + Number(item.totalPrice || 0), 0);
   const totalAmount = Number(payload.totalAmount || 0) > 0 ? Number(payload.totalAmount) : itemTotal;
@@ -1564,6 +1607,11 @@ async function saveInvoiceWithIntegrityCheck(payload, options = {}) {
         rawName: displayRawName(item),
         productNameOriginal: standardName || item.productNameOriginal || item.name || '',
         productNameNormalized: normalizeProductNameAdvanced(standardName || item.productNameNormalized || item.productNameOriginal || ''),
+        nameConfidence: Number(item.nameConfidence ?? item.itemConfidence ?? 0),
+        nameQualityStatus: item.nameQualityStatus || 'trusted',
+        nameQualityReason: item.nameQualityReason || '',
+        rawOcrLine: item.rawOcrLine || '',
+        itemRecognitionSource: item.itemRecognitionSource || sourceContext.source || '',
         chargedQty: item.chargedQty,
         freeQty: item.freeQty,
         totalQty: item.totalQty,
@@ -1591,14 +1639,14 @@ async function saveInvoiceWithIntegrityCheck(payload, options = {}) {
       await upsertRecord('invoice_items', record, client);
       itemRecords.push(record);
 
-      const product = await findOrCreateProductForLearning({ ...item, productNameOriginal: record.productNameOriginal, productNameNormalized: record.productNameNormalized }, deviceId, companyId, client);
-      if (product) {
-        record.productId = product.serverId || product.id;
-        await upsertRecord('invoice_items', { ...record, productId: record.productId }, client);
-      }
-      await learnProductAlias({ item, itemRecord: record, invoice, supplier, product, deviceId, companyId, client });
-      await learnProductRule({ item: { ...item, unitPrice: record.unitPrice }, supplier, product, deviceId, companyId, client });
       if (shouldCreatePriceHistoryForItem(record, invoice)) {
+        const product = await findOrCreateProductForLearning({ ...item, productNameOriginal: record.productNameOriginal, productNameNormalized: record.productNameNormalized }, deviceId, companyId, client);
+        if (product) {
+          record.productId = product.serverId || product.id;
+          await upsertRecord('invoice_items', { ...record, productId: record.productId }, client);
+        }
+        await learnProductAlias({ item, itemRecord: record, invoice, supplier, product, deviceId, companyId, client });
+        await learnProductRule({ item: { ...item, unitPrice: record.unitPrice }, supplier, product, deviceId, companyId, client });
         const anomaly = await learnPrice({ itemRecord: record, invoice, supplier, product, deviceId, companyId, client });
         if (anomaly) priceAnomalies.push(anomaly);
       }
@@ -2486,7 +2534,11 @@ async function softDeletePriceHistory({ companyId, invoiceIds = [], itemIds = []
 
 async function saveRecognizedInvoiceFromTask(task, result, options = {}) {
   const parsed = result.parsed || {};
-  const { productItems, discountItems } = splitInvoiceRows(Array.isArray(parsed.items) ? parsed.items : []);
+  const sourceContext = {
+    source: result.source || result.recognitionSource || '',
+    usedAI: Boolean(result.usedAI || String(result.recognitionSource || '').toLowerCase().includes('ai'))
+  };
+  const { productItems, discountItems } = splitInvoiceRows(applyProductNameQuality(Array.isArray(parsed.items) ? parsed.items : [], sourceContext));
   const items = applyDiscountAllocation(applyGiftAccounting(productItems), discountItems);
   const deviceId = task.deviceId || 'recognition-task';
   const companyId = task.companyId;
@@ -2716,6 +2768,11 @@ async function saveRecognizedInvoiceFromTask(task, result, options = {}) {
         spec: item.spec || '',
         productNameOriginal: item.productNameOriginal || item.name || '',
         productNameNormalized: item.productNameNormalized || item.normalizedName || item.standardName || item.name || '',
+        nameConfidence: Number(item.nameConfidence ?? item.itemConfidence ?? 0),
+        nameQualityStatus: item.nameQualityStatus || 'trusted',
+        nameQualityReason: item.nameQualityReason || '',
+        rawOcrLine: item.rawOcrLine || '',
+        itemRecognitionSource: item.itemRecognitionSource || sourceContext.source || '',
         category: item.category || '',
         quantity: Number(item.quantity ?? item.qty ?? 0),
         unit: item.unit || item.spec || '',
@@ -2749,15 +2806,17 @@ async function saveRecognizedInvoiceFromTask(task, result, options = {}) {
       }, deviceId, companyId, client);
       await upsertRecord('invoice_items', itemRecord, client);
       itemRecords.push(itemRecord);
-      const product = await findOrCreateProductForLearning(item, deviceId, companyId, client);
-      if (product) {
-        itemRecord.productId = product.serverId || product.id;
-        await upsertRecord('invoice_items', { ...itemRecord, productId: itemRecord.productId }, client);
+      if (shouldCreatePriceHistoryForItem(itemRecord, invoice)) {
+        const product = await findOrCreateProductForLearning(item, deviceId, companyId, client);
+        if (product) {
+          itemRecord.productId = product.serverId || product.id;
+          await upsertRecord('invoice_items', { ...itemRecord, productId: itemRecord.productId }, client);
+        }
+        await learnProductAlias({ item, itemRecord, invoice, supplier, product, deviceId, companyId, client });
+        await learnProductRule({ item, supplier, product, deviceId, companyId, client });
+        const anomaly = await learnPrice({ itemRecord, invoice, supplier, product, deviceId, companyId, client });
+        if (anomaly) duplicateCheck.priceAnomalies.push(anomaly);
       }
-      await learnProductAlias({ item, itemRecord, invoice, supplier, product, deviceId, companyId, client });
-      await learnProductRule({ item, supplier, product, deviceId, companyId, client });
-      const anomaly = await learnPrice({ itemRecord, invoice, supplier, product, deviceId, companyId, client });
-      if (anomaly) duplicateCheck.priceAnomalies.push(anomaly);
     }
     await saveInvoiceDiscounts({ discountItems, productItemRecords: itemRecords, invoice, supplier, deviceId, companyId, client });
   });
@@ -4015,6 +4074,91 @@ app.post('/api/invoices/:id/image', requireAuth, upload.single('image'), asyncHa
   });
 }));
 
+app.post('/api/invoices/:id/reprocess-ai', requireAuth, asyncHandler(async (req, res) => {
+  const invoice = await getByAnyId('invoices', req.params.id, req.user.companyId);
+  if (!invoice) {
+    res.status(404).json({ error: 'Invoice not found' });
+    return;
+  }
+  const imagePath = String(invoice.imagePath || invoice.imageUrl || invoice.originalImageUrl || '');
+  if (!imagePath || imagePath.startsWith('indexeddb:') || imagePath.startsWith('blob:')) {
+    res.status(400).json({ error: 'No server image is available. Re-upload the invoice image first.' });
+    return;
+  }
+  const relativePath = imagePath.replace(/^https?:\/\/[^/]+/i, '');
+  if (!relativePath.startsWith('/uploads/')) {
+    res.status(400).json({ error: 'The image is not a server upload path.' });
+    return;
+  }
+  const filename = path.basename(relativePath);
+  const filePath = path.join(uploadDir, filename);
+  if (!fs.existsSync(filePath)) {
+    res.status(404).json({ error: 'Server image file is missing. Re-upload the invoice image first.' });
+    return;
+  }
+  const timestamp = nowIso();
+  const task = {
+    id: id(),
+    companyId: req.user.companyId,
+    batchId: invoice.batchId || invoice.scanBatchId || '',
+    importSessionId: invoice.importSessionId || '',
+    invoiceGroupId: invoice.invoiceGroupId || '',
+    invoicePageId: '',
+    supplierHint: invoice.supplierName || invoice.supplierId || '',
+    status: 'processing',
+    imagePath: relativePath,
+    filePath,
+    originalName: filename,
+    mimeType: 'image/jpeg',
+    fileSize: fs.statSync(filePath).size,
+    source: 'manual_ai_reprocess',
+    recognitionSource: 'AI Vision',
+    ocrLanguage: '',
+    usedTemplate: 0,
+    usedAI: 1,
+    invoiceId: invoice.serverId || invoice.id,
+    resultJson: '',
+    error: '',
+    retryCount: 0,
+    createdAt: timestamp,
+    updatedAt: timestamp,
+    startedAt: timestamp,
+    completedAt: '',
+    deviceId: req.body.deviceId || 'manual-ai-reprocess'
+  };
+  await upsertRecord('invoice_recognition_tasks', task);
+  const rawResult = await withTimeout(recognizeInvoice(taskFileFromRow(task), {
+    companyId: req.user.companyId,
+    supplierHint: task.supplierHint || '',
+    batchId: task.batchId || '',
+    forceAI: true
+  }), OCR_TIMEOUT_MS, 'AI Vision reprocess');
+  const result = await enhanceRecognizedResultWithLearning(rawResult, req.user.companyId);
+  const saveResult = await saveRecognizedInvoiceFromTask(task, result, { force: true });
+  const completedResult = {
+    ...result,
+    duplicateCheck: saveResult.duplicateCheck,
+    imageHash: saveResult.imageHash || result.imageHash || ''
+  };
+  const completedAt = nowIso();
+  const completedTask = {
+    ...task,
+    status: 'completed',
+    source: completedResult.source || 'ai',
+    recognitionSource: completedResult.recognitionSource || 'AI Vision',
+    ocrLanguage: completedResult.ocrLanguage || OCR_LANGUAGE,
+    usedAI: 1,
+    usedTemplate: completedResult.usedTemplate ? 1 : 0,
+    invoiceId: saveResult.invoiceId || invoice.serverId || invoice.id,
+    resultJson: JSON.stringify(completedResult),
+    completedAt,
+    updatedAt: completedAt
+  };
+  await upsertRecord('invoice_recognition_tasks', completedTask);
+  await mirrorSqlSyncDataToMongo(req.user.companyId, 'invoice-ai-reprocess');
+  res.json({ success: true, invoiceId: completedTask.invoiceId, task: parseTaskRow(completedTask) });
+}));
+
 app.post('/api/invoices/:id/merge', requireAuth, asyncHandler(async (req, res) => {
   const mergeIds = Array.isArray(req.body.mergeIds) ? req.body.mergeIds.filter(Boolean) : [];
   if (mergeIds.length === 0) return res.status(400).json({ error: '请选择要合并的发票' });
@@ -4202,6 +4346,7 @@ app.get('/api/products/search', requireAuth, asyncHandler(async (req, res) => {
       AND ${quoteIdentifier('deletedAt')} IS NULL
       AND COALESCE(${quoteIdentifier('isDiscountLine')}, 0) = 0
       AND COALESCE(${quoteIdentifier('candidateOnly')}, 0) = 0
+      AND COALESCE(${quoteIdentifier('nameQualityStatus')}, 'trusted') != 'needs_review'
   `, [req.user.companyId]);
   const matched = rows.filter((row) => {
     const haystack = `${normalizeProductNameAdvanced(row.rawName || row.productNameOriginal || '')} ${normalizeProductNameAdvanced(row.normalizedName || row.productNameNormalized || '')}`;
@@ -4255,6 +4400,7 @@ app.get('/api/products/:name', requireAuth, asyncHandler(async (req, res) => {
       AND invoice_items.${quoteIdentifier('deletedAt')} IS NULL
       AND COALESCE(invoice_items.${quoteIdentifier('isDiscountLine')}, 0) = 0
       AND COALESCE(invoice_items.${quoteIdentifier('candidateOnly')}, 0) = 0
+      AND COALESCE(invoice_items.${quoteIdentifier('nameQualityStatus')}, 'trusted') != 'needs_review'
     ORDER BY invoice_items.${quoteIdentifier('invoiceDate')} DESC, invoice_items.${quoteIdentifier('createdAt')} DESC
   `, [req.user.companyId]);
   res.json(rows.filter((row) => {

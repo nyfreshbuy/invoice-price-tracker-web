@@ -106,7 +106,7 @@ export default function App() {
     return navigator.onLine ? 'checkingAuth' : 'offlineMode';
   });
   const [authNotice, setAuthNotice] = useState('');
-  const [syncState, setSyncState] = useState({ label: '☁ 已同步', pendingCount: 0, online: navigator.onLine, syncing: false });
+  const [syncState, setSyncState] = useState({ label: '已同步', pendingCount: 0, online: navigator.onLine, syncing: false });
   const [syncingNow, setSyncingNow] = useState(false);
 
   useEffect(() => {
@@ -312,7 +312,6 @@ function AuthStatusBanner({ status, message, onRetry }) {
     </div>
   );
 }
-
 function AuthPageFixed({ onAuthenticated }) {
   const [mode, setMode] = useState('login');
   const [form, setForm] = useState({ companyName: '', username: '', email: '', password: '', confirmPassword: '' });
@@ -382,7 +381,6 @@ function AuthPageFixed({ onAuthenticated }) {
     </div>
   );
 }
-
 function InvitationAcceptPage({ onAuthenticated }) {
   const { token } = useParams();
   const navigate = useNavigate();
@@ -435,65 +433,9 @@ function InvitationAcceptPage({ onAuthenticated }) {
     </div>
   );
 }
-
 function AuthPage({ onAuthenticated }) {
-  const [mode, setMode] = useState('login');
-  const [form, setForm] = useState({ companyName: '', username: '', name: '', email: '', password: '', confirmPassword: '' });
-  const [message, setMessage] = useState('');
-  const [loading, setLoading] = useState(false);
-
-  async function submit(event) {
-    event.preventDefault();
-    setLoading(true);
-    setMessage('');
-    try {
-      if (mode === 'register') {
-        if (form.password !== form.confirmPassword) {
-          setMessage('两次输入的密码不一致');
-          return;
-        }
-        await api.register(form);
-        setMode('login');
-        setMessage('注册成功，请登录');
-        return;
-      }
-      const session = await api.login({ login: form.email, password: form.password });
-      setAuthSession(session);
-      onAuthenticated(getAuthSession());
-      window.dispatchEvent(new Event('auth-change'));
-      markSyncPending();
-    } catch (error) {
-      setMessage(error.message || '登录失败');
-    } finally {
-      setLoading(false);
-    }
-  }
-
-  return (
-    <div className="auth-shell">
-      <form className="auth-card" onSubmit={submit}>
-        <h1>InvoicePriceTracker</h1>
-        <p>云端储存、离线可用、自动同步。</p>
-        <div className="segmented">
-          <button type="button" className={mode === 'login' ? 'active' : ''} onClick={() => setMode('login')}>登录</button>
-          <button type="button" className={mode === 'register' ? 'active' : ''} onClick={() => setMode('register')}>注册账号</button>
-        </div>
-        {mode === 'register' && (
-          <>
-            <label className="field"><span>公司/门店名称</span><input value={form.companyName} onChange={(event) => setForm({ ...form, companyName: event.target.value })} /></label>
-            <label className="field"><span>用户名</span><input autoComplete="username" value={form.username} onChange={(event) => setForm({ ...form, username: event.target.value })} /></label>
-          </>
-        )}
-        <label className="field"><span>{mode === 'login' ? '邮箱/用户名' : '邮箱'}</span><input type={mode === 'login' ? 'text' : 'email'} autoComplete={mode === 'login' ? 'username' : 'email'} value={form.email} onChange={(event) => setForm({ ...form, email: event.target.value })} /></label>
-        <label className="field"><span>密码</span><input type="password" autoComplete={mode === 'login' ? 'current-password' : 'new-password'} value={form.password} onChange={(event) => setForm({ ...form, password: event.target.value })} /></label>
-        {mode === 'register' && <label className="field"><span>确认密码</span><input type="password" autoComplete="new-password" value={form.confirmPassword} onChange={(event) => setForm({ ...form, confirmPassword: event.target.value })} /></label>}
-        {message && <p className="error">{message}</p>}
-        <button className="primary-button" disabled={loading}>{loading ? '处理中...' : mode === 'login' ? '登录' : '注册'}</button>
-      </form>
-    </div>
-  );
+  return <AuthPageFixed onAuthenticated={onAuthenticated} />;
 }
-
 function SyncBar({ state, session, syncingNow, onSyncNow, onLogout }) {
   const busy = Boolean(state.syncing || syncingNow);
   return (
@@ -510,7 +452,7 @@ function SyncBar({ state, session, syncingNow, onSyncNow, onLogout }) {
 
 function HomePage() {
   return (
-    <Page title="InvoicePriceTracker" subtitle="云端储存、本地离线、自动同步">
+    <Page title="InvoicePriceTracker" subtitle="云端存储、本地离线、自动同步">
       <Section title="发票">
         <ActionLink to="/invoices/new" icon={<Camera />} title="新增发票" subtitle="上传后创建后台识别任务，完成后自动保存" />
         <ActionLink to="/invoices/batch" icon={<Upload />} title="批量导入发票" subtitle="多张图片批量创建后台识别任务" />
@@ -528,7 +470,6 @@ function HomePage() {
     </Page>
   );
 }
-
 function InvoiceListPage() {
   const location = useLocation();
   const [items, setItems] = useState([]);
@@ -595,7 +536,6 @@ function InvoiceListPage() {
     </Page>
   );
 }
-
 function RequireAuth({ session, children }) {
   if (!session?.token || !localStorage.getItem('authToken')) {
     return <AuthPageFixed onAuthenticated={() => {}} />;
@@ -683,7 +623,6 @@ function MergeInvoiceDialog({ invoice, onClose, onMerged }) {
     </Dialog>
   );
 }
-
 function BatchImportPage() {
   const navigate = useNavigate();
   const fileInputRef = useRef(null);
@@ -893,7 +832,7 @@ function BatchImportPage() {
     <Page title="批量导入发票" subtitle="一次选择多张图片，后台 OCR/AI 识别并自动保存">
       <Section title="选择图片">
         <div className="field">
-          <span>发票图片</span>
+          <span>鍙戠エ鍥剧墖</span>
           <button type="button" className="primary-button" disabled={saving} onClick={() => fileInputRef.current?.click()}>
             <Upload size={18} />一次选择多张图片
           </button>
@@ -918,9 +857,9 @@ function BatchImportPage() {
         )}
         {batchId && (
           <div className="row-actions">
-            <button type="button" disabled={Boolean(batchAction)} onClick={() => controlBatch('resume')}>{batchAction === 'resume' ? '处理中...' : '继续识别'}</button>
-            <button type="button" disabled={Boolean(batchAction)} onClick={() => controlBatch('pause')}>{batchAction === 'pause' ? '处理中...' : '暂停识别'}</button>
-            <button type="button" className="danger-button" disabled={Boolean(batchAction)} onClick={() => controlBatch('cancel')}>{batchAction === 'cancel' ? '处理中...' : '取消剩余识别'}</button>
+            <button type="button" disabled={Boolean(batchAction)} onClick={() => controlBatch('resume')}>{batchAction === 'resume' ? '澶勭悊涓?..' : '缁х画璇嗗埆'}</button>
+            <button type="button" disabled={Boolean(batchAction)} onClick={() => controlBatch('pause')}>{batchAction === 'pause' ? '澶勭悊涓?..' : '鏆傚仠璇嗗埆'}</button>
+            <button type="button" className="danger-button" disabled={Boolean(batchAction)} onClick={() => controlBatch('cancel')}>{batchAction === 'cancel' ? '澶勭悊涓?..' : '鍙栨秷鍓╀綑璇嗗埆'}</button>
           </div>
         )}
       </Section>
@@ -964,8 +903,8 @@ function BatchImportPage() {
                   <p>识别来源：{entry.result.recognitionSource || sourceLabel(entry.result.source)} · 商品 {entry.parsed.items?.length || 0} 行</p>
                   {(entry.duplicateStatus === 'confirmed' || entry.isDuplicate) && <p className="error">检测到重复发票：{entry.duplicateReason}</p>}
                   {entry.duplicateStatus === 'possible' && !entry.isDuplicate && <p className="warning-text">{entry.possibleDuplicateReason || '疑似重复，请确认。'}</p>}
-              {entry.autoMerged && <p className="success-text">{entry.autoMergeMessage || `已自动合并：发票号 ${entry.parsed.invoiceNo || '-'}，总金额 ${money(entry.result?.duplicateCheck?.invoiceTotal || entry.parsed.totalAmount)}`}</p>}
-              {entry.sameInvoiceGroup && !entry.isDuplicate && !entry.autoMerged && <p className="warning-text">{entry.sameInvoiceGroupReason}</p>}
+                  {entry.autoMerged && <p className="success-text">{entry.autoMergeMessage || `已自动合并：发票号 ${entry.parsed.invoiceNo || '-'}，总金额 ${money(entry.result?.duplicateCheck?.invoiceTotal || entry.parsed.totalAmount)}`}</p>}
+                  {entry.sameInvoiceGroup && !entry.isDuplicate && !entry.autoMerged && <p className="warning-text">{entry.sameInvoiceGroupReason}</p>}
                   {entry.sequenceNote && <p className="hint">{entry.sequenceNote}</p>}
                 </>
               )}
@@ -989,8 +928,7 @@ function BatchImportPage() {
         <button className="primary-button" onClick={saveBatch}>
           <Save size={18} />查看识别记录
         </button>
-      </div>
-    </Page>
+      </div>    </Page>
   );
 }
 
@@ -1005,17 +943,10 @@ function RecognitionTaskListPage() {
     try {
       const data = await api.getRecognitionTasks();
       setTasks(data);
-      const newCompletedTasks = data.filter((task) => task.status === 'completed' && !pulledCompletedTaskIds.current.has(task.id));
-      if (newCompletedTasks.length) {
-        newCompletedTasks.forEach((task) => pulledCompletedTaskIds.current.add(task.id));
-        console.log('[recognition] task list completed tasks:', newCompletedTasks.map((task) => ({
-          taskId: task.id,
-          invoiceId: task.invoiceId || '',
-          supplierName: task.result?.parsed?.supplierName || '',
-          invoiceNo: task.result?.parsed?.invoiceNo || '',
-          totalAmount: task.result?.parsed?.totalAmount || 0
-        })));
-        markSyncPending();
+      const completedWithInvoice = data.filter((task) => task.status === 'completed' && task.invoiceId);
+      if (completedWithInvoice.some((task) => !pulledCompletedTaskIds.current.has(task.id))) {
+        completedWithInvoice.forEach((task) => pulledCompletedTaskIds.current.add(task.id));
+        await pullFromCloud({ full: true });
       }
     } catch (error) {
       setMessage(error.message || '读取识别任务失败');
@@ -1024,10 +955,8 @@ function RecognitionTaskListPage() {
 
   useEffect(() => {
     let cancelled = false;
-    const run = () => {
-      load().catch(() => {
-        if (!cancelled) setMessage('读取识别任务失败');
-      });
+    const run = async () => {
+      if (!cancelled) await load();
     };
     run();
     const timer = window.setInterval(() => {
@@ -1076,16 +1005,19 @@ function RecognitionTaskListPage() {
 
   async function reuploadTaskImage(task, file) {
     if (!file) return;
+    setTaskActions((current) => ({ ...current, [task.id]: 'reupload' }));
     setTaskMessage(task.id, '重新上传处理中...', 'info');
+    const data = new FormData();
+    data.append('image', file);
+    data.append('batchId', task.batchId || generateId());
     try {
-      const data = new FormData();
-      data.append('image', file);
-      if (task.batchId) data.append('batchId', task.batchId);
       const created = await api.createRecognitionTask(data);
       setTaskMessage(task.id, `✓ 已重新上传并创建任务：${created.taskId}`, 'success');
       load();
     } catch (error) {
       setTaskMessage(task.id, error.message || '重新上传失败', 'error');
+    } finally {
+      setTaskActions((current) => ({ ...current, [task.id]: '' }));
     }
   }
 
@@ -1115,57 +1047,48 @@ function RecognitionTaskListPage() {
           const taskMessage = taskMessages[task.id];
           const handled = ['merged', 'duplicated', 'kept'].includes(action);
           return (
-          <div className="row-card" key={task.id}>
-            <div>
-              <h3>{task.originalName || task.id}</h3>
-              <p>状态：{recognitionTaskStatusText(task.status)} · 创建时间 {task.createdAt || '-'}</p>
-              {task.batchId && <p>批次：{task.batchId}</p>}
-              <p>来源：{task.recognitionSource || sourceLabel(task.source)} · 重试 {task.retryCount || 0} 次</p>
-              {task.imagePath && <img className="invoice-preview" src={api.fileUrl(task.imagePath)} alt={task.originalName || task.id} />}
-              {task.result?.parsed && <p>{task.result.parsed.supplierName || '未识别供应商'} · {task.result.parsed.invoiceNo || '无发票号'} · {money(task.result.parsed.totalAmount)}</p>}
-              {task.result?.parsed?.totalDifference > 0.05 && <p className="warning-text">商品明细与发票总额不一致，请检查。差额：{money(task.result.parsed.totalDifference)}</p>}
-              {(task.result?.duplicateCheck?.duplicateStatus === 'confirmed' || task.result?.duplicateCheck?.isDuplicate) && <p className="error">重复发票：{task.result.duplicateCheck.duplicateReason}</p>}
-              {task.result?.duplicateCheck?.duplicateStatus === 'possible' && !task.result?.duplicateCheck?.isDuplicate && <p className="warning-text">{task.result.duplicateCheck.possibleDuplicateReason || '疑似重复，请确认。'}</p>}
-              {task.result?.duplicateCheck?.autoMerged && <p className="success-text">{task.result.duplicateCheck.autoMergeMessage || `已自动合并：发票号 ${task.result?.parsed?.invoiceNo || '-'}，总金额 ${money(task.result.duplicateCheck.invoiceTotal || task.result?.parsed?.totalAmount)}`}</p>}
-              {task.result?.duplicateCheck?.sameInvoiceGroup && !task.result?.duplicateCheck?.isDuplicate && !task.result?.duplicateCheck?.autoMerged && <p className="warning-text">{task.result.duplicateCheck.sameInvoiceGroupReason}</p>}
-              {task.error && <p className="error">{task.error}</p>}
-              {taskMessage?.text && <p className={taskMessage.type === 'error' ? 'error' : taskMessage.type === 'success' ? 'success-text' : 'hint'}>{taskMessage.text}</p>}
+            <div className="row-card" key={task.id}>
+              <div>
+                <h3>{task.originalName || task.id}</h3>
+                <p>状态：{recognitionTaskStatusText(task.status)} · 创建时间 {task.createdAt || '-'}</p>
+                {task.batchId && <p>批次：{task.batchId}</p>}
+                <p>来源：{task.recognitionSource || sourceLabel(task.source)} · 重试 {task.retryCount || 0} 次</p>
+                {task.imagePath && <img className="invoice-preview" src={api.fileUrl(task.imagePath)} alt={task.originalName || task.id} />}
+                {task.result?.parsed && <p>{task.result.parsed.supplierName || '未识别供应商'} · {task.result.parsed.invoiceNo || '无发票号'} · {money(task.result.parsed.totalAmount)}</p>}
+                {task.result?.parsed?.totalDifference > 0.05 && <p className="warning-text">商品明细与发票总额不一致，请检查。差额：{money(task.result.parsed.totalDifference)}</p>}
+                {(task.result?.duplicateCheck?.duplicateStatus === 'confirmed' || task.result?.duplicateCheck?.isDuplicate) && <p className="error">重复发票：{task.result.duplicateCheck.duplicateReason}</p>}
+                {task.result?.duplicateCheck?.duplicateStatus === 'possible' && !task.result?.duplicateCheck?.isDuplicate && <p className="warning-text">{task.result.duplicateCheck.possibleDuplicateReason || '疑似重复，请确认。'}</p>}
+                {task.result?.duplicateCheck?.autoMerged && <p className="success-text">{task.result.duplicateCheck.autoMergeMessage || `已自动合并：发票号 ${task.result?.parsed?.invoiceNo || '-'}，总金额 ${money(task.result.duplicateCheck.invoiceTotal || task.result?.parsed?.totalAmount)}`}</p>}
+                {task.result?.duplicateCheck?.sameInvoiceGroup && !task.result?.duplicateCheck?.isDuplicate && !task.result?.duplicateCheck?.autoMerged && <p className="warning-text">{task.result.duplicateCheck.sameInvoiceGroupReason}</p>}
+                {task.error && <p className="error">{task.error}</p>}
+                {taskMessage?.text && <p className={taskMessage.type === 'error' ? 'error' : taskMessage.type === 'success' ? 'success-text' : 'hint'}>{taskMessage.text}</p>}
+              </div>
+              <div className="row-actions">
+                {task.invoiceId && <Link className="icon-button" to={`/invoices/${task.invoiceId}`}>{task.result?.duplicateCheck?.autoMerged ? '查看合并明细' : '发票'}</Link>}
+                {task.status === 'failed' && <button disabled={Boolean(action)} onClick={() => retry(task.id)}>{action === 'retry' ? '处理中...' : '重新识别'}</button>}
+                {task.status === 'failed' && (
+                  <label className="icon-button">
+                    重新上传图片
+                    <input className="hidden-file-input" type="file" accept="image/*" onChange={(event) => { reuploadTaskImage(task, event.target.files?.[0]); event.target.value = ''; }} />
+                  </label>
+                )}
+                {task.status === 'failed' && <Link className="icon-button" to="/invoices/new">手动编辑</Link>}
+                {task.status === 'completed' && task.result?.duplicateCheck?.isDuplicate && !task.invoiceId && <button disabled={Boolean(action)} onClick={() => forceSave(task.id)}>{action === 'force' ? '处理中...' : '强制保存'}</button>}
+                {task.status === 'completed' && task.result?.duplicateCheck?.sameInvoiceGroup && !task.result?.duplicateCheck?.autoMerged && (
+                  <>
+                    <button className={action === 'merged' ? 'success-button' : ''} disabled={handled || Boolean(action)} onClick={() => decideTask(task.id, 'merge')}>{action === 'merge' ? '合并中...' : action === 'merged' ? '✓ 已合并' : '合并'}</button>
+                    <button className={action === 'duplicated' ? 'danger-button' : ''} disabled={handled || Boolean(action)} onClick={() => decideTask(task.id, 'duplicate')}>{action === 'duplicate' ? '标记中...' : action === 'duplicated' ? '✓ 已标记重复' : '标记重复'}</button>
+                    <button className={action === 'kept' ? 'success-button' : ''} disabled={handled || Boolean(action)} onClick={() => decideTask(task.id, 'independent')}>{action === 'independent' ? '处理中...' : action === 'kept' ? '✓ 已保留' : '保留为独立发票'}</button>
+                  </>
+                )}
+              </div>
             </div>
-            <div className="row-actions">
-              {task.invoiceId && <Link className="icon-button" to={`/invoices/${task.invoiceId}`}>{task.result?.duplicateCheck?.autoMerged ? '查看合并明细' : '发票'}</Link>}
-              {task.status === 'failed' && <button disabled={Boolean(action)} onClick={() => retry(task.id)}>{action === 'retry' ? '处理中...' : '重新识别'}</button>}
-              {task.status === 'failed' && (
-                <label className="icon-button">
-                  重新上传图片
-                  <input
-                    className="hidden-file-input"
-                    type="file"
-                    accept="image/*"
-                    onChange={(event) => {
-                      reuploadTaskImage(task, event.target.files?.[0]);
-                      event.target.value = '';
-                    }}
-                  />
-                </label>
-              )}
-              {task.status === 'failed' && <Link className="icon-button" to="/invoices/new">手动编辑</Link>}
-              {task.status === 'completed' && task.result?.duplicateCheck?.isDuplicate && !task.invoiceId && <button disabled={Boolean(action)} onClick={() => forceSave(task.id)}>{action === 'force' ? '处理中...' : '强制保存'}</button>}
-              {task.status === 'completed' && task.result?.duplicateCheck?.sameInvoiceGroup && !task.result?.duplicateCheck?.autoMerged && (
-                <>
-                  <button className={action === 'merged' ? 'success-button' : ''} disabled={handled || Boolean(action)} onClick={() => decideTask(task.id, 'merge')}>{action === 'merge' ? '合并中...' : action === 'merged' ? '✓ 已合并' : '合并'}</button>
-                  <button className={action === 'duplicated' ? 'danger-button' : ''} disabled={handled || Boolean(action)} onClick={() => decideTask(task.id, 'duplicate')}>{action === 'duplicate' ? '标记中...' : action === 'duplicated' ? '✓ 已标记重复' : '标记重复'}</button>
-                  <button className={action === 'kept' ? 'success-button' : ''} disabled={handled || Boolean(action)} onClick={() => decideTask(task.id, 'independent')}>{action === 'independent' ? '处理中...' : action === 'kept' ? '✓ 已保留' : '保留为独立发票'}</button>
-                </>
-              )}
-            </div>
-          </div>
-        );
+          );
         })}
       </div>
     </Page>
   );
 }
-
 function InvoiceArchivePage() {
   const [q, setQ] = useState('');
   const [tree, setTree] = useState([]);
@@ -1212,7 +1135,6 @@ function InvoiceArchivePage() {
     </Page>
   );
 }
-
 function InvoiceFormPage() {
   const navigate = useNavigate();
   const cameraInputRef = useRef(null);
@@ -1223,31 +1145,23 @@ function InvoiceFormPage() {
     supplierName: '',
     invoiceNo: '',
     invoiceDate: today(),
-    pageNumber: 0,
-    pageCount: 0,
-    invoiceGroupKey: '',
-    invoiceLayoutType: 'normal_invoice',
     totalAmount: 0,
-    ocrText: '',
-    imageId: '',
     imagePath: '',
+    imageId: '',
+    ocrText: '',
+    status: 'PENDING_REVIEW',
+    notes: '',
     items: [emptyItem()]
   });
-  const [saving, setSaving] = useState(false);
-  const [message, setMessage] = useState('');
-  const [ocrStatus, setOcrStatus] = useState('');
-  const [imagePreviewUrl, setImagePreviewUrl] = useState('');
+  const [preview, setPreview] = useState('');
+  const [ocrStatus, setOcrStatus] = useState('未识别');
   const [recognitionTask, setRecognitionTask] = useState(null);
-  const itemTotal = useMemo(() => form.items.reduce((sum, item) => sum + Number(item.totalPrice || 0), 0), [form.items]);
-  const total = Number(form.totalAmount || 0) > 0 ? Number(form.totalAmount) : itemTotal;
-
-  useLocalReload(() => localDb.getSuppliers().then(setSuppliers));
+  const [message, setMessage] = useState('');
+  const [saving, setSaving] = useState(false);
 
   useEffect(() => {
-    return () => {
-      if (imagePreviewUrl) URL.revokeObjectURL(imagePreviewUrl);
-    };
-  }, [imagePreviewUrl]);
+    localDb.getSuppliers().then(setSuppliers);
+  }, []);
 
   useEffect(() => {
     if (!recognitionTask?.id || ['completed', 'failed'].includes(recognitionTask.status)) return undefined;
@@ -1261,18 +1175,9 @@ function InvoiceFormPage() {
         if (task.status === 'completed') {
           applyRecognitionTaskToForm(task);
           setMessage(task.invoiceId ? '识别完成，后端已保存发票。' : '识别完成。');
-          console.log('[recognition] single task completed:', {
-            taskId: task.id,
-            invoiceId: task.invoiceId || '',
-            supplierName: task.result?.parsed?.supplierName || '',
-            invoiceNo: task.result?.parsed?.invoiceNo || '',
-            totalAmount: task.result?.parsed?.totalAmount || 0
-          });
           markSyncPending();
         }
-        if (task.status === 'failed') {
-          setMessage(task.error || '识别失败');
-        }
+        if (task.status === 'failed') setMessage(task.error || '识别失败');
       } catch (error) {
         if (!cancelled) setMessage(error.message || '读取识别任务失败');
       }
@@ -1304,59 +1209,54 @@ function InvoiceFormPage() {
   }
 
   function applyRecognitionTaskToForm(task) {
-    const result = task.result || {};
-    const parsedItems = Array.isArray(result.parsed?.items) ? result.parsed.items.map(normalizeParsedItemForForm) : [];
-    const recognitionSource = result.recognitionSource || sourceLabel(result.source);
+    const parsed = task.result?.parsed || task.result || {};
+    const mappedItems = (parsed.items || []).map((item) => ({
+      ...emptyItem(),
+      id: generateId(),
+      productNameOriginal: item.name || item.productNameOriginal || [item.nameCn, item.nameEn].filter(Boolean).join(' '),
+      productNameNormalized: item.normalizedName || item.productNameNormalized || item.name || '',
+      quantity: Number(item.qty ?? item.quantity ?? 0),
+      unit: item.unit || '',
+      unitPrice: Number(item.unitPrice ?? item.priceEach ?? 0),
+      totalPrice: Number(item.totalPrice ?? item.amount ?? 0),
+      nameConfidence: Number(item.nameConfidence ?? item.itemConfidence ?? 0),
+      nameQualityStatus: item.nameQualityStatus || 'trusted',
+      nameQualityReason: item.nameQualityReason || '',
+      rawOcrLine: item.rawOcrLine || '',
+      itemRecognitionSource: item.itemRecognitionSource || task.result?.source || 'ai',
+      candidateOnly: Boolean(item.candidateOnly || item.nameQualityStatus === 'needs_review')
+    }));
     setForm((current) => ({
       ...current,
-      supplierName: result.parsed?.supplierName || current.supplierName,
-      invoiceNo: result.parsed?.invoiceNo || current.invoiceNo,
-      invoiceDate: normalizeDateInput(result.parsed?.invoiceDate) || '',
-      pageNumber: Number(result.parsed?.pageNumber || current.pageNumber || 0),
-      pageCount: Number(result.parsed?.pageCount || current.pageCount || 0),
-      invoiceGroupKey: result.parsed?.invoiceGroupKey || current.invoiceGroupKey || '',
-      invoiceLayoutType: result.parsed?.invoiceLayoutType || current.invoiceLayoutType || 'normal_invoice',
-      totalAmount: Number(result.parsed?.totalAmount || current.totalAmount || 0),
-      imagePath: result.imagePath || task.imagePath || current.imagePath,
-      ocrText: result.ocrText || current.ocrText,
-      items: parsedItems.length > 0 ? parsedItems : current.items
+      supplierName: parsed.supplierName || current.supplierName,
+      invoiceNo: parsed.invoiceNo || current.invoiceNo,
+      invoiceDate: parsed.invoiceDate || current.invoiceDate,
+      totalAmount: Number(parsed.totalAmount || current.totalAmount || 0),
+      ocrText: task.result?.ocrText || current.ocrText,
+      recognitionSource: task.result?.recognitionSource || task.result?.source || current.recognitionSource,
+      items: mappedItems.length ? mappedItems : current.items
     }));
-    setOcrStatus(`识别完成 · 识别来源：${recognitionSource}`);
   }
 
   async function handleInvoiceImageSelected(file) {
     if (!file) return;
-
-    if (imagePreviewUrl) URL.revokeObjectURL(imagePreviewUrl);
-    setImagePreviewUrl(URL.createObjectURL(file));
     const invoiceId = form.id || generateId();
+    const previewUrl = URL.createObjectURL(file);
+    setPreview(previewUrl);
+    setForm((current) => ({ ...current, id: invoiceId }));
     try {
-      const image = await localDb.saveInvoiceImage({ invoiceId, file, source: 'IndexedDB' });
-      setForm((current) => ({
-        ...current,
-        id: current.id || invoiceId,
-        imageId: image.id,
-        imagePath: `indexeddb:${image.id}`
-      }));
-      console.log('Invoice image saved to IndexedDB', {
-        imageId: image.id,
-        invoiceId,
-        size: image.size,
-        mimeType: image.mimeType
-      });
+      const image = await localDb.saveInvoiceImage(file, { invoiceId, source: 'invoice-upload' });
+      setForm((current) => ({ ...current, id: invoiceId, imageId: image.id, imagePath: `indexeddb:${image.id}` }));
     } catch (error) {
-      console.error('Invoice image save failed', error);
       setMessage(error.message || '图片保存失败，请重新上传。');
       setOcrStatus('图片保存失败');
       return;
     }
-
     if (!navigator.onLine) {
       setOcrStatus('识别失败');
       setMessage('离线模式下 OCR 暂不可用，请先手动录入。');
       return;
     }
-
     setOcrStatus('识别中');
     setMessage('');
     const data = new FormData();
@@ -1364,14 +1264,12 @@ function InvoiceFormPage() {
     if (form.supplierName) data.append('supplierHint', form.supplierName);
     try {
       const created = await api.createRecognitionTask(data);
-      console.log('Recognition task:', created);
       setRecognitionTask(created.task);
       setOcrStatus(`后台识别：${recognitionTaskStatusText(created.task?.status || 'pending')}`);
       setMessage(`已创建后台识别任务：${created.taskId}`);
     } catch (error) {
-      console.error('OCR failed:', error);
       setOcrStatus(`识别失败：${error.message || '未知错误'} · 识别来源：OCR`);
-      setMessage(error.message);
+      setMessage(error.message || '识别失败');
     }
   }
 
@@ -1389,7 +1287,7 @@ function InvoiceFormPage() {
       markSyncPending();
       navigate('/invoices');
     } catch (error) {
-      setMessage(error.message);
+      setMessage(error.message || '保存失败');
     } finally {
       setSaving(false);
     }
@@ -1398,220 +1296,75 @@ function InvoiceFormPage() {
   return (
     <Page title="新增发票" subtitle="上传后创建后台识别任务，完成后自动保存；也可以手动录入。">
       <Section title="发票信息">
-        <label className="field">
-          <span>供应商名称</span>
-          <input list="supplier-list" value={form.supplierName} onChange={(event) => setForm({ ...form, supplierName: event.target.value })} />
-          <datalist id="supplier-list">
-            {suppliers.map((supplier) => <option key={supplier.id} value={supplier.supplierDisplayName || supplier.displayName || supplier.name} />)}
-          </datalist>
-        </label>
+        <label className="field"><span>供应商名称</span><input list="supplier-list" value={form.supplierName} onChange={(event) => setForm({ ...form, supplierName: event.target.value })} /></label>
+        <datalist id="supplier-list">{suppliers.map((supplier) => <option key={supplier.id} value={supplier.supplierDisplayName || supplier.displayName || supplier.name} />)}</datalist>
         <label className="field"><span>发票号</span><input value={form.invoiceNo} onChange={(event) => setForm({ ...form, invoiceNo: event.target.value })} /></label>
-        <label className="field"><span>发票日期</span><input type="date" value={form.invoiceDate} onChange={(event) => setForm({ ...form, invoiceDate: event.target.value })} /></label>
-        <label className="field"><span>发票总金额</span><input type="number" value={form.totalAmount} onChange={(event) => setForm({ ...form, totalAmount: event.target.value })} /></label>
-        <div className="grid-2">
-          <label className="field"><span>页码</span><input type="number" value={form.pageNumber} onChange={(event) => setForm({ ...form, pageNumber: Number(event.target.value) })} /></label>
-          <label className="field"><span>总页数</span><input type="number" value={form.pageCount} onChange={(event) => setForm({ ...form, pageCount: Number(event.target.value) })} /></label>
-          <label className="field"><span>发票分组 Key</span><input value={form.invoiceGroupKey || ''} onChange={(event) => setForm({ ...form, invoiceGroupKey: event.target.value })} /></label>
-          <label className="field">
-            <span>发票版式</span>
-            <select value={form.invoiceLayoutType || 'normal_invoice'} onChange={(event) => setForm({ ...form, invoiceLayoutType: event.target.value })}>
-              <option value="normal_invoice">normal_invoice</option>
-              <option value="printed_catalog_handwritten">printed_catalog_handwritten</option>
-              <option value="multi_page">multi_page</option>
-              <option value="mixed">mixed</option>
-            </select>
-          </label>
-        </div>
-        <div className="field">
-          <span>发票图片/OCR 预留</span>
-          <div className="file-actions">
-            <button type="button" className="secondary-button" onClick={() => cameraInputRef.current?.click()}>
-              <Camera size={16} />拍照识别
-            </button>
-            <button type="button" className="secondary-button" onClick={() => albumInputRef.current?.click()}>
-              <Upload size={16} />从相册选择
-            </button>
-          </div>
-          <input
-            ref={cameraInputRef}
-            className="hidden-file-input"
-            type="file"
-            accept="image/*"
-            capture="environment"
-            onChange={(event) => {
-              handleInvoiceImageSelected(event.target.files?.[0]);
-              event.target.value = '';
-            }}
-          />
-          <input
-            ref={albumInputRef}
-            className="hidden-file-input"
-            type="file"
-            accept="image/*"
-            onChange={(event) => {
-              handleInvoiceImageSelected(event.target.files?.[0]);
-              event.target.value = '';
-            }}
-          />
-          {imagePreviewUrl && <img className="invoice-preview" src={imagePreviewUrl} alt="发票预览" />}
-        </div>
-        <div className="info-row">
-          <span>OCR 状态</span>
-          <strong>{ocrStatus || '未识别'}</strong>
-        </div>
-        {recognitionTask && (
-          <div className="detail-item">
-            <div className="split"><strong>后台识别任务</strong><strong>{recognitionTaskStatusText(recognitionTask.status)}</strong></div>
-            <p>任务 ID：{recognitionTask.id}</p>
-            {recognitionTask.invoiceId && <p>已保存发票：{recognitionTask.invoiceId}</p>}
-            {recognitionTask.result?.parsed && <ConfidenceSummary parsed={recognitionTask.result.parsed} />}
-            {recognitionTask.error && <p className="error">{recognitionTask.error}</p>}
-          </div>
-        )}
-        <label className="field"><span>OCR 原文</span><textarea rows="4" value={form.ocrText} onChange={(event) => setForm({ ...form, ocrText: event.target.value })} /></label>
+        <label className="field"><span>日期</span><input type="date" value={form.invoiceDate} onChange={(event) => setForm({ ...form, invoiceDate: event.target.value })} /></label>
+        <label className="field"><span>总金额</span><input type="number" value={form.totalAmount} onChange={(event) => setForm({ ...form, totalAmount: Number(event.target.value) })} /></label>
       </Section>
-
-      <Section title={`商品明细 · 总金额 ${money(total)}`}>
+      <Section title="上传图片">
+        <div className="row-actions">
+          <button type="button" onClick={() => cameraInputRef.current?.click()}>拍照识别</button>
+          <button type="button" onClick={() => albumInputRef.current?.click()}>从相册选择</button>
+        </div>
+        <input ref={cameraInputRef} className="hidden-file-input" type="file" accept="image/*" capture="environment" onChange={(event) => handleInvoiceImageSelected(event.target.files?.[0])} />
+        <input ref={albumInputRef} className="hidden-file-input" type="file" accept="image/*" onChange={(event) => handleInvoiceImageSelected(event.target.files?.[0])} />
+        {preview && <img className="invoice-preview" src={preview} alt="发票预览" />}
+        <p className="hint">OCR 状态：{ocrStatus}</p>
+        {recognitionTask?.id && <p className="hint">任务 ID：{recognitionTask.id}</p>}
+        {message && <p className={message.includes('失败') ? 'error' : 'success-text'}>{message}</p>}
+      </Section>
+      <Section title={`商品明细 · ${form.items.length} 行`}>
         {form.items.map((item, index) => (
-          <div className="item-editor" key={index}>
-            <div className="item-editor-title">
-              <strong>商品 {index + 1}</strong>
-              <button className="text-danger" onClick={() => setForm({ ...form, items: form.items.filter((_, itemIndex) => itemIndex !== index) })}>删除</button>
-            </div>
-            <label className="field"><span>商品名称</span><input value={item.productNameOriginal} onChange={(event) => updateItem(index, 'productNameOriginal', event.target.value)} /></label>
-            <label className="field"><span>商品标准名</span><input value={item.productNameNormalized} onChange={(event) => updateItem(index, 'productNameNormalized', event.target.value)} /></label>
-            <div className="grid-2">
-              <label className="field"><span>分类</span><input value={item.category} onChange={(event) => updateItem(index, 'category', event.target.value)} /></label>
-              <label className="field"><span>单位</span><input value={item.unit} onChange={(event) => updateItem(index, 'unit', event.target.value)} /></label>
-              <label className="field"><span>数量</span><input type="number" value={item.quantity} onChange={(event) => updateItem(index, 'quantity', event.target.value)} /></label>
-              <label className="field"><span>单价</span><input type="number" value={item.unitPrice} onChange={(event) => updateItem(index, 'unitPrice', event.target.value)} /></label>
-              <label className="field"><span>总价</span><input type="number" value={item.totalPrice} onChange={(event) => updateItem(index, 'totalPrice', event.target.value)} /></label>
-              <label className="field"><span>收费数量</span><input type="number" value={item.chargedQty || 0} onChange={(event) => updateItem(index, 'chargedQty', event.target.value)} /></label>
-              <label className="field"><span>赠品数量</span><input type="number" value={item.freeQty || 0} onChange={(event) => updateItem(index, 'freeQty', event.target.value)} /></label>
-              <label className="field"><span>实际数量</span><input type="number" value={item.actualQty || item.totalQty || 0} onChange={(event) => updateItem(index, 'actualQty', event.target.value)} /></label>
-              <label className="field"><span>分摊组 ID</span><input value={item.promoGroupId || ''} onChange={(event) => updateItem(index, 'promoGroupId', event.target.value)} /></label>
-              <label className="field"><span>分摊组名称</span><input value={item.promoGroupName || ''} onChange={(event) => updateItem(index, 'promoGroupName', event.target.value)} /></label>
-              <label className="field"><span>是否赠品</span><input type="checkbox" checked={Boolean(item.isFreeItem)} onChange={(event) => updateItem(index, 'isFreeItem', event.target.checked)} /></label>
-              <label className="field"><span>候选行不保存</span><input type="checkbox" checked={Boolean(item.candidateOnly)} onChange={(event) => updateItem(index, 'candidateOnly', event.target.checked)} /></label>
-              <label className="field"><span>手写数量</span><input type="checkbox" checked={Boolean(item.isHandwrittenQuantity)} onChange={(event) => updateItem(index, 'isHandwrittenQuantity', event.target.checked)} /></label>
-              <label className="field"><span>手写价格</span><input type="checkbox" checked={Boolean(item.isHandwrittenPrice)} onChange={(event) => updateItem(index, 'isHandwrittenPrice', event.target.checked)} /></label>
-              <label className="field"><span>手写金额</span><input type="checkbox" checked={Boolean(item.isHandwrittenAmount)} onChange={(event) => updateItem(index, 'isHandwrittenAmount', event.target.checked)} /></label>
-              <label className="field"><span>圈选</span><input type="checkbox" checked={Boolean(item.isCircled)} onChange={(event) => updateItem(index, 'isCircled', event.target.checked)} /></label>
-              <label className="field"><span>勾选</span><input type="checkbox" checked={Boolean(item.isChecked)} onChange={(event) => updateItem(index, 'isChecked', event.target.checked)} /></label>
-              <label className="field"><span>赠品原因</span><input value={item.freeReason || ''} onChange={(event) => updateItem(index, 'freeReason', event.target.value)} /></label>
-              <label className="field"><span>备注</span><input value={item.notes} onChange={(event) => updateItem(index, 'notes', event.target.value)} /></label>
-            </div>
+          <div className="detail-item" key={item.id || index}>
+            <label className="field"><span>商品名称</span><input value={item.productNameOriginal || ''} onChange={(event) => updateItem(index, 'productNameOriginal', event.target.value)} /></label>
+            <label className="field"><span>标准名</span><input value={item.productNameNormalized || ''} onChange={(event) => updateItem(index, 'productNameNormalized', event.target.value)} /></label>
+            <label className="field"><span>数量</span><input type="number" value={item.quantity || 0} onChange={(event) => updateItem(index, 'quantity', event.target.value)} /></label>
+            <label className="field"><span>单位</span><input value={item.unit || ''} onChange={(event) => updateItem(index, 'unit', event.target.value)} /></label>
+            <label className="field"><span>单价</span><input type="number" value={item.unitPrice || 0} onChange={(event) => updateItem(index, 'unitPrice', event.target.value)} /></label>
+            <label className="field"><span>总价</span><input type="number" value={item.totalPrice || 0} onChange={(event) => updateItem(index, 'totalPrice', event.target.value)} /></label>
+            {(item.candidateOnly || item.nameQualityStatus === 'needs_review') && <p className="warning-text">待确认/异常商品：不会进入正式商品统计和价格历史。{item.nameQualityReason || ''}</p>}
+            <button type="button" className="danger-button" onClick={() => setForm((current) => ({ ...current, items: current.items.filter((_, itemIndex) => itemIndex !== index) }))}>删除行</button>
           </div>
         ))}
-        <button className="secondary-button" onClick={() => setForm({ ...form, items: [...form.items, emptyItem()] })}><Plus size={16} />新增行</button>
+        <button type="button" onClick={() => setForm((current) => ({ ...current, items: [...current.items, emptyItem()] }))}>新增行</button>
       </Section>
-
-      {message && <p className="error">{message}</p>}
       <div className="sticky-actions">
-        <button className="primary-button" disabled={saving || ['waiting', 'pending', 'processing'].includes(recognitionTask?.status)} onClick={save}><Save size={18} />{recognitionTask?.invoiceId ? '查看已保存发票' : saving ? '保存中...' : '确认并学习'}</button>
+        <button className="primary-button" disabled={saving} onClick={save}><Save size={18} />{saving ? '保存中...' : '保存发票'}</button>
       </div>
     </Page>
   );
 }
-
 function InvoiceDetailPage() {
-  const { id } = useParams();
-  const navigate = useNavigate();
-  const [detail, setDetail] = useState(null);
-
-  useLocalReload(() => localDb.getInvoice(id).then(setDetail), [id], { listenToEvents: false });
-
-  async function remove() {
-    if (!confirm('确认删除这张发票？')) return;
-    await localDb.deleteInvoice(id);
-    markSyncPending();
-    navigate('/invoices');
-  }
-
-  if (!detail) return <Page title="发票详情"><EmptyState text="未找到发票" /></Page>;
-
-  const { invoice, items } = detail;
-  return (
-    <Page title="发票详情" action={<button className="danger-button" onClick={remove}><Trash2 size={16} />删除</button>}>
-      <Section title="发票信息">
-        <Info label="供应商" value={invoice.supplierName || '未命名供应商'} />
-        <Info label="发票号" value={invoice.invoiceNo || '-'} />
-        <Info label="日期" value={invoice.invoiceDate || '-'} />
-        <Info label="总金额" value={money(invoice.totalAmount)} />
-        <Info label="同步状态" value={statusText(invoice.syncStatus)} />
-      </Section>
-      {(invoice.imagePath || invoice.imageUrl || invoice.imageId) && (
-        <Section title="查看原图">
-          <InvoiceImageViewer invoice={invoice} onUpdated={() => localDb.getInvoice(id).then(setDetail)} />
-        </Section>
-      )}
-      <Section title="商品明细">
-        {items.map((item) => (
-          <div className="detail-item" key={item.id}>
-            <strong>{item.productNameOriginal}</strong>
-            <p>标准名：{item.productNameNormalized || '-'}</p>
-            <p>数量 {item.quantity} {item.unit} · 单价 {money(item.unitPrice)} · 总价 {money(item.totalPrice)}</p>
-          </div>
-        ))}
-      </Section>
-      <Section title="查看OCR原文"><pre className="ocr-text">{invoice.ocrText || '无 OCR 内容'}</pre></Section>
-    </Page>
-  );
+  return <InvoiceDetailPageWithGifts />;
 }
-
 function HomeDashboardPage() {
   const [dashboard, setDashboard] = useState(null);
-  const [workflowMetrics, setWorkflowMetrics] = useState({ pending: 0, duplicate: 0, conflict: 0, abnormal: 0 });
-  const session = getAuthSession();
-  const isAdmin = isAdminRole(session?.user?.role || '');
-  useLocalReload(async () => {
-    const [metrics, invoices] = await Promise.all([localDb.getDashboardMetrics(), localDb.getInvoices()]);
-    setDashboard(metrics);
-    setWorkflowMetrics({
-      pending: invoices.filter(isPendingInvoice).length,
-      duplicate: invoices.filter(isDuplicateInvoice).length,
-      conflict: invoices.filter(isConflictInvoice).length,
-      abnormal: invoices.filter(isAbnormalInvoice).length
-    });
-  });
-
+  const load = () => localDb.getDashboardStats().then(setDashboard);
+  useLocalReload(load);
   return (
     <Page title="InvoicePriceTracker" subtitle="采购数据库、供应商数据库、历史价格数据库">
       <Section title="采购仪表盘">
         <div className="metric-grid">
           <Metric label="已确认采购金额" value={money(dashboard?.confirmedPurchaseAmount ?? dashboard?.totalPurchaseAmount)} />
           <Metric label="待确认采购金额" value={money(dashboard?.pendingPurchaseAmount)} to="/invoices?filter=pending" />
-          <Metric label="异常发票金额" value={money(dashboard?.abnormalInvoiceAmount)} to="/invoices?filter=abnormal" />
-          <Metric label="本月已确认金额" value={money(dashboard?.monthConfirmedAmount ?? dashboard?.monthPurchaseAmount)} />
+          <Metric label="异常发票金额" value={money(dashboard?.abnormalPurchaseAmount)} to="/invoices?filter=abnormal" />
+          <Metric label="本月已确认金额" value={money(dashboard?.monthConfirmedAmount ?? dashboard?.monthAmount)} />
           <Metric label="本月待确认金额" value={money(dashboard?.monthPendingAmount)} to="/invoices?filter=pending" />
-          <Metric label="已确认发票数量" value={dashboard?.confirmedInvoiceCount ?? dashboard?.monthInvoiceCount ?? 0} />
-          <Metric label="本月新增供应商" value={dashboard?.monthNewSupplierCount ?? 0} />
-          <Metric label="赠品总价值" value={money(dashboard?.giftValueTotal)} />
-          <Metric label="折扣总金额" value={money(dashboard?.discountTotal)} />
-          <Metric label="异常发票数量" value={dashboard?.abnormalInvoiceCount ?? 0} to="/invoices?filter=abnormal" />
+          <Metric label="已确认发票数量" value={dashboard?.confirmedInvoiceCount ?? dashboard?.invoiceCount ?? 0} />
           <Metric label="待确认发票数量" value={dashboard?.pendingInvoiceCount ?? 0} to="/invoices?filter=pending" />
-          <Metric label="重复发票数量" value={workflowMetrics.duplicate} to="/invoices?filter=duplicate" />
-          <Metric label="同步冲突数量" value={workflowMetrics.conflict} to="/invoices?filter=conflict" />
+          <Metric label="异常发票数量" value={dashboard?.abnormalInvoiceCount ?? 0} to="/invoices?filter=abnormal" />
+          <Metric label="重复发票数量" value={dashboard?.duplicateInvoiceCount ?? 0} to="/invoices?filter=duplicate" />
+          <Metric label="同步冲突数量" value={dashboard?.conflictInvoiceCount ?? 0} to="/invoices?filter=conflict" />
+          <Metric label="供应商数量" value={dashboard?.supplierCount ?? 0} />
+          <Metric label="赠品总价值" value={money(dashboard?.giftValue)} />
+          <Metric label="折扣总金额" value={money(dashboard?.discountAmount)} />
         </div>
       </Section>
-      <Section title="采购中心">
-        <ActionLink to="/invoices/new" icon={<Camera />} title="发票扫描" subtitle="拍照或相册上传，后台识别并保存" />
-        <ActionLink to="/invoices" icon={<FileText />} title="发票列表" subtitle="按日期查看所有历史发票" />
-        <ActionLink to="/supplier-center" icon={<Building2 />} title="供应商查询" subtitle="搜索供应商、电话、联系人、发票号和商品名" />
-        <ActionLink to="/products" icon={<PackageSearch />} title="商品价格查询" subtitle="查看商品历史价格和供应商对比" />
-        <ActionLink to="/analytics" icon={<BarChart3 />} title="采购分析" subtitle="排名、月度采购、最低价和价格趋势" />
-      </Section>
-      <Section title="识别与管理">
-        <ActionLink to="/invoices/batch" icon={<Upload />} title="批量导入发票" subtitle="多张图片队列识别" />
-        <ActionLink to="/recognition-tasks" icon={<RefreshCw />} title="识别记录/任务列表" subtitle="查看后台 AI 识别状态和历史结果" />
-        <ActionLink to="/suppliers" icon={<Building2 />} title="供应商管理" subtitle="维护供应商和模板" />
-        {isAdmin && <ActionLink to="/settings" icon={<UserPlus />} title="成员管理" subtitle="管理员直接创建、停用和重置成员账号" />}
-        <ActionLink to="/settings" icon={<Settings />} title="设置/导出" subtitle="查看本地统计、导出云端 CSV/Excel" />
-      </Section>
+      <HomePage />
     </Page>
   );
 }
-
 function InvoiceDetailPageWithGifts() {
   const { id } = useParams();
   const navigate = useNavigate();
@@ -1619,7 +1372,6 @@ function InvoiceDetailPageWithGifts() {
   const [recognitionTask, setRecognitionTask] = useState(null);
   const [editingInvoice, setEditingInvoice] = useState(false);
   const [editingItem, setEditingItem] = useState(null);
-  const [editingPromoGroups, setEditingPromoGroups] = useState(false);
   const [detailMessage, setDetailMessage] = useState('');
   const [operation, setOperation] = useState('');
 
@@ -1671,21 +1423,6 @@ function InvoiceDetailPageWithGifts() {
     setEditingItem(null);
   }
 
-  async function savePromoGroups(nextItems) {
-    setOperation('save-promo');
-    try {
-      const updated = await localDb.updateInvoiceItems(id, nextItems, detail?.items || []);
-      setDetail(updated);
-      setEditingPromoGroups(false);
-      setDetailMessage('✓ 赠品分摊已保存');
-      markSyncPending();
-    } catch (error) {
-      alert(`操作失败：${error.message || '保存分摊失败'}`);
-    } finally {
-      setOperation('');
-    }
-  }
-
   async function saveInvoiceFields(fields) {
     setOperation('save-invoice');
     try {
@@ -1702,7 +1439,7 @@ function InvoiceDetailPageWithGifts() {
   }
 
   async function confirmInvoice(status = 'CONFIRMED') {
-    setOperation(status === 'ABNORMAL_HANDLED' ? 'handle-abnormal' : 'confirm-invoice');
+    setOperation('confirm-invoice');
     try {
       const updated = await localDb.confirmInvoice(id, status);
       setDetail(updated);
@@ -1743,14 +1480,31 @@ function InvoiceDetailPageWithGifts() {
     }
   }
 
+  async function reprocessWithAI() {
+    setOperation('reprocess-ai');
+    setDetailMessage('AI Vision 重新识别中...');
+    try {
+      await api.reprocessInvoiceWithAI(id);
+      await pullFromCloud({ full: true });
+      const updated = await localDb.getInvoice(id);
+      setDetail(updated);
+      setDetailMessage('✓ AI Vision 重新识别完成，商品明细已更新');
+    } catch (error) {
+      setDetailMessage('');
+      alert(`操作失败：${error.message || 'AI Vision 重新识别失败'}`);
+    } finally {
+      setOperation('');
+    }
+  }
+
   if (!detail) return <Page title="发票详情"><EmptyState text="未找到发票" /></Page>;
 
   const { invoice, items, discounts = [], mergedInvoices = [] } = detail;
   const giftSummary = summarizeGiftAccounting(items);
-  const promoGroups = summarizePromoGroups(items);
   const finalSavedResult = { invoice, items, discounts, mergedInvoices };
+
   return (
-    <Page title="发票详情" action={<div className="row-actions"><button type="button" onClick={() => setEditingInvoice(true)}>编辑发票</button><button className="danger-button" onClick={remove}><Trash2 size={16} />删除</button></div>}>
+    <Page title="发票详情" action={<div className="row-actions"><button type="button" disabled={operation === 'reprocess-ai'} onClick={reprocessWithAI}>{operation === 'reprocess-ai' ? 'AI 识别中...' : '使用 AI Vision 重新识别'}</button><button type="button" onClick={() => setEditingInvoice(true)}>编辑发票</button><button className="danger-button" onClick={remove}><Trash2 size={16} />删除</button></div>}>
       {detailMessage && <p className="success-text">{detailMessage}</p>}
       <Section title="处理状态">
         <div className="status-row">
@@ -1769,86 +1523,37 @@ function InvoiceDetailPageWithGifts() {
           </div>
         )}
         {(isPendingInvoice(invoice) || isAbnormalInvoice(invoice)) && (
-          <>
-            {isAbnormalInvoice(invoice) && (
-              <p className="warning-text">异常原因：{invoice.recognitionWarnings || '商品明细总额与发票总额不一致'}{Number(invoice.totalDifference || 0) > 0.05 ? `，差额：${money(invoice.totalDifference)}` : ''}</p>
-            )}
           <div className="row-actions">
-            <button className="primary-button success-button" type="button" disabled={operation === 'confirm-invoice'} onClick={() => confirmInvoice('CONFIRMED')}>
-              {operation === 'confirm-invoice' ? '处理中...' : '确认发票'}
-            </button>
-            {isAbnormalInvoice(invoice) && <button className="secondary-button" type="button" onClick={() => setEditingInvoice(true)}>编辑发票</button>}
-            {isAbnormalInvoice(invoice) && <button className="secondary-button" type="button" disabled={!items.length} onClick={() => items[0] && setEditingItem(items[0])}>编辑商品明细</button>}
-            {isAbnormalInvoice(invoice) && <button className="primary-button success-button" type="button" disabled={operation === 'confirm-invoice'} onClick={() => confirmInvoice('CONFIRMED')}>{operation === 'confirm-invoice' ? '处理中...' : '确认无误'}</button>}
+            <button className="primary-button success-button" type="button" disabled={operation === 'confirm-invoice'} onClick={() => confirmInvoice('CONFIRMED')}>{operation === 'confirm-invoice' ? '处理中...' : '确认发票'}</button>
+            <button className="secondary-button" type="button" onClick={() => setEditingInvoice(true)}>编辑发票</button>
+            <button className="secondary-button" type="button" disabled={!items.length} onClick={() => items[0] && setEditingItem(items[0])}>编辑商品明细</button>
           </div>
-          </>
         )}
       </Section>
       <Section title="发票信息">
-        <Info label="供应商" value={invoice.supplierName || '未命名供应商'} />
+        <Info label="供应商" value={invoice.supplierName || '-'} />
         <Info label="发票号" value={invoice.invoiceNo || '-'} />
         <Info label="日期" value={invoice.invoiceDate || '-'} />
         <Info label="总金额" value={money(invoice.totalAmount)} />
-        <Info label="页码" value={invoice.pageCount ? `${invoice.pageNumber || '-'} / ${invoice.pageCount}` : (invoice.pageNumber || '-')} />
-        <Info label="发票版式" value={invoice.invoiceLayoutType || 'normal_invoice'} />
-        <Info label="多页合并" value={Number(invoice.isMergedInvoice || 0) ? '是' : '否'} />
-        <Info label="AI/OCR 来源" value={sourceLabel(invoice.recognitionSource)} />
-        <Info label="usedTemplate" value={recognitionTask?.usedTemplate || recognitionTask?.result?.usedTemplate ? "yes" : "no"} />
-        <Info label="usedCorrection" value={items.some((item) => Number(item.correctedByUser || 0)) ? "yes" : "no"} />
-        <Info label="confidence" value={recognitionTask?.result?.parsed?.confidence ?? recognitionTask?.result?.confidence ?? "-"} />
-        <Info label="重复状态" value={duplicateStatusLabel(invoice.duplicateStatus)} />
-        <Info label="发票状态" value={invoice.status || '-'} />
-        <Info label="同步状态" value={statusText(invoice.syncStatus)} />
+        <Info label="识别来源" value={sourceLabel(invoice.recognitionSource)} />
       </Section>
-      {invoice.recognitionWarnings && <Section title="识别警告"><p className="warning-text">{invoice.recognitionWarnings}</p></Section>}
-      {giftSummary.freeQty > 0 && (
-        <Section title="赠品核算">
-          <Info label="收费数量" value={numberText(giftSummary.chargedQty)} />
-          <Info label="免费数量" value={numberText(giftSummary.freeQty)} />
-          <Info label="实际数量" value={numberText(giftSummary.totalQty)} />
-          <Info label="发票金额" value={money(giftSummary.invoiceAmount)} />
-          <Info label="原始单价" value={money(giftSummary.originalUnitCost)} />
-          <Info label="实际成本" value={money(giftSummary.effectiveUnitCost)} />
-          <button className="secondary-button" type="button" onClick={() => setEditingPromoGroups(true)}>编辑分摊组</button>
-        </Section>
-      )}
-      {promoGroups.length > 0 && (
-        <Section title="赠品分摊组">
-          <button className="secondary-button" type="button" onClick={() => setEditingPromoGroups(true)}>人工分摊</button>
-          {promoGroups.map((group) => (
-            <div className="detail-item" key={group.id}>
-              <strong>{group.name}</strong>
-              <p>规则：{group.rule || '-'}</p>
-              <p>收费数量 {numberText(group.chargedQty)} · 免费数量 {numberText(group.freeQty)} · 实际数量 {numberText(group.actualQty)}</p>
-              <p>发票金额 {money(group.invoiceAmount)} · 原始单价 {money(group.originalUnitCost)} · 实际摊薄成本 {money(group.effectiveUnitCost)}</p>
-            </div>
-          ))}
-        </Section>
-      )}
-      {discounts.length > 0 && (
-        <Section title="折扣">
-          {discounts.map((discount) => (
-            <div className="detail-item" key={discount.id}>
-              <strong>{discount.discountName}</strong>
-              <p>金额 {money(discount.amount)} · 类型 {discount.discountType || 'unknown'}</p>
-              <p>{discount.appliedToProductIds ? `已关联商品：${discount.appliedToProductIds}` : '未确定关联商品，请人工分配折扣'}</p>
-            </div>
-          ))}
-        </Section>
-      )}
       <Section title="查看原图">
         <InvoiceImageViewer invoice={invoice} onUpdated={loadDetail} />
+        {mergedInvoices.map((mergedInvoice, index) => (
+          <div className="detail-item" key={mergedInvoice.id}>
+            <strong>页面 {index + 2} · {mergedInvoice.invoiceNo || '-'}</strong>
+            <InvoiceImageViewer invoice={mergedInvoice} onUpdated={loadDetail} />
+          </div>
+        ))}
       </Section>
-      {mergedInvoices.length > 0 && (
-        <Section title="合并页面原图">
-          {mergedInvoices.map((mergedInvoice, index) => (
-            <div className="detail-item" key={mergedInvoice.id}>
-              <strong>页面 {index + 2} · {mergedInvoice.invoiceNo || '-'}</strong>
-              <InvoiceImageViewer invoice={mergedInvoice} onUpdated={loadDetail} />
-            </div>
-          ))}
-        </Section>
-      )}
+      <Section title="赠品核算">
+        <Info label="收费数量" value={numberText(giftSummary.chargedQty)} />
+        <Info label="免费数量" value={numberText(giftSummary.freeQty)} />
+        <Info label="实际数量" value={numberText(giftSummary.totalQty)} />
+        <Info label="发票金额" value={money(giftSummary.invoiceAmount)} />
+        <Info label="原始单价" value={money(giftSummary.originalUnitCost)} />
+        <Info label="实际成本" value={money(giftSummary.effectiveUnitCost)} />
+      </Section>
       <Section title="商品明细">
         {items.map((item) => (
           <div className="detail-item" key={item.id}>
@@ -1856,8 +1561,9 @@ function InvoiceDetailPageWithGifts() {
             <p>标准名：{item.productNameNormalized || '-'}</p>
             <p>数量 {numberText(item.quantity)} {item.unit} · 原单价 {money(item.unitPrice)} · 总价 {money(item.totalPrice)}</p>
             <p>是否赠品：{Number(item.isFreeItem || 0) ? `是（${item.freeReason || '免费行'}）` : '否'} · 收费数量 {numberText(item.chargedQty)} · 免费数量 {numberText(item.freeQty)} · 实际数量 {numberText(item.totalQty)}</p>
-            <p>分摊组：{item.promoGroupName || '-'} · {item.promoGroupRule || '-'}</p>
             <p>原始单价 {money(item.originalUnitCost || item.unitPrice)} · 实际摊薄成本 {money(item.effectiveUnitCost || item.unitPrice)} · 折后实际成本 {money(item.discountedEffectiveUnitCost || item.effectiveUnitCost || item.unitPrice)}</p>
+            {(Number(item.candidateOnly || 0) || item.nameQualityStatus === 'needs_review') && <p className="warning-text">待确认/异常商品：不会进入正式商品统计和价格历史。{item.nameQualityReason || ''}</p>}
+            {item.itemRecognitionSource && <p className="hint">商品名来源：{sourceLabel(item.itemRecognitionSource)} · 置信度 {Number(item.nameConfidence || 0).toFixed(2)}</p>}
           </div>
         ))}
       </Section>
@@ -1870,31 +1576,11 @@ function InvoiceDetailPageWithGifts() {
       <CollapsibleSection title="查看最终保存结果">
         <pre className="ocr-text">{JSON.stringify(finalSavedResult, null, 2)}</pre>
       </CollapsibleSection>
-      {editingItem && (
-        <InvoiceItemEditDialog
-          item={editingItem}
-          onClose={() => setEditingItem(null)}
-          onSave={saveEditedItem}
-        />
-      )}
-      {editingInvoice && (
-        <InvoiceEditDialog
-          invoice={invoice}
-          onClose={() => setEditingInvoice(false)}
-          onSave={saveInvoiceFields}
-        />
-      )}
-      {editingPromoGroups && (
-        <PromoAllocationDialog
-          items={items}
-          onClose={() => setEditingPromoGroups(false)}
-          onSave={savePromoGroups}
-        />
-      )}
+      {editingItem && <InvoiceItemEditDialog item={editingItem} onClose={() => setEditingItem(null)} onSave={saveEditedItem} />}
+      {editingInvoice && <InvoiceEditDialog invoice={invoice} onClose={() => setEditingInvoice(false)} onSave={saveInvoiceFields} />}
     </Page>
   );
 }
-
 function InvoiceEditDialog({ invoice, onClose, onSave }) {
   const [saving, setSaving] = useState(false);
   const [form, setForm] = useState(() => ({
@@ -1903,39 +1589,19 @@ function InvoiceEditDialog({ invoice, onClose, onSave }) {
     supplierNameEnglish: invoice.supplierNameEnglish || '',
     supplierDisplayName: invoice.supplierDisplayName || invoice.supplierName || '',
     invoiceNo: invoice.invoiceNo || '',
-    invoiceDate: normalizeDateInput(invoice.invoiceDate) || '',
+    invoiceDate: invoice.invoiceDate || today(),
     totalAmount: Number(invoice.totalAmount || 0),
-    subtotal: Number(invoice.subtotal || invoice.totalAmount || 0),
-    tax: Number(invoice.tax || 0),
-    recognitionWarnings: invoice.recognitionWarnings || ''
+    notes: invoice.notes || ''
   }));
-
-  function update(field, value) {
-    setForm((current) => ({ ...current, [field]: value }));
-  }
-
+  const update = (field, value) => setForm((current) => ({ ...current, [field]: value }));
   async function save() {
     setSaving(true);
     try {
-      await onSave({
-        supplierName: form.supplierName,
-        supplierNameChinese: form.supplierNameChinese,
-        supplierNameEnglish: form.supplierNameEnglish,
-        supplierDisplayName: form.supplierDisplayName,
-        invoiceNo: form.invoiceNo,
-        invoiceDate: normalizeDateInput(form.invoiceDate) || '',
-        totalAmount: Number(form.totalAmount || 0),
-        subtotal: Number(form.subtotal || form.totalAmount || 0),
-        tax: Number(form.tax || 0),
-        recognitionWarnings: form.recognitionWarnings
-      });
-    } catch (error) {
-      alert(`保存失败：${error.message || '未知错误'}`);
+      await onSave(form);
     } finally {
       setSaving(false);
     }
   }
-
   return (
     <Dialog title="编辑发票" onClose={onClose}>
       <label className="field"><span>供应商</span><input value={form.supplierName} onChange={(event) => update('supplierName', event.target.value)} /></label>
@@ -1946,101 +1612,66 @@ function InvoiceEditDialog({ invoice, onClose, onSave }) {
       <label className="field"><span>日期</span><input type="date" value={form.invoiceDate} onChange={(event) => update('invoiceDate', event.target.value)} /></label>
       <div className="grid-2">
         <label className="field"><span>金额</span><input type="number" value={form.totalAmount} onChange={(event) => update('totalAmount', event.target.value)} /></label>
-        <label className="field"><span>Subtotal</span><input type="number" value={form.subtotal} onChange={(event) => update('subtotal', event.target.value)} /></label>
-        <label className="field"><span>Tax</span><input type="number" value={form.tax} onChange={(event) => update('tax', event.target.value)} /></label>
       </div>
-      <label className="field"><span>识别警告</span><textarea rows="3" value={form.recognitionWarnings} onChange={(event) => update('recognitionWarnings', event.target.value)} /></label>
-      <div className="dialog-actions sticky-dialog-actions">
+      <label className="field"><span>备注</span><textarea value={form.notes} onChange={(event) => update('notes', event.target.value)} /></label>
+      <div className="dialog-actions sticky-actions">
         <button className="secondary-button" type="button" disabled={saving} onClick={onClose}>取消</button>
         <button className="primary-button success-button" type="button" disabled={saving} onClick={save}>{saving ? '处理中...' : '保存发票'}</button>
       </div>
     </Dialog>
   );
 }
-
 function InvoiceItemEditDialog({ item, onClose, onSave }) {
   const [saving, setSaving] = useState(false);
-  const [form, setForm] = useState(() => ({
-    ...emptyItem(),
-    ...item,
-    nameCn: item.nameCn || '',
-    nameEn: item.nameEn || '',
-    spec: item.spec || '',
-    quantity: Number(item.quantity || 0),
-    unitPrice: Number(item.unitPrice || 0),
-    totalPrice: Number(item.totalPrice || 0),
-    isFreeItem: Boolean(Number(item.isFreeItem || 0)),
-    isDiscountLine: Boolean(Number(item.isDiscountLine || 0)),
-    candidateOnly: Boolean(Number(item.candidateOnly || 0)),
-    participatesInGiftAllocation: Boolean(Number(item.participatesInGiftAllocation || 0))
-  }));
-
-  function update(field, value) {
+  const [form, setForm] = useState(() => ({ ...emptyItem(), ...item, correctedByUser: true }));
+  const calculatedTotal = Number(form.quantity || 0) * Number(form.unitPrice || 0);
+  const mismatch = Math.abs(calculatedTotal - Number(form.totalPrice || 0)) > 0.05;
+  const update = (field, value) => {
     setForm((current) => {
-      const next = { ...current, [field]: value };
+      const next = { ...current, [field]: value, correctedByUser: true };
       if (field === 'quantity' || field === 'unitPrice') {
         next.totalPrice = Number(next.quantity || 0) * Number(next.unitPrice || 0);
       }
       if (field === 'chargedQty' || field === 'freeQty') {
-        next.actualQty = Number(next.chargedQty || 0) + Number(next.freeQty || 0);
-        next.totalQty = next.actualQty;
+        next.totalQty = Number(next.chargedQty || 0) + Number(next.freeQty || 0);
+        next.actualQty = next.totalQty;
       }
-      if (field === 'totalPrice' || field === 'quantity' || field === 'unitPrice' || field === 'chargedQty' || field === 'freeQty') {
-        const actualQty = Number(next.actualQty || next.totalQty || next.quantity || 0);
-        next.effectiveUnitCost = actualQty > 0 ? Number(next.totalPrice || 0) / actualQty : 0;
+      const actualQty = Number(next.actualQty || next.totalQty || next.quantity || 0);
+      if (actualQty > 0) next.effectiveUnitCost = Number(next.totalPrice || 0) / actualQty;
+      if (field === 'productNameOriginal') {
+        next.productNameNormalized = value;
+        next.nameQualityStatus = 'trusted';
+        next.nameQualityReason = '';
+        next.nameConfidence = 1;
+        next.candidateOnly = false;
       }
       return next;
     });
-  }
-
+  };
   async function save() {
-    const name = form.productNameOriginal || [form.nameCn, form.nameEn].filter(Boolean).join(' ');
     setSaving(true);
     try {
-      await onSave({
-        ...form,
-        productNameOriginal: name,
-        productNameNormalized: form.productNameNormalized || name,
-        quantity: Number(form.quantity || 0),
-        unitPrice: Number(form.unitPrice || 0),
-        totalPrice: Number(form.totalPrice || 0),
-        chargedQty: Number(form.chargedQty || 0),
-        freeQty: Number(form.freeQty || 0),
-        actualQty: Number(form.actualQty || form.totalQty || form.quantity || 0),
-        totalQty: Number(form.actualQty || form.totalQty || form.quantity || 0),
-        effectiveUnitCost: Number(form.effectiveUnitCost || 0),
-        isFreeItem: form.isFreeItem ? 1 : 0,
-        isDiscountLine: form.isDiscountLine ? 1 : 0,
-        candidateOnly: form.candidateOnly ? 1 : 0,
-        participatesInGiftAllocation: form.participatesInGiftAllocation ? 1 : 0,
-        correctedByUser: 1
-      });
-    } catch (error) {
-      alert(`保存失败：${error.message || '未知错误'}`);
+      await onSave(form);
     } finally {
       setSaving(false);
     }
   }
-
-  const calculatedTotal = Number(form.quantity || 0) * Number(form.unitPrice || 0);
-  const mismatch = Math.abs(calculatedTotal - Number(form.totalPrice || 0)) > 0.01;
-
   return (
     <Dialog title="编辑商品明细" onClose={onClose}>
-      <div className="item-editor">
+      <div className="compact-form">
         <label className="field"><span>商品名称</span><input value={form.productNameOriginal || ''} onChange={(event) => update('productNameOriginal', event.target.value)} /></label>
         <label className="field"><span>品牌</span><input value={form.brand || ''} onChange={(event) => update('brand', event.target.value)} /></label>
-        <label className="field"><span>规格</span><input value={form.spec || ''} onChange={(event) => update('spec', event.target.value)} /></label>
+        <label className="field"><span>规格</span><input value={form.spec || form.size || ''} onChange={(event) => update('spec', event.target.value)} /></label>
         <div className="grid-2">
           <label className="field"><span>数量</span><input type="number" value={form.quantity || 0} onChange={(event) => update('quantity', event.target.value)} /></label>
           <label className="field"><span>单价</span><input type="number" value={form.unitPrice || 0} onChange={(event) => update('unitPrice', event.target.value)} /></label>
-          <label className="field"><span>金额</span><input type="number" value={form.totalPrice || 0} onChange={(event) => update('totalPrice', event.target.value)} /></label>
+          <label className="field"><span>总价</span><input type="number" value={form.totalPrice || 0} onChange={(event) => update('totalPrice', event.target.value)} /></label>
           <label className="field"><span>收费数量</span><input type="number" value={form.chargedQty || 0} onChange={(event) => update('chargedQty', event.target.value)} /></label>
           <label className="field"><span>免费数量</span><input type="number" value={form.freeQty || 0} onChange={(event) => update('freeQty', event.target.value)} /></label>
           <label className="field"><span>实际数量</span><input type="number" value={form.actualQty || form.totalQty || 0} onChange={(event) => update('actualQty', event.target.value)} /></label>
           <label className="field"><span>实际摊薄成本</span><input type="number" value={Number(form.effectiveUnitCost || 0).toFixed(2)} onChange={(event) => update('effectiveUnitCost', event.target.value)} /></label>
         </div>
-        {mismatch && <p className="warning-text">总价与 数量 × 单价 不一致，计算值：{money(calculatedTotal)}。允许保存。</p>}
+        {mismatch && <p className="warning-text">总价与 数量 x 单价 不一致，计算值：{money(calculatedTotal)}。允许保存。</p>}
         <SwitchField label="是否赠品" checked={Boolean(form.isFreeItem)} onChange={(checked) => update('isFreeItem', checked)} />
         <SwitchField label="是否折扣行" checked={Boolean(form.isDiscountLine)} onChange={(checked) => update('isDiscountLine', checked)} />
         <SwitchField label="备注/候选行不计入价格" checked={Boolean(form.candidateOnly)} onChange={(checked) => update('candidateOnly', checked)} />
@@ -2051,129 +1682,82 @@ function InvoiceItemEditDialog({ item, onClose, onSave }) {
           <label className="field"><span>单位</span><input value={form.unit || ''} onChange={(event) => update('unit', event.target.value)} /></label>
           <label className="field"><span>分摊组 ID</span><input value={form.promoGroupId || ''} onChange={(event) => update('promoGroupId', event.target.value)} /></label>
           <label className="field"><span>分摊组名称</span><input value={form.promoGroupName || ''} onChange={(event) => update('promoGroupName', event.target.value)} /></label>
-          <SwitchField label="圈选" checked={Boolean(form.isCircled)} onChange={(checked) => update('isCircled', checked)} />
-          <SwitchField label="勾选" checked={Boolean(form.isChecked)} onChange={(checked) => update('isChecked', checked)} />
+          <label className="field"><span>OCR 原文行</span><input value={form.rawOcrLine || ''} onChange={(event) => update('rawOcrLine', event.target.value)} /></label>
         </CollapsibleSection>
       </div>
-      <div className="dialog-actions sticky-dialog-actions">
+      <div className="dialog-actions sticky-actions">
         <button className="secondary-button" type="button" disabled={saving} onClick={onClose}>取消</button>
-        <button className="primary-button success-button" type="button" disabled={saving} onClick={save}>{saving ? '处理中...' : '保存商品'}</button>
+        <button className="primary-button success-button" type="button" disabled={saving} onClick={save}>{saving ? '保存中...' : '保存商品'}</button>
       </div>
     </Dialog>
   );
 }
-
 function PromoAllocationDialog({ items, onClose, onSave }) {
   const [saving, setSaving] = useState(false);
-  const [rows, setRows] = useState(() => items.map((item) => ({
-    ...item,
-    participatesInGiftAllocation: Boolean(Number(item.participatesInGiftAllocation || 0) || item.promoGroupId || item.isFreeItem),
-    promoGroupName: item.promoGroupName || 'Manual Promo Group',
-    chargedQty: Number(item.chargedQty || 0),
-    freeQty: Number(item.freeQty || 0),
-    actualQty: Number(item.actualQty || item.totalQty || item.quantity || 0),
-    originalUnitCost: Number(item.originalUnitCost || item.unitPrice || 0),
-    effectiveUnitCost: Number(item.effectiveUnitCost || item.unitPrice || 0)
-  })));
-
-  function updateRow(idValue, field, value) {
+  const [rows, setRows] = useState(() => items.map((item) => ({ ...item })));
+  const update = (id, field, value) => {
     setRows((current) => current.map((row) => {
-      if (row.id !== idValue) return row;
-      const next = { ...row, [field]: value };
+      if (row.id !== id) return row;
+      const next = { ...row, [field]: value, correctedByUser: true };
       if (field === 'chargedQty' || field === 'freeQty') {
-        next.actualQty = Number(next.chargedQty || 0) + Number(next.freeQty || 0);
+        next.totalQty = Number(next.chargedQty || 0) + Number(next.freeQty || 0);
+        next.actualQty = next.totalQty;
       }
-      if (field === 'totalPrice' || field === 'chargedQty' || field === 'freeQty' || field === 'actualQty') {
-        const actualQty = Number(next.actualQty || 0);
-        next.effectiveUnitCost = actualQty > 0 ? Number(next.totalPrice || 0) / actualQty : 0;
-      }
+      const actualQty = Number(next.actualQty || next.totalQty || next.quantity || 0);
+      if (actualQty > 0) next.effectiveUnitCost = Number(next.totalPrice || 0) / actualQty;
       return next;
     }));
-  }
-
+  };
   async function save() {
     setSaving(true);
     try {
-      await onSave(rows.map((row) => {
-        const groupName = String(row.promoGroupName || '').trim();
-        const participates = Boolean(row.participatesInGiftAllocation);
-        return {
-          ...row,
-          promoGroupId: participates ? groupName.toLowerCase().replace(/[^a-z0-9\u3400-\u9fff]+/g, '-') : '',
-          promoGroupName: participates ? groupName : '',
-          promoGroupRule: participates ? 'manual allocation' : '',
-          participatesInGiftAllocation: participates ? 1 : 0,
-          chargedQty: Number(row.chargedQty || 0),
-          freeQty: Number(row.freeQty || 0),
-          totalQty: Number(row.actualQty || 0),
-          actualQty: Number(row.actualQty || 0),
-          originalUnitCost: Number(row.originalUnitCost || 0),
-          effectiveUnitCost: Number(row.effectiveUnitCost || 0),
-          manualCostOverride: 1,
-          correctedByUser: 1
-        };
-      }));
-    } catch (error) {
-      alert(`操作失败：${error.message || '保存分摊失败'}`);
+      await onSave(rows);
     } finally {
       setSaving(false);
     }
   }
-
   return (
     <Dialog title="编辑赠品分摊组" onClose={onClose}>
       <div className="card-list">
         {rows.map((row) => (
           <div className="detail-item" key={row.id}>
-            <strong>{row.productNameOriginal || row.rawName}</strong>
-            <SwitchField label="加入分摊组" checked={Boolean(row.participatesInGiftAllocation)} onChange={(checked) => updateRow(row.id, 'participatesInGiftAllocation', checked)} />
-            <label className="field"><span>分摊组名称</span><input value={row.promoGroupName || ''} onChange={(event) => updateRow(row.id, 'promoGroupName', event.target.value)} /></label>
-            <div className="grid-2">
-              <label className="field"><span>收费数量</span><input type="number" value={row.chargedQty || 0} onChange={(event) => updateRow(row.id, 'chargedQty', event.target.value)} /></label>
-              <label className="field"><span>免费数量</span><input type="number" value={row.freeQty || 0} onChange={(event) => updateRow(row.id, 'freeQty', event.target.value)} /></label>
-              <label className="field"><span>实际数量</span><input type="number" value={row.actualQty || 0} onChange={(event) => updateRow(row.id, 'actualQty', event.target.value)} /></label>
-              <label className="field"><span>发票金额</span><input type="number" value={row.totalPrice || 0} onChange={(event) => updateRow(row.id, 'totalPrice', event.target.value)} /></label>
-              <label className="field"><span>原始单价</span><input type="number" value={row.originalUnitCost || 0} onChange={(event) => updateRow(row.id, 'originalUnitCost', event.target.value)} /></label>
-              <label className="field"><span>实际摊薄成本</span><input type="number" value={row.effectiveUnitCost || 0} onChange={(event) => updateRow(row.id, 'effectiveUnitCost', event.target.value)} /></label>
-            </div>
+            <strong>{row.productNameOriginal}</strong>
+            <label className="field"><span>分摊组名称</span><input value={row.promoGroupName || ''} onChange={(event) => update(row.id, 'promoGroupName', event.target.value)} /></label>
+            <label className="field"><span>收费数量</span><input type="number" value={row.chargedQty || 0} onChange={(event) => update(row.id, 'chargedQty', event.target.value)} /></label>
+            <label className="field"><span>免费数量</span><input type="number" value={row.freeQty || 0} onChange={(event) => update(row.id, 'freeQty', event.target.value)} /></label>
+            <label className="field"><span>实际数量</span><input type="number" value={row.actualQty || row.totalQty || 0} onChange={(event) => update(row.id, 'actualQty', event.target.value)} /></label>
+            <label className="field"><span>发票金额</span><input type="number" value={row.totalPrice || 0} onChange={(event) => update(row.id, 'totalPrice', event.target.value)} /></label>
+            <label className="field"><span>原始单价</span><input type="number" value={row.originalUnitCost || row.unitPrice || 0} onChange={(event) => update(row.id, 'originalUnitCost', event.target.value)} /></label>
+            <label className="field"><span>实际摊薄成本</span><input type="number" value={Number(row.effectiveUnitCost || 0).toFixed(2)} onChange={(event) => update(row.id, 'effectiveUnitCost', event.target.value)} /></label>
           </div>
         ))}
       </div>
-      <div className="dialog-actions sticky-dialog-actions">
+      <div className="dialog-actions sticky-actions">
         <button className="secondary-button" type="button" disabled={saving} onClick={onClose}>取消</button>
         <button className="primary-button success-button" type="button" disabled={saving} onClick={save}>{saving ? '保存中...' : '保存分摊'}</button>
       </div>
     </Dialog>
   );
 }
-
 function ProductSearchPage() {
   const [q, setQ] = useState('');
   const [results, setResults] = useState([]);
-  const [searched, setSearched] = useState(false);
-  useLocalReload(() => localDb.searchProducts(q).then(setResults), [q]);
-
-  async function search(event) {
-    event?.preventDefault();
-    setSearched(true);
-    setResults(await localDb.searchProducts(q));
-  }
-
+  const load = () => localDb.searchProducts(q).then(setResults);
+  useLocalReload(load, [q]);
   return (
-    <Page title="商品价格查询" subtitle="查询优先读取本地 IndexedDB">
-      <form className="search-bar" onSubmit={search}>
-        <input placeholder="输入商品名称" value={q} onChange={(event) => setQ(event.target.value)} />
-        <button><Search size={18} />搜索</button>
-      </form>
-      {!q.trim() && <p className="hint">默认显示最近 20 个购买商品。</p>}
-      {searched && results.length === 0 && <EmptyState text="暂无结果" />}
+    <Page title="商品价格查询" subtitle="优先查询本地 IndexedDB；异常商品不会进入正式价格统计。">
+      <Section title="搜索">
+        <label className="field"><span>商品名称</span><input value={q} onChange={(event) => setQ(event.target.value)} placeholder="千页豆腐 / Rice Chips / ITOEN" /></label>
+        {!q && <p className="hint">未输入关键词时显示最近 20 个购买商品。</p>}
+      </Section>
+      {results.length === 0 && <EmptyState text="暂无商品记录" />}
       <div className="card-list">
         {results.map((item) => (
-          <Link className="row-card" to={`/products/${encodeURIComponent(item.standardName)}`} key={item.standardName}>
+          <Link className="row-card" to={`/products/${encodeURIComponent(item.productNameNormalized || item.name || item.productNameOriginal)}`} key={item.productNameNormalized || item.name || item.productNameOriginal}>
             <div>
-              <h3>{item.standardName}</h3>
-              <p>最近 {money(item.recentPrice)} · 最低 {money(item.minPrice)} · 最高 {money(item.maxPrice)}</p>
-              <p>均价 {money(item.averagePrice)} · 最近供应商 {item.recentSupplierName || '-'} · 最近采购 {item.recentPurchaseDate} · {item.recordCount} 条</p>
+              <h3>{item.productNameNormalized || item.name || item.productNameOriginal}</h3>
+              <p>最近价格 {money(item.recentPrice)} · 最低价 {money(item.minPrice)} · 最高价 {money(item.maxPrice)}</p>
+              <p>均价 {money(item.averagePrice)} · 最近供应商 {item.recentSupplierName || '-'} · 最近采购 {item.recentPurchaseDate || '-'} · {item.recordCount || 0} 条</p>
               {item.pendingCount > 0 && <p className="warning-text">{item.pendingCount} 条价格来自待确认/异常发票</p>}
             </div>
             <ChevronRight />
@@ -2183,27 +1767,23 @@ function ProductSearchPage() {
     </Page>
   );
 }
-
 function ProductDetailPage() {
   const { name } = useParams();
-  const decoded = decodeURIComponent(name);
-  const [records, setRecords] = useState([]);
-  const [supplierCompare, setSupplierCompare] = useState([]);
-
-  useLocalReload(async () => {
-    setRecords(await localDb.getProduct(decoded));
-    setSupplierCompare(await localDb.compareProductSuppliers(decoded));
-  }, [decoded]);
-
+  const decoded = decodeURIComponent(name || '');
+  const [detail, setDetail] = useState(null);
+  const load = () => localDb.getProductDetail(decoded).then(setDetail);
+  useLocalReload(load, [decoded]);
+  if (!detail) return <Page title="商品详情"><EmptyState text="暂无记录" /></Page>;
+  const records = detail.records || [];
+  const supplierCompare = detail.supplierCompare || [];
   return (
-    <Page title="商品详情" subtitle={decoded}>
+    <Page title={detail.standardName || decoded} subtitle="按 productId / normalizedName / alias 匹配历史价格">
       <Section title="供应商价格对比">
         {supplierCompare.length === 0 && <EmptyState text="暂无供应商价格记录" />}
         {supplierCompare.map((row) => (
-          <div className="detail-item" key={row.supplierId}>
+          <div className="detail-item" key={row.supplierId || row.supplierName}>
             <div className="split"><strong>{row.supplierName}</strong><strong>{money(row.minPrice)}</strong></div>
-            <p>最近价格 {money(row.recentPrice)} · 最低价格 {money(row.minPrice)} · 最近采购 {row.recentPurchaseDate || '-'}</p>
-            <p>采购记录 {row.recordCount} 条</p>
+            <p>最近价格 {money(row.recentPrice)} · 历史最低 {money(row.minPrice)} · 记录 {row.count || 0} 条</p>
           </div>
         ))}
       </Section>
@@ -2211,42 +1791,38 @@ function ProductDetailPage() {
         {records.length === 0 && <EmptyState text="暂无采购记录" />}
         {records.map((record) => (
           <div className="detail-item" key={record.id}>
-            <div className="split"><strong>{record.invoiceDate}</strong><strong>{money(record.discountedEffectiveUnitCost || record.effectiveUnitCost || record.unitPrice)}</strong></div>
-            <p>{record.supplierName || '未命名供应商'}</p>
-            <p>原始名：{record.productNameOriginal}</p>
-            <p>原始单价 {money(record.unitPrice)} · 实际摊薄成本 {money(record.effectiveUnitCost || record.unitPrice)} · 折后实际成本 {money(record.discountedEffectiveUnitCost || record.effectiveUnitCost || record.unitPrice)}</p>
-            <p>数量 {record.quantity} {record.unit} · 总价 {money(record.totalPrice)} · 赠品数量 {numberText(record.freeQty || 0)} · 折扣 {money(record.discountAmount || 0)} · 是否赠品 {Number(record.isFreeItem || 0) ? '是' : '否'} · 发票号 {record.invoiceNo || '-'}</p>
-            <p>分摊组：{record.promoGroupName || '-'} · {record.promoGroupRule || '-'}</p>
-            {record.invoiceRecordId && <Link className="secondary-button" to={`/invoices/${encodeURIComponent(record.invoiceRecordId)}`}>查看发票/图片</Link>}
+            <div className="split"><strong>{record.invoiceDate}</strong><strong>{money(record.effectiveUnitCost || record.unitPrice)}</strong></div>
+            <p>{record.supplierName} · 发票 {record.invoiceNo || '-'}</p>
+            <p>原始名称：{record.productNameOriginal}</p>
+            <p>数量 {numberText(record.quantity)} {record.unit || ''} · 原始单价 {money(record.unitPrice)} · 实际摊薄成本 {money(record.effectiveUnitCost || record.unitPrice)}</p>
+            <p>赠品 {Number(record.isFreeItem || 0) ? '是' : '否'} · 分摊组 {record.promoGroupName || '-'}</p>
+            {record.invoiceId && <Link to={`/invoices/${record.invoiceId}`}>查看完整发票</Link>}
           </div>
         ))}
       </Section>
     </Page>
   );
 }
-
 function SupplierCenterPage() {
   const [q, setQ] = useState('');
-  const [suppliers, setSuppliers] = useState([]);
-
-  const load = () => localDb.getSupplierCenter(q).then(setSuppliers);
+  const [rows, setRows] = useState([]);
+  const load = () => localDb.searchSupplierCenter(q).then(setRows);
   useLocalReload(load, [q]);
-
   return (
     <Page title="供应商查询中心" subtitle="按供应商、电话、联系人、发票号、商品名称搜索">
       <form className="search-bar" onSubmit={(event) => event.preventDefault()}>
         <input placeholder="输入供应商/电话/联系人/发票号/商品名" value={q} onChange={(event) => setQ(event.target.value)} />
         <button type="button"><Search size={18} />搜索</button>
       </form>
+      {rows.length === 0 && <EmptyState text="暂无供应商采购数据" />}
       <div className="card-list">
-        {suppliers.length === 0 && <EmptyState text="暂无供应商采购数据" />}
-        {suppliers.map((supplier) => (
-          <Link className="row-card" to={`/suppliers/${encodeURIComponent(supplier.id)}`} key={supplier.id}>
+        {rows.map((row) => (
+          <Link className="row-card" key={row.id} to={`/suppliers/${row.id}`}>
             <div>
-              <h3>{supplier.supplierDisplayName || supplier.displayName || supplier.name || '未命名供应商'}</h3>
-              <p>累计采购 {money(supplier.totalPurchaseAmount)} · 发票 {supplier.invoiceCount} 张 · SKU {supplier.skuCount}</p>
-              <p>最近采购 {supplier.recentPurchaseDate || '-'} · 最近金额 {money(supplier.recentPurchaseAmount)}</p>
-              <p>赠品数量 {numberText(supplier.freeQtyTotal)} · 折扣 {money(supplier.discountTotal)} · 异常 {supplier.abnormalInvoiceCount}</p>
+              <h3>{row.displayName || row.name}</h3>
+              <p>累计采购 {money(row.totalAmount)} · 发票 {row.invoiceCount || 0} 张 · SKU {row.skuCount || 0}</p>
+              <p>最近采购 {row.lastPurchaseDate || '-'} · 最近金额 {money(row.lastPurchaseAmount)}</p>
+              <p>赠品数量 {numberText(row.freeQty)} · 折扣 {money(row.discountAmount)} · 异常 {row.abnormalInvoiceCount || 0}</p>
             </div>
             <ChevronRight />
           </Link>
@@ -2255,100 +1831,75 @@ function SupplierCenterPage() {
     </Page>
   );
 }
-
 function SupplierDetailPage() {
   const { id } = useParams();
   const [detail, setDetail] = useState(null);
-  const [editing, setEditing] = useState(null);
-
   const load = () => localDb.getSupplierDetail(id).then(setDetail);
   useLocalReload(load, [id]);
-
-  async function saveSupplier(data) {
-    await localDb.saveSupplier(data);
-    setEditing(null);
-    markSyncPending();
-    load();
-  }
-
   if (!detail) return <Page title="供应商详情"><EmptyState text="未找到供应商" /></Page>;
   const { supplier, stats } = detail;
   return (
-    <Page title="供应商详情" subtitle={supplier.supplierDisplayName || supplier.displayName || supplier.name || '未命名供应商'} action={<button type="button" onClick={() => setEditing(supplier)}>编辑供应商</button>}>
+    <Page title={supplier.displayName || supplier.name} subtitle="供应商采购统计">
       <Section title="基本信息">
-        <Info label="中文公司名" value={supplier.supplierNameChinese || '-'} />
-        <Info label="英文公司名" value={supplier.supplierNameEnglish || '-'} />
-        <Info label="供应商名称" value={supplier.supplierDisplayName || supplier.displayName || supplier.name || '-'} />
-        <Info label="联系人" value={supplier.contactName || '-'} />
+        <Info label="联系人" value={supplier.contact || supplier.phone || '-'} />
         <Info label="电话" value={supplier.phone || '-'} />
         <Info label="地址" value={supplier.address || '-'} />
         <Info label="备注" value={supplier.notes || '-'} />
       </Section>
       <Section title="统计信息">
-        <Info label="总采购金额" value={money(stats.totalPurchaseAmount)} />
-        <Info label="总采购数量" value={numberText(stats.totalPurchaseQty)} />
-        <Info label="总发票数量" value={stats.invoiceCount} />
-        <Info label="平均订单金额" value={money(stats.averageOrderAmount)} />
-        <Info label="最近采购日期" value={stats.recentPurchaseDate || '-'} />
-        <Info label="最近采购金额" value={money(stats.recentPurchaseAmount)} />
+        <Info label="总采购金额" value={money(stats?.totalAmount)} />
+        <Info label="总采购数量" value={numberText(stats?.totalQty)} />
+        <Info label="总发票数量" value={stats?.invoiceCount || 0} />
+        <Info label="平均订单金额" value={money(stats?.averageOrderAmount)} />
+        <Info label="最近采购日期" value={stats?.lastPurchaseDate || '-'} />
       </Section>
-      <Section title="供应商采购管理">
-        <ActionLink to={`/suppliers/${encodeURIComponent(id)}/invoices`} icon={<FileText />} title="历史发票" subtitle="筛选并查看该供应商所有发票" />
-        <ActionLink to={`/suppliers/${encodeURIComponent(id)}/products`} icon={<ShoppingCart />} title="采购商品" subtitle="查看该供应商商品价格、次数、数量" />
-      </Section>
-      {editing && <SupplierDialog supplier={editing} onClose={() => setEditing(null)} onSave={saveSupplier} />}
+      <div className="row-actions">
+        <Link className="icon-button" to={`/suppliers/${id}/invoices`}>历史发票</Link>
+        <Link className="icon-button" to={`/suppliers/${id}/products`}>采购商品</Link>
+      </div>
     </Page>
   );
 }
-
 function SupplierProductsPage() {
   const { id } = useParams();
-  const [sortBy, setSortBy] = useState('recent');
+  const [sort, setSort] = useState('recent');
   const [rows, setRows] = useState([]);
-
-  useLocalReload(() => localDb.getSupplierProducts(id, sortBy).then(setRows), [id, sortBy]);
-
+  const load = () => localDb.getSupplierProducts(id, sort).then(setRows);
+  useLocalReload(load, [id, sort]);
   return (
     <Page title="供应商采购商品">
       <Section title="排序">
         <div className="segmented-control">
           {[
             ['recent', '最近采购'],
-            ['minPrice', '最低价'],
-            ['maxPrice', '最高价'],
+            ['min', '最低价'],
+            ['max', '最高价'],
             ['count', '采购次数'],
-            ['quantity', '采购数量']
-          ].map(([value, label]) => (
-            <button key={value} className={sortBy === value ? 'active' : ''} onClick={() => setSortBy(value)}>{label}</button>
-          ))}
+            ['qty', '采购数量']
+          ].map(([key, label]) => <button key={key} className={sort === key ? 'active' : ''} onClick={() => setSort(key)}>{label}</button>)}
         </div>
       </Section>
-      <Section title="采购商品">
-        {rows.length === 0 && <EmptyState text="暂无采购商品" />}
-        {rows.map((row) => (
-          <div className="detail-item" key={row.productKey}>
-            <div className="split"><strong>{row.productName}</strong><strong>{money(row.recentPrice)}</strong></div>
-            <p>最低 {money(row.minPrice)} · 最高 {money(row.maxPrice)} · 平均 {money(row.averagePrice)}</p>
-            <p>采购次数 {row.purchaseCount} · 总数量 {numberText(row.totalQty)} · 最近采购 {row.recentPurchaseDate || '-'}</p>
-          </div>
-        ))}
-      </Section>
+      {rows.length === 0 && <EmptyState text="暂无采购商品记录" />}
+      {rows.map((row) => (
+        <div className="detail-item" key={row.productId || row.productNameNormalized}>
+          <div className="split"><strong>{row.productNameNormalized}</strong><strong>{money(row.recentPrice)}</strong></div>
+          <p>最低 {money(row.minPrice)} · 最高 {money(row.maxPrice)} · 平均 {money(row.averagePrice)}</p>
+          <p>次数 {row.purchaseCount || 0} · 数量 {numberText(row.totalQty)} · 最近 {row.lastPurchaseDate || '-'}</p>
+        </div>
+      ))}
     </Page>
   );
 }
-
 function PurchaseAnalysisPage() {
-  const [analytics, setAnalytics] = useState({ supplierRanking: [], productRanking: [], monthly: [], lowestPrices: [] });
-
-  useLocalReload(() => localDb.getPurchaseAnalytics().then(setAnalytics));
-
-  const priceTrendRows = analytics.lowestPrices.slice(0, 8);
-
+  const [analytics, setAnalytics] = useState(null);
+  const load = () => localDb.getPurchaseAnalytics().then(setAnalytics);
+  useLocalReload(load);
+  if (!analytics) return <Page title="采购分析"><EmptyState text="正在读取本地分析数据" /></Page>;
   return (
-    <Page title="采购分析" subtitle="从本地 IndexedDB 汇总采购金额、商品数量、月度趋势和历史最低价">
-      {analytics.pendingOrAbnormalCount > 0 && analytics.supplierRanking.length === 0 && (
-        <Section title="需要先处理发票">
-          <p className="warning-text">当前有 {analytics.pendingOrAbnormalCount} 张待确认/异常发票，确认后会进入正式采购分析。</p>
+    <Page title="采购分析">
+      {(analytics.pendingInvoiceCount > 0 || analytics.abnormalInvoiceCount > 0) && (
+        <Section title="待处理数据">
+          <p className="warning-text">当前有 {analytics.pendingInvoiceCount || 0} 张待确认发票、{analytics.abnormalInvoiceCount || 0} 张异常发票，确认后会进入正式采购分析。</p>
           <div className="row-actions">
             <Link className="secondary-button" to="/invoices?filter=pending">查看待确认发票</Link>
             <Link className="secondary-button" to="/invoices?filter=abnormal">查看异常发票</Link>
@@ -2360,77 +1911,50 @@ function PurchaseAnalysisPage() {
         {analytics.supplierRanking.slice(0, 20).map((row) => (
           <div className="detail-item" key={row.supplierName}>
             <div className="split"><strong>{row.supplierName}</strong><strong>{money(row.amount)}</strong></div>
-            <p>采购次数 {row.count} · 平均订单金额 {money(row.averageOrderAmount)}</p>
+            <p>采购次数 {row.count || 0} · 平均订单 {money(row.averageOrderAmount)}</p>
           </div>
         ))}
       </Section>
       <Section title="商品采购排名">
-        {analytics.productRanking.length === 0 && <EmptyState text="暂无商品采购数据" />}
         {analytics.productRanking.slice(0, 20).map((row) => (
-          <div className="detail-item" key={row.productName}>
-            <div className="split"><strong>{row.productName}</strong><strong>{money(row.amount)}</strong></div>
-            <p>采购数量 {numberText(row.quantity)}</p>
+          <div className="detail-item" key={row.productNameNormalized}>
+            <div className="split"><strong>{row.productNameNormalized}</strong><strong>{numberText(row.quantity)}</strong></div>
+            <p>采购金额 {money(row.amount)}</p>
           </div>
         ))}
       </Section>
       <Section title="月度采购分析">
-        {analytics.monthly.length === 0 && <EmptyState text="暂无月度数据" />}
-        {analytics.monthly.map((row) => (
-          <div className="detail-item" key={row.month}>
-            <div className="split"><strong>{row.month}</strong><strong>{money(row.amount)}</strong></div>
-            <p>采购数量 {numberText(row.quantity)}</p>
-          </div>
-        ))}
-      </Section>
-      <Section title="价格趋势图">
-        {priceTrendRows.length === 0 && <EmptyState text="暂无价格趋势数据" />}
-        <div className="trend-list">
-          {priceTrendRows.map((row) => (
-            <div className="trend-row" key={`${row.productName}-${row.invoiceDate}`}>
-              <span>{row.productName}</span>
-              <strong>{money(row.price)}</strong>
-            </div>
-          ))}
-        </div>
+        {analytics.monthly.map((row) => <Info key={row.month} label={row.month} value={`${money(row.amount)} / ${numberText(row.quantity)}`} />)}
       </Section>
       <Section title="最低采购价分析">
-        {analytics.lowestPrices.length === 0 && <EmptyState text="暂无最低价数据" />}
-        {analytics.lowestPrices.slice(0, 30).map((row) => (
-          <div className="detail-item" key={`${row.productName}-${row.invoiceId}`}>
-            <div className="split"><strong>{row.productName}</strong><strong>{money(row.price)}</strong></div>
-            <p>{row.supplierName} · {row.invoiceDate || '-'} · 发票 {row.invoiceNo || '-'}</p>
-            {row.invoiceId && <Link className="secondary-button" to={`/invoices/${encodeURIComponent(row.invoiceId)}`}>查看发票</Link>}
+        {analytics.lowestPrices.slice(0, 20).map((row) => (
+          <div className="detail-item" key={`${row.productNameNormalized}-${row.invoiceId}`}>
+            <div className="split"><strong>{row.productNameNormalized}</strong><strong>{money(row.unitPrice)}</strong></div>
+            <p>{row.supplierName} · {row.invoiceDate} · 发票 {row.invoiceNo || '-'}</p>
           </div>
         ))}
       </Section>
     </Page>
   );
 }
-
 function SupplierPage() {
   const [suppliers, setSuppliers] = useState([]);
   const [editing, setEditing] = useState(null);
-  const [templateSupplier, setTemplateSupplier] = useState(null);
-  const [mergeSupplier, setMergeSupplier] = useState(null);
-  const [message, setMessage] = useState('');
-
+  const [merging, setMerging] = useState(null);
   const load = () => localDb.getSuppliers().then(setSuppliers);
   useLocalReload(load);
-
-  async function saveSupplier(data) {
-    await localDb.saveSupplier(data);
+  async function saveSupplier() {
+    await localDb.saveSupplier(editing);
+    markSyncPending();
     setEditing(null);
+    load();
+  }
+  async function removeSupplier(id) {
+    if (!confirm('删除供应商？')) return;
+    await localDb.deleteSupplier(id);
     markSyncPending();
     load();
   }
-
-  async function deleteSupplier(supplier) {
-    if (!confirm(`删除供应商「${supplier.supplierDisplayName || supplier.displayName || supplier.name}」？`)) return;
-    await localDb.deleteSupplier(supplier);
-    markSyncPending();
-    load();
-  }
-
   return (
     <Page title="供应商管理" action={<button className="icon-button" onClick={() => setEditing({ ...emptySupplier })}><Plus size={18} />新增</button>}>
       <div className="card-list">
@@ -2438,33 +1962,37 @@ function SupplierPage() {
         {suppliers.map((supplier) => (
           <div className="row-card" key={supplier.id}>
             <div>
-              <h3>{supplier.supplierDisplayName || supplier.displayName || supplier.name || '未命名供应商'}</h3>
-              <p>{supplier.phone || '无电话'} · {supplier.email || '无邮箱'} · {statusText(supplier.syncStatus)}</p>
+              <h3>{supplier.supplierDisplayName || supplier.displayName || supplier.name}</h3>
+              <p>{supplier.phone || '-'} · {supplier.email || '-'}</p>
+              {supplier.suspectedDuplicateOf && <p className="warning-text">疑似重复供应商：{supplier.suspectedDuplicateOf}</p>}
             </div>
             <div className="row-actions">
-              <Link to={`/suppliers/${encodeURIComponent(supplier.id)}`}>详情</Link>
-              <Link to={`/suppliers/${encodeURIComponent(supplier.id)}/invoices`}>历史发票</Link>
-              <button onClick={() => setMergeSupplier(supplier)}>合并</button>
-              <button onClick={() => setTemplateSupplier(supplier)}>模板</button>
-              <button onClick={() => setEditing(supplier)}>编辑</button>
-              <button className="text-danger" onClick={() => deleteSupplier(supplier)}>删除</button>
+              <Link to={`/suppliers/${supplier.id}`}>详情</Link>
+              <Link to={`/suppliers/${supplier.id}/template`}>模板</Link>
+              <button type="button" onClick={() => setMerging(supplier)}>合并</button>
+              <button type="button" onClick={() => setEditing(supplier)}>编辑</button>
+              <button type="button" className="danger-button" onClick={() => removeSupplier(supplier.id)}>删除</button>
             </div>
           </div>
         ))}
       </div>
-      {editing && <SupplierDialog supplier={editing} onClose={() => setEditing(null)} onSave={saveSupplier} />}
-      {templateSupplier && <TemplateDialog supplier={templateSupplier} onClose={() => setTemplateSupplier(null)} />}
-      {mergeSupplier && <MergeSupplierDialog supplier={mergeSupplier} suppliers={suppliers} onClose={() => setMergeSupplier(null)} onMerged={() => { setMergeSupplier(null); load(); }} />}
+      {editing && (
+        <Dialog title="供应商" onClose={() => setEditing(null)}>
+          {['name', 'displayName', 'supplierNameChinese', 'supplierNameEnglish', 'phone', 'email', 'address', 'notes'].map((field) => (
+            <label className="field" key={field}><span>{field}</span><input value={editing[field] || ''} onChange={(event) => setEditing({ ...editing, [field]: event.target.value })} /></label>
+          ))}
+          <button className="primary-button" onClick={saveSupplier}>保存</button>
+        </Dialog>
+      )}
+      {merging && <MergeSupplierDialog supplier={merging} suppliers={suppliers} onClose={() => setMerging(null)} onMerged={() => { setMerging(null); load(); }} />}
     </Page>
   );
 }
-
 function MergeSupplierDialog({ supplier, suppliers, onClose, onMerged }) {
   const [targetId, setTargetId] = useState('');
   const [message, setMessage] = useState('');
   const [loading, setLoading] = useState(false);
-  const candidates = suppliers.filter((entry) => entry.id !== supplier.id);
-
+  const options = suppliers.filter((entry) => entry.id !== supplier.id && !entry.mergedIntoSupplierId);
   async function merge() {
     if (!targetId) {
       setMessage('请选择目标供应商');
@@ -2473,246 +2001,168 @@ function MergeSupplierDialog({ supplier, suppliers, onClose, onMerged }) {
     setLoading(true);
     setMessage('合并中...');
     try {
-      if (navigator.onLine) {
-        await api.mergeSupplier(supplier.id, targetId);
-      } else {
-        await localDb.mergeSuppliers(supplier.id, targetId);
-      }
+      await localDb.mergeSuppliers(supplier.id, targetId);
       markSyncPending();
-      setMessage('合并成功');
+      setMessage('✓ 已合并供应商');
       onMerged?.();
     } catch (error) {
-      setMessage(error.message || '合并失败');
+      setMessage(error.message || '合并供应商失败');
     } finally {
       setLoading(false);
     }
   }
-
   return (
     <Dialog title="合并供应商" onClose={onClose}>
-      <Section title="源供应商">
-        <Info label="名称" value={supplier.supplierDisplayName || supplier.displayName || supplier.name || '-'} />
-        <Info label="标准名" value={supplier.normalizedName || '-'} />
-      </Section>
-      <Section title="目标供应商">
-        <label className="field">
-          <span>合并到</span>
-          <select value={targetId} onChange={(event) => setTargetId(event.target.value)}>
-            <option value="">请选择目标供应商</option>
-            {candidates.map((candidate) => (
-              <option key={candidate.id} value={candidate.id}>{candidate.supplierDisplayName || candidate.displayName || candidate.name}</option>
-            ))}
-          </select>
-        </label>
-        {message && <p className={message.includes('失败') ? 'error' : 'hint'}>{message}</p>}
-      </Section>
+      <p>当前供应商：{supplier.supplierDisplayName || supplier.displayName || supplier.name}</p>
+      <label className="field">
+        <span>目标供应商</span>
+        <select value={targetId} onChange={(event) => setTargetId(event.target.value)}>
+          <option value="">请选择</option>
+          {options.map((option) => <option key={option.id} value={option.id}>{option.supplierDisplayName || option.displayName || option.name}</option>)}
+        </select>
+      </label>
+      {message && <p className={message.includes('失败') ? 'error' : 'success-text'}>{message}</p>}
       <div className="dialog-actions">
-        <button className="secondary-button" disabled={loading} onClick={onClose}>取消</button>
-        <button className="primary-button" disabled={loading || !targetId} onClick={merge}>{loading ? '合并中...' : '确认合并'}</button>
+        <button type="button" className="secondary-button" disabled={loading} onClick={onClose}>取消</button>
+        <button type="button" className="primary-button" disabled={loading} onClick={merge}>{loading ? '合并中...' : '确认合并'}</button>
       </div>
     </Dialog>
   );
 }
-
 function SupplierInvoiceHistoryPage() {
   const { id } = useParams();
-  const [filters, setFilters] = useState({ dateFrom: '', dateTo: '', invoiceNo: '', totalAmount: '', amountMin: '', amountMax: '', hasGifts: false, hasDiscounts: false, hasWarnings: false, isMultipage: false });
-  const [rows, setRows] = useState([]);
-  const [supplier, setSupplier] = useState(null);
-
-  const load = async () => {
-    const suppliers = await localDb.getSuppliers();
-    const found = suppliers.find((entry) => [entry.id, entry.localId, entry.serverId].includes(id));
-    setSupplier(found || null);
-    setRows(await localDb.getSupplierInvoices(id, filters));
-  };
-  useLocalReload(load, [id, JSON.stringify(filters)]);
-
-  function updateFilter(field, value) {
-    setFilters((current) => ({ ...current, [field]: value }));
-  }
-  const historyStats = {
-    invoiceCount: rows.length,
-    totalAmount: rows.reduce((sum, invoice) => sum + Number(invoice.totalAmount || 0), 0),
-    recentDate: rows[0]?.invoiceDate || ''
-  };
-
+  const [filters, setFilters] = useState({ invoiceNo: '', startDate: '', endDate: '', minAmount: '', maxAmount: '', hasGift: false, hasDiscount: false, abnormalOnly: false, multiPageOnly: false });
+  const [data, setData] = useState({ supplier: null, invoices: [], stats: {} });
+  const load = () => localDb.getSupplierInvoiceHistory(id, filters).then(setData);
+  useLocalReload(load, [id, filters]);
+  const { supplier, invoices, stats: historyStats } = data;
   return (
     <Page title="历史发票" subtitle={supplier?.supplierDisplayName || supplier?.displayName || supplier?.name || '供应商'}>
       <Section title="汇总">
-        <Info label="发票数量" value={historyStats.invoiceCount} />
+        <Info label="发票数量" value={historyStats.invoiceCount || invoices.length} />
         <Info label="累计采购金额" value={money(historyStats.totalAmount)} />
-        <Info label="最近采购时间" value={historyStats.recentDate || '-'} />
+        <Info label="赠品数量" value={numberText(historyStats.freeQty)} />
+        <Info label="折扣金额" value={money(historyStats.discountAmount)} />
       </Section>
       <Section title="筛选">
         <div className="grid-2">
-          <label className="field"><span>开始日期</span><input type="date" value={filters.dateFrom} onChange={(event) => updateFilter('dateFrom', event.target.value)} /></label>
-          <label className="field"><span>结束日期</span><input type="date" value={filters.dateTo} onChange={(event) => updateFilter('dateTo', event.target.value)} /></label>
-          <label className="field"><span>发票号</span><input value={filters.invoiceNo} onChange={(event) => updateFilter('invoiceNo', event.target.value)} /></label>
-          <label className="field"><span>总金额</span><input type="number" value={filters.totalAmount} onChange={(event) => updateFilter('totalAmount', event.target.value)} /></label>
-          <label className="field"><span>最低金额</span><input type="number" value={filters.amountMin} onChange={(event) => updateFilter('amountMin', event.target.value)} /></label>
-          <label className="field"><span>最高金额</span><input type="number" value={filters.amountMax} onChange={(event) => updateFilter('amountMax', event.target.value)} /></label>
-        </div>
-        <div className="row-actions">
-          <label><input type="checkbox" checked={filters.hasGifts} onChange={(event) => updateFilter('hasGifts', event.target.checked)} /> 有赠品</label>
-          <label><input type="checkbox" checked={filters.hasDiscounts} onChange={(event) => updateFilter('hasDiscounts', event.target.checked)} /> 有折扣</label>
-          <label><input type="checkbox" checked={filters.hasWarnings} onChange={(event) => updateFilter('hasWarnings', event.target.checked)} /> 有异常</label>
-          <label><input type="checkbox" checked={filters.isMultipage} onChange={(event) => updateFilter('isMultipage', event.target.checked)} /> 多页发票</label>
-          <button className="secondary-button" type="button" onClick={() => api.downloadSupplierInvoicesCsv(id, filters)}>导出 CSV</button>
-          <button className="secondary-button" type="button" onClick={() => api.downloadSupplierInvoicesExcel(id, filters)}>导出 Excel</button>
+          <label className="field"><span>发票号</span><input value={filters.invoiceNo} onChange={(event) => setFilters({ ...filters, invoiceNo: event.target.value })} /></label>
+          <label className="field"><span>开始日期</span><input type="date" value={filters.startDate} onChange={(event) => setFilters({ ...filters, startDate: event.target.value })} /></label>
+          <label className="field"><span>结束日期</span><input type="date" value={filters.endDate} onChange={(event) => setFilters({ ...filters, endDate: event.target.value })} /></label>
+          <label className="field"><span>最小金额</span><input type="number" value={filters.minAmount} onChange={(event) => setFilters({ ...filters, minAmount: event.target.value })} /></label>
+          <label className="field"><span>最大金额</span><input type="number" value={filters.maxAmount} onChange={(event) => setFilters({ ...filters, maxAmount: event.target.value })} /></label>
         </div>
       </Section>
-      <Section title="发票">
-        {rows.length === 0 && <EmptyState text="暂无历史发票" />}
-        <div className="card-list">
-          {rows.map((invoice) => (
-            <Link className="row-card" to={`/invoices/${encodeURIComponent(invoice.id)}`} key={invoice.id}>
-              <div>
-                <h3>{invoice.invoiceNo || '无发票号'}</h3>
-                <p>{invoice.invoiceDate || '-'} · {money(invoice.totalAmount)} · {invoice.itemCount || 0} 行</p>
-                <p>{invoice.hasGifts ? '有赠品 · ' : ''}{invoice.hasDiscounts ? '有折扣 · ' : ''}{invoice.isMultipage ? '多页发票 · ' : ''}{duplicateStatusLabel(invoice.duplicateStatus)}</p>
-              </div>
-              <ChevronRight />
-            </Link>
-          ))}
-        </div>
-      </Section>
+      {invoices.length === 0 && <EmptyState text="暂无历史发票" />}
+      {invoices.map((invoice) => (
+        <Link className="row-card" key={invoice.id} to={`/invoices/${invoice.id}`}>
+          <div>
+            <h3>{invoice.invoiceNo || '-'} · {invoice.invoiceDate || '-'}</h3>
+            <p>金额 {money(invoice.totalAmount)} · 商品 {invoice.itemCount || 0} · 赠品 {numberText(invoice.freeQty)} · 折扣 {money(invoice.discountAmount)}</p>
+            <p>{invoiceStatusLabel(invoice)} · {sourceLabel(invoice.recognitionSource)}</p>
+          </div>
+          <ChevronRight />
+        </Link>
+      ))}
     </Page>
   );
 }
-
 function AccountConnectionPage() {
-  const session = getAuthSession();
   const [keyword, setKeyword] = useState('');
-  const [message, setMessage] = useState('');
-  const [notice, setNotice] = useState('');
-  const [searchResults, setSearchResults] = useState([]);
+  const [results, setResults] = useState([]);
   const [sent, setSent] = useState([]);
   const [received, setReceived] = useState([]);
-  const [loading, setLoading] = useState(false);
-
-  async function loadRequests() {
-    if (!session?.token) return;
-    const [sentData, receivedData] = await Promise.all([
-      api.getSentConnections(),
-      api.getReceivedConnections()
-    ]);
-    setSent(sentData.requests || []);
-    setReceived(receivedData.requests || []);
-  }
-
-  useEffect(() => {
-    loadRequests().catch((error) => setNotice(error.message || '读取账户连接记录失败'));
-  }, [session?.token]);
+  const [message, setMessage] = useState('');
+  const [notice, setNotice] = useState('');
 
   async function searchUsers(event) {
     event.preventDefault();
     setNotice('');
-    if (!keyword.trim()) return;
-    setLoading(true);
     try {
-      const data = await api.searchUsers(keyword.trim());
-      setSearchResults(data.users || []);
+      const data = await api.searchUsers(keyword);
+      setResults(data.users || []);
     } catch (error) {
-      setNotice(error.message || '搜索账户失败');
-    } finally {
-      setLoading(false);
+      setNotice(error.message || '搜索失败');
     }
   }
 
+  async function loadRequests() {
+    try {
+      const [sentData, receivedData] = await Promise.all([api.getSentConnections(), api.getReceivedConnections()]);
+      setSent(sentData.requests || []);
+      setReceived(receivedData.requests || []);
+    } catch (error) {
+      setNotice(error.message || '读取申请失败');
+    }
+  }
+
+  useEffect(() => { loadRequests(); }, []);
+
   async function requestConnection(targetUserId) {
-    setNotice('');
     try {
       await api.requestAccountConnection({ targetUserId, message });
       setNotice('连接申请已发送');
       setMessage('');
       await loadRequests();
     } catch (error) {
-      setNotice(error.message || '发送连接申请失败');
+      setNotice(error.message || '发送申请失败');
     }
   }
 
   async function decide(id, action) {
-    setNotice('');
     try {
       if (action === 'approve') await api.approveConnection(id);
-      else await api.rejectConnection(id);
-      setNotice(action === 'approve' ? '已同意连接申请' : '已拒绝连接申请');
+      if (action === 'reject') await api.rejectConnection(id);
+      setNotice(action === 'approve' ? '已同意申请' : '已拒绝申请');
       await loadRequests();
     } catch (error) {
       setNotice(error.message || '处理申请失败');
     }
   }
 
-  if (!session?.token) {
-    return (
-      <Page title="账户连接" subtitle="搜索账户并建立连接关系">
-        <p className="warning-text">请先登录后再使用账户连接功能。</p>
-      </Page>
-    );
-  }
-
   return (
-    <Page title="账户连接" subtitle="搜索其他账户，发送或处理连接申请">
-      {notice && <p className={notice.includes('失败') || notice.includes('未配置') || notice.includes('错误') ? 'error' : 'success-text'}>{notice}</p>}
+    <Page title="账户连接">
       <Section title="搜索账户">
-        <form className="toolbar" onSubmit={searchUsers}>
-          <input placeholder="邮箱、用户名、公司名" value={keyword} onChange={(event) => setKeyword(event.target.value)} />
-          <button className="primary-button" disabled={loading}>{loading ? '搜索中...' : '搜索'}</button>
+        <form className="search-bar" onSubmit={searchUsers}>
+          <input value={keyword} onChange={(event) => setKeyword(event.target.value)} placeholder="邮箱、用户名、公司名" />
+          <button type="submit"><Search size={18} />搜索</button>
         </form>
-        <label className="field"><span>申请备注</span><textarea value={message} onChange={(event) => setMessage(event.target.value)} /></label>
-        <div className="card-list">
-          {searchResults.map((user) => (
-            <div className="row-card" key={user.id}>
-              <div>
-                <h3>{user.companyName || user.username}</h3>
-                <p>{user.username} · {user.email}</p>
-              </div>
-              <button type="button" onClick={() => requestConnection(user.id)}>申请连接</button>
-            </div>
-          ))}
-          {searchResults.length === 0 && <EmptyState text="请输入关键词搜索账户" />}
-        </div>
+        <label className="field"><span>申请备注</span><input value={message} onChange={(event) => setMessage(event.target.value)} /></label>
+        {notice && <p className={notice.includes('失败') ? 'error' : 'success-text'}>{notice}</p>}
+        {results.map((user) => (
+          <div className="row-card" key={user.id}>
+            <div><h3>{user.username || user.email}</h3><p>{user.email} · {user.companyName || '-'}</p></div>
+            <button type="button" onClick={() => requestConnection(user.id)}>申请连接</button>
+          </div>
+        ))}
       </Section>
-
-      <Section title="我发出的申请">
-        <ConnectionList requests={sent} direction="sent" />
-      </Section>
-
-      <Section title="收到的申请">
-        <ConnectionList requests={received} direction="received" onDecide={decide} />
-      </Section>
+      <ConnectionList title="我发出的申请" requests={sent} direction="sent" />
+      <ConnectionList title="收到的申请" requests={received} direction="received" onDecide={decide} />
     </Page>
   );
 }
 
-function ConnectionList({ requests, direction, onDecide }) {
-  if (!requests.length) return <EmptyState text="暂无记录" />;
+function ConnectionList({ title, requests, direction, onDecide }) {
   return (
-    <div className="card-list">
-      {requests.map((request) => {
-        const other = direction === 'sent' ? request.target : request.requester;
-        return (
-          <div className="row-card" key={request.id}>
-            <div>
-              <h3>{other?.companyName || other?.username || '未知账户'}</h3>
-              <p>{other?.username || ''} · {other?.email || ''}</p>
-              {request.message && <p>{request.message}</p>}
-              <p>状态：{connectionStatusLabel(request.status)} · {request.createdAt ? new Date(request.createdAt).toLocaleString() : ''}</p>
-            </div>
-            {direction === 'received' && request.status === 'pending' && (
-              <div className="row-actions">
-                <button type="button" onClick={() => onDecide(request.id, 'approve')}>同意</button>
-                <button type="button" onClick={() => onDecide(request.id, 'reject')}>拒绝</button>
-              </div>
-            )}
+    <Section title={title}>
+      {requests.length === 0 && <EmptyState text="暂无申请" />}
+      {requests.map((request) => (
+        <div className="row-card" key={request.id}>
+          <div>
+            <h3>{direction === 'sent' ? request.targetUser?.email : request.requesterUser?.email}</h3>
+            <p>{connectionStatusLabel(request.status)} · {request.message || '-'}</p>
           </div>
-        );
-      })}
-    </div>
+          {direction === 'received' && request.status === 'pending' && (
+            <div className="row-actions">
+              <button type="button" onClick={() => onDecide?.(request.id, 'approve')}>同意</button>
+              <button type="button" className="danger-button" onClick={() => onDecide?.(request.id, 'reject')}>拒绝</button>
+            </div>
+          )}
+        </div>
+      ))}
+    </Section>
   );
 }
-
 function connectionStatusLabel(status) {
   if (status === 'approved') return '已同意';
   if (status === 'rejected') return '已拒绝';
@@ -2721,26 +2171,22 @@ function connectionStatusLabel(status) {
 
 function MemberManagementPanel() {
   const [members, setMembers] = useState([]);
-  const [limits, setLimits] = useState({});
+  const [message, setMessage] = useState('');
   const [editingMember, setEditingMember] = useState(null);
   const [resetMember, setResetMember] = useState(null);
-  const [message, setMessage] = useState('');
-  const session = getAuthSession();
-
   async function loadMembers() {
-    const data = await api.getMembers();
-    setMembers(data.members || []);
-    setLimits(data.limits || {});
-  }
-
-  useEffect(() => {
-    loadMembers().catch((error) => setMessage(error.message || '读取成员失败'));
-  }, []);
-
-  async function saveMember(form) {
     try {
-      if (form.id) await api.updateMember(form.id, form);
-      else await api.createMember(form);
+      const data = await api.getAdminMembers();
+      setMembers(data.members || []);
+    } catch (error) {
+      setMessage(error.message || '读取成员失败');
+    }
+  }
+  useEffect(() => { loadMembers(); }, []);
+  async function saveMember(payload) {
+    try {
+      if (payload.id) await api.updateAdminMember(payload.id, payload);
+      else await api.createAdminMember(payload);
       setEditingMember(null);
       setMessage('成员已保存');
       await loadMembers();
@@ -2748,106 +2194,75 @@ function MemberManagementPanel() {
       setMessage(error.message || '保存成员失败');
     }
   }
-
-  async function resetPassword(member, password) {
+  async function resetPassword(id, password) {
     try {
-      await api.resetMemberPassword(member.id, password);
+      await api.resetAdminMemberPassword(id, { password });
       setResetMember(null);
       setMessage('密码已重置');
     } catch (error) {
       setMessage(error.message || '重置密码失败');
     }
   }
-
-  async function toggleStatus(member) {
+  async function toggleStatus(member, enabled) {
     try {
-      if (member.status === 'disabled') await api.enableMember(member.id);
-      else await api.disableMember(member.id);
+      if (enabled) await api.enableAdminMember(member.id);
+      else await api.disableAdminMember(member.id);
       await loadMembers();
     } catch (error) {
-      setMessage(error.message || '状态修改失败');
+      setMessage(error.message || '修改状态失败');
     }
   }
-
-  async function deleteMember(member) {
-    if (!confirm(`确认删除或停用成员 ${member.email}？`)) return;
+  async function removeMember(member) {
+    if (!confirm('确认删除/停用该成员？')) return;
     try {
-      await api.deleteMember(member.id);
-      setMessage('成员已删除');
+      await api.deleteAdminMember(member.id);
       await loadMembers();
     } catch (error) {
       setMessage(error.message || '删除成员失败');
     }
   }
-
   return (
     <Section title="成员管理">
-      <div className="row-actions">
-        <button className="primary-button" type="button" onClick={() => setEditingMember({ role: 'sales', status: 'active' })}>新增成员</button>
-      </div>
-      <p className="hint">管理员直接创建成员账号，把邮箱和初始密码发给成员。管理员上限 {limits.maxAdminUsers ?? '-'}，销售员上限 {limits.maxSalesUsers ?? '-'}。</p>
-      {message && <p className={message.includes('失败') || message.includes('不能') ? 'error' : 'success-text'}>{message}</p>}
+      {message && <p className={message.includes('失败') ? 'error' : 'success-text'}>{message}</p>}
+      <button className="primary-button" type="button" onClick={() => setEditingMember({ role: 'sales', status: 'active' })}>新增成员</button>
       <div className="card-list">
-        {members.map((member) => {
-          const isSelf = member.id === session?.user?.id;
-          return (
-            <div className="row-card" key={member.id}>
-              <div>
-                <h3>{member.name || member.email}</h3>
-                <p>{member.email} · {memberRoleLabel(member.role)} · {memberStatusLabel(member.status)}</p>
-                <p>最后登录：{member.lastLoginAt ? new Date(member.lastLoginAt).toLocaleString() : '-'} · 创建：{member.createdAt ? new Date(member.createdAt).toLocaleString() : '-'}</p>
-              </div>
-              <div className="row-actions">
-                <button type="button" onClick={() => setEditingMember(member)}>编辑</button>
-                <button type="button" onClick={() => setResetMember(member)}>重置密码</button>
-                <button type="button" disabled={isSelf || member.role === 'super_admin'} onClick={() => toggleStatus(member)}>{member.status === 'disabled' ? '启用' : '禁用'}</button>
-                <button type="button" className="text-danger" disabled={isSelf || member.role === 'super_admin'} onClick={() => deleteMember(member)}>删除</button>
-              </div>
+        {members.map((member) => (
+          <div className="row-card" key={member.id}>
+            <div>
+              <h3>{member.name || member.username || member.email}</h3>
+              <p>{member.email} · {memberRoleLabel(member.role)} · {memberStatusLabel(member.status)}</p>
+              <p>最后登录 {member.lastLoginAt || '-'} · 创建 {member.createdAt || '-'}</p>
             </div>
-          );
-        })}
-        {members.length === 0 && <EmptyState text="暂无成员" />}
+            <div className="row-actions">
+              <button type="button" onClick={() => setEditingMember(member)}>编辑</button>
+              <button type="button" onClick={() => setResetMember(member)}>重置密码</button>
+              {member.status === 'disabled'
+                ? <button type="button" onClick={() => toggleStatus(member, true)}>启用</button>
+                : <button type="button" onClick={() => toggleStatus(member, false)}>禁用</button>}
+              <button type="button" className="danger-button" onClick={() => removeMember(member)}>删除</button>
+            </div>
+          </div>
+        ))}
       </div>
-      {editingMember && (
-        <MemberDialog
-          member={editingMember}
-          onClose={() => setEditingMember(null)}
-          onSave={saveMember}
-        />
-      )}
-      {resetMember && (
-        <ResetPasswordDialog
-          member={resetMember}
-          onClose={() => setResetMember(null)}
-          onSave={(password) => resetPassword(resetMember, password)}
-        />
-      )}
+      {editingMember && <MemberDialog member={editingMember} onClose={() => setEditingMember(null)} onSave={saveMember} />}
+      {resetMember && <ResetPasswordDialog member={resetMember} onClose={() => setResetMember(null)} onSave={resetPassword} />}
     </Section>
   );
 }
 
 function MemberDialog({ member, onClose, onSave }) {
-  const isSuperAdmin = member.role === 'super_admin';
-  const [form, setForm] = useState({
-    id: member.id || '',
-    name: member.name || '',
-    email: member.email || '',
-    password: '',
-    role: isSuperAdmin ? 'super_admin' : (member.role || 'sales'),
-    status: member.status || 'active',
-    phone: member.phone || '',
-    note: member.note || ''
-  });
+  const [form, setForm] = useState(() => ({ role: 'sales', status: 'active', ...member, password: '' }));
+  const update = (field, value) => setForm((current) => ({ ...current, [field]: value }));
   return (
     <Dialog title={form.id ? '编辑成员' : '新增成员'} onClose={onClose}>
-      <label className="field"><span>姓名</span><input value={form.name} onChange={(event) => setForm({ ...form, name: event.target.value })} /></label>
-      <label className="field"><span>邮箱</span><input type="email" value={form.email} onChange={(event) => setForm({ ...form, email: event.target.value })} /></label>
-      {!form.id && <label className="field"><span>初始密码</span><input type="password" value={form.password} onChange={(event) => setForm({ ...form, password: event.target.value })} /></label>}
-      <label className="field"><span>角色</span><select value={form.role} disabled={isSuperAdmin} onChange={(event) => setForm({ ...form, role: event.target.value })}>{isSuperAdmin && <option value="super_admin">超级管理员</option>}<option value="sales">销售员</option><option value="admin">管理员</option></select></label>
-      <label className="field"><span>状态</span><select value={form.status} onChange={(event) => setForm({ ...form, status: event.target.value })}><option value="active">启用</option><option value="disabled">禁用</option></select></label>
-      <label className="field"><span>电话</span><input value={form.phone} onChange={(event) => setForm({ ...form, phone: event.target.value })} /></label>
-      <label className="field"><span>备注</span><textarea rows="2" value={form.note} onChange={(event) => setForm({ ...form, note: event.target.value })} /></label>
-      <button className="primary-button" type="button" onClick={() => onSave(form)}>保存</button>
+      <label className="field"><span>姓名</span><input value={form.name || ''} onChange={(event) => update('name', event.target.value)} /></label>
+      <label className="field"><span>邮箱</span><input value={form.email || ''} onChange={(event) => update('email', event.target.value)} /></label>
+      {!form.id && <label className="field"><span>初始密码</span><input type="password" value={form.password || ''} onChange={(event) => update('password', event.target.value)} /></label>}
+      <label className="field"><span>角色</span><select value={form.role || 'sales'} onChange={(event) => update('role', event.target.value)}><option value="admin">管理员</option><option value="sales">销售员</option></select></label>
+      <label className="field"><span>状态</span><select value={form.status || 'active'} onChange={(event) => update('status', event.target.value)}><option value="active">启用</option><option value="disabled">禁用</option></select></label>
+      <label className="field"><span>电话</span><input value={form.phone || ''} onChange={(event) => update('phone', event.target.value)} /></label>
+      <label className="field"><span>备注</span><input value={form.note || ''} onChange={(event) => update('note', event.target.value)} /></label>
+      <div className="dialog-actions"><button type="button" onClick={onClose}>取消</button><button type="button" className="primary-button" onClick={() => onSave(form)}>保存</button></div>
     </Dialog>
   );
 }
@@ -2855,213 +2270,149 @@ function MemberDialog({ member, onClose, onSave }) {
 function ResetPasswordDialog({ member, onClose, onSave }) {
   const [password, setPassword] = useState('');
   return (
-    <Dialog title={`重置密码 · ${member.email}`} onClose={onClose}>
+    <Dialog title="重置密码" onClose={onClose}>
+      <p>{member.email}</p>
       <label className="field"><span>新密码</span><input type="password" value={password} onChange={(event) => setPassword(event.target.value)} /></label>
-      <button className="primary-button" type="button" onClick={() => onSave(password)}>保存新密码</button>
+      <div className="dialog-actions"><button type="button" onClick={onClose}>取消</button><button type="button" className="primary-button" onClick={() => onSave(member.id, password)}>保存</button></div>
     </Dialog>
   );
 }
 
 function memberRoleLabel(role) {
-  if (role === 'super_admin') return '超级管理员';
-  if (role === 'admin') return '管理员';
+  if (role === 'admin' || role === 'super_admin') return '管理员';
   return '销售员';
 }
 
 function memberStatusLabel(status) {
-  return status === 'disabled' ? '已禁用' : '启用';
+  return status === 'disabled' ? '禁用' : '启用';
 }
-
 function SettingsPage() {
   const [stats, setStats] = useState({});
-  const [syncMessage, setSyncMessage] = useState('');
-  const [cloudStatus, setCloudStatus] = useState(null);
-  const [syncSnapshot, setSyncSnapshot] = useState(null);
-  const [syncPrefs, setSyncPrefs] = useState({ autoSync: true, wifiOnly: false, allowCellular: false });
-  const [syncingManual, setSyncingManual] = useState(false);
-  const session = getAuthSession();
-  const isAdmin = isAdminRole(session?.user?.role || '');
-  const loadSyncCenter = async () => {
-    const [snapshot, preferences] = await Promise.all([getSyncSnapshot(), getSyncPreferences()]);
-    setSyncSnapshot(snapshot);
-    setSyncPrefs(preferences);
+  const [syncSnapshot, setSyncSnapshot] = useState(getSyncSnapshot());
+  const [message, setMessage] = useState('');
+  const [syncing, setSyncing] = useState(false);
+  const load = async () => {
+    setStats(await localDb.getStats());
+    setSyncSnapshot(getSyncSnapshot());
   };
-  const load = () => Promise.all([localDb.getStats().then(setStats), loadSyncCenter()]);
   useLocalReload(load);
-
   useEffect(() => {
-    if (!navigator.onLine) return;
-    api.syncStatus().then(setCloudStatus).catch(() => setCloudStatus(null));
+    const handler = () => setSyncSnapshot(getSyncSnapshot());
+    window.addEventListener('sync-state-change', handler);
+    return () => window.removeEventListener('sync-state-change', handler);
   }, []);
-
-  async function updateSyncPreference(patch) {
-    const next = await setSyncPreferences({ ...syncPrefs, ...patch });
-    setSyncPrefs(next);
-    await loadSyncCenter();
+  async function syncNow() {
+    setSyncing(true);
+    try {
+      const result = await manualSyncNow();
+      setMessage(result?.ok === false ? '同步失败，请查看同步状态' : '同步完成');
+      await load();
+    } catch (error) {
+      setMessage(error.message || '同步失败');
+    } finally {
+      setSyncing(false);
+    }
   }
-
+  async function restoreCloud() {
+    setSyncing(true);
+    try {
+      await pullFromCloud({ full: true });
+      setMessage('已从云端恢复资料');
+      await load();
+    } catch (error) {
+      setMessage(error.message || '从云端恢复失败');
+    } finally {
+      setSyncing(false);
+    }
+  }
+  async function clearLocalAndRestore() {
+    if (!confirm('确认清空本地缓存后重新拉取云端数据？')) return;
+    await localDb.clearAllLocalData();
+    await restoreCloud();
+  }
   async function clearData() {
     if (!confirm('确认清空本地测试数据并同步删除到云端？')) return;
     await localDb.softDeleteAll();
     markSyncPending();
     load();
   }
-
-  async function runSyncNow() {
-    setSyncingManual(true);
-    setSyncMessage('正在同步...');
+  async function exportCloudExcel() {
     try {
-      const snapshot = await syncNow({ force: true, reason: 'manual' });
-      setSyncMessage(snapshot.lastError ? `同步失败：${snapshot.lastError}` : '同步完成');
-      api.syncStatus().then(setCloudStatus).catch(() => {});
-      load();
+      const blob = await api.exportCloudExcel();
+      const url = URL.createObjectURL(blob);
+      const link = document.createElement('a');
+      link.href = url;
+      link.download = `invoice-cloud-export-${Date.now()}.xlsx`;
+      link.click();
+      URL.revokeObjectURL(url);
     } catch (error) {
-      setSyncMessage(`同步失败：${error.message || '未知错误'}`);
-    } finally {
-      setSyncingManual(false);
+      setMessage(error.message || '导出云端 Excel 失败');
     }
   }
-
-  async function restoreFromCloud() {
-    setSyncMessage('正在从云端恢复...');
-    const snapshot = await pullFromCloud({ full: true });
-    setSyncMessage(snapshot.lastError ? `恢复失败：${snapshot.lastError}` : '云端资料已恢复到本机');
-    api.syncStatus().then(setCloudStatus).catch(() => {});
-    load();
-  }
-
-  async function clearCacheAndRestore() {
-    if (!confirm('这只会清空本机 IndexedDB 缓存，不会删除云端数据。确认重新拉取云端资料？')) return;
-    setSyncMessage('正在清空本地缓存并重新拉取...');
-    const snapshot = await resetLocalCacheAndPull();
-    setSyncMessage(snapshot.lastError ? `重新拉取失败：${snapshot.lastError}` : '已清空本地缓存并从云端重新拉取');
-    api.syncStatus().then(setCloudStatus).catch(() => {});
-    load();
-  }
-
-  async function cleanupSyncedCache() {
-    const removed = await localDb.cleanupSyncedDeletedCache();
-    setSyncMessage(`已清理 ${removed} 条已同步删除缓存`);
-    load();
-  }
-
   return (
-    <Page title="设置/导出">
-      <Section title="账户">
-        <Info label="当前公司" value={session?.company?.name || session?.user?.companyName || '-'} />
-        <Info label="当前用户" value={session?.user?.username || session?.user?.email || session?.user?.name || '-'} />
-        <button className="secondary-button" type="button" onClick={() => setAuthSession(null)}>退出到登录/注册页面</button>
-        <p className="hint">退出会清除本机保存的 token、user 和 company 信息。</p>
-      </Section>
-      {isAdmin && <MemberManagementPanel />}
-      <Section title="同步">
-        <div className="grid-2">
-          <Info label="同步状态" value={syncSnapshot?.label || '-'} />
-          <Info label="待同步总数" value={syncSnapshot?.pendingCount ?? 0} />
-          <Info label="同步失败数量" value={syncSnapshot?.failedCount ?? 0} />
-          <Info label="最后同步时间" value={syncSnapshot?.lastSyncAt || '-'} />
-          <Info label="网络类型" value={syncSnapshot?.connection?.label || syncSnapshot?.connection?.type || syncSnapshot?.connection?.effectiveType || (syncSnapshot?.online ? 'online' : 'offline')} />
-          <Info label="最后同步结果" value={syncSnapshot?.diagnostic?.status || '-'} />
-          <Info label="最近错误信息" value={syncSnapshot?.lastError || syncSnapshot?.diagnostic?.error || '无'} />
-          <Info label="最近 Push 数量" value={syncSnapshot?.diagnostic?.pushCount ?? 0} />
-          <Info label="最近 Pull 数量" value={syncSnapshot?.diagnostic?.pullCount ?? 0} />
-          <Info label="待同步发票" value={syncSnapshot?.pendingByTable?.invoices ?? 0} />
-          <Info label="待同步商品明细" value={syncSnapshot?.pendingByTable?.invoice_items ?? 0} />
-          <Info label="待同步商品" value={syncSnapshot?.pendingByTable?.products ?? 0} />
-          <Info label="待同步价格历史" value={syncSnapshot?.pendingByTable?.price_history ?? 0} />
-          <Info label="待同步供应商" value={syncSnapshot?.pendingByTable?.suppliers ?? 0} />
-          <Info label="待同步模板" value={syncSnapshot?.pendingByTable?.supplier_templates ?? 0} />
-        </div>
-        <SwitchField label="自动同步" checked={Boolean(syncPrefs.autoSync)} onChange={(checked) => updateSyncPreference({ autoSync: checked })} />
-        <SwitchField label="仅 WiFi 同步" checked={Boolean(syncPrefs.wifiOnly)} onChange={(checked) => updateSyncPreference({ wifiOnly: checked, allowCellular: checked ? false : syncPrefs.allowCellular })} />
-        <SwitchField label="允许蜂窝网络同步" checked={Boolean(syncPrefs.allowCellular)} onChange={(checked) => updateSyncPreference({ allowCellular: checked, wifiOnly: checked ? false : syncPrefs.wifiOnly })} />
+    <Page title="设置/同步">
+      <Section title="同步中心">
+        <Info label="同步状态" value={syncSnapshot.label} />
+        <Info label="待同步总数" value={syncSnapshot.pendingCount || 0} />
+        <Info label="待同步发票" value={syncSnapshot.pendingByTable?.invoices || 0} />
+        <Info label="待同步商品明细" value={syncSnapshot.pendingByTable?.invoice_items || 0} />
+        <Info label="待同步商品" value={syncSnapshot.pendingByTable?.products || 0} />
+        <Info label="待同步价格历史" value={syncSnapshot.pendingByTable?.price_history || 0} />
+        <Info label="最后同步时间" value={syncSnapshot.lastSyncTime || '-'} />
+        <Info label="最近错误" value={syncSnapshot.lastError || '无'} />
         <div className="row-actions">
-          <button className="primary-button" type="button" disabled={syncingManual} onClick={runSyncNow}><RefreshCw size={16} className={syncingManual ? 'spin' : ''} />{syncingManual ? '同步中...' : '立即同步'}</button>
-          <button className="secondary-button" type="button" onClick={restoreFromCloud}>从云端恢复</button>
-          <button className="secondary-button" type="button" onClick={cleanupSyncedCache}>清理已同步缓存</button>
-          <button className="secondary-button" type="button" onClick={clearCacheAndRestore}>清空本地缓存后重新拉取</button>
+          <button className="primary-button" disabled={syncing || syncSnapshot.syncing} onClick={syncNow}>{syncing || syncSnapshot.syncing ? '同步中...' : '立即同步'}</button>
+          <button type="button" disabled={syncing} onClick={restoreCloud}>从云端恢复</button>
+          <button type="button" disabled={syncing} onClick={clearLocalAndRestore}>清空本地缓存后重新拉取</button>
         </div>
-        {syncMessage && <p className={syncMessage.includes('失败') ? 'error' : 'success-text'}>{syncMessage}</p>}
-        {cloudStatus && (
-          <div className="grid-2">
-            <Info label="云端同步库" value={cloudStatus.backend || '-'} />
-            <Info label="云端发票" value={cloudStatus.counts?.invoices ?? 0} />
-            <Info label="云端供应商" value={cloudStatus.counts?.suppliers ?? 0} />
-            <Info label="云端价格历史" value={cloudStatus.counts?.price_history ?? 0} />
-          </div>
-        )}
-        <p className="hint">所有新增、修改和删除都会先写入本机 IndexedDB；联网后自动同步到云端。</p>
+        {message && <p className={message.includes('失败') ? 'error' : 'success-text'}>{message}</p>}
       </Section>
-      <Section title="导出">
-        <button className="primary-button" type="button" onClick={() => api.downloadExportCsv()}><Upload size={18} />导出云端 CSV</button>
-        <button className="secondary-button" type="button" onClick={() => api.downloadExportExcel()}><Upload size={18} />导出云端 Excel</button>
-        <p className="hint">CSV 导出来自后端云端数据库；离线时请先同步后再导出。</p>
+      <MemberManagementPanel />
+      <Section title="数据库统计">
+        {Object.entries(stats).map(([key, value]) => <Info key={key} label={key} value={value} />)}
       </Section>
-      <Section title="本地数据库统计">
-        <Info label="供应商" value={stats.suppliers ?? 0} />
-        <Info label="鍙戠エ" value={stats.invoices ?? 0} />
-        <Info label="商品明细" value={stats.invoice_items ?? 0} />
-        <Info label="商品" value={stats.products ?? 0} />
-        <Info label="价格历史" value={stats.price_history ?? 0} />
-        <Info label="供应商模板" value={stats.supplier_templates ?? 0} />
-      </Section>
-      <Section title="测试数据">
-        <button className="danger-button" onClick={clearData}><Trash2 size={16} />清空测试数据</button>
+      <Section title="导出/维护">
+        <div className="row-actions">
+          <button onClick={exportCloudExcel}>导出云端 Excel</button>
+          <button className="danger-button" onClick={clearData}>清空测试数据</button>
+        </div>
       </Section>
     </Page>
   );
 }
-
 function SupplierDialog({ supplier, onClose, onSave }) {
   const [form, setForm] = useState(supplier);
   return (
     <Dialog title="编辑供应商" onClose={onClose}>
-      {['supplierNameChinese', 'supplierNameEnglish', 'supplierDisplayName', 'name', 'displayName', 'normalizedName', 'aliases', 'contactName', 'phone', 'email', 'address', 'notes'].map((field) => (
-        <label className="field" key={field}>
-          <span>{({ supplierNameChinese: '中文公司名', supplierNameEnglish: '英文公司名', supplierDisplayName: '显示名称', name: '名称', displayName: '旧显示名称', normalizedName: '标准化名称', aliases: '别名', contactName: '联系人', phone: '电话', email: '邮箱', address: '地址', notes: '备注' })[field]}</span>
-          <input value={form[field] || ''} onChange={(event) => setForm({ ...form, [field]: event.target.value })} />
-        </label>
-      ))}
+      {['supplierNameChinese', 'supplierNameEnglish', 'supplierDisplayName', 'name', 'displayName', 'normalizedName', 'aliases', 'contactName', 'phone', 'email', 'address', 'notes'].map((field) => {
+        const labels = { supplierNameChinese: '中文公司名', supplierNameEnglish: '英文公司名', supplierDisplayName: '显示名称', name: '名称', displayName: '旧显示名称', normalizedName: '标准化名称', aliases: '别名', contactName: '联系人', phone: '电话', email: '邮箱', address: '地址', notes: '备注' };
+        return <label className="field" key={field}><span>{labels[field]}</span><input value={form[field] || ''} onChange={(event) => setForm({ ...form, [field]: event.target.value })} /></label>;
+      })}
       <button className="primary-button" onClick={() => onSave(form)}>保存</button>
     </Dialog>
   );
 }
 
 function TemplateDialog({ supplier, onClose }) {
-  const [template, setTemplate] = useState(emptyTemplate(supplier.supplierDisplayName || supplier.displayName || supplier.name));
-
-  useEffect(() => {
-    localDb.getTemplate(supplier.id).then((data) => setTemplate(data || emptyTemplate(supplier.supplierDisplayName || supplier.displayName || supplier.name)));
-  }, [supplier]);
-
+  const [form, setForm] = useState(supplier.template || {});
+  const update = (field, value) => setForm((current) => ({ ...current, [field]: value }));
   async function save() {
-    await localDb.saveTemplate(supplier.id, template);
+    await localDb.saveSupplierTemplate({ ...form, supplierId: supplier.id });
     markSyncPending();
     onClose();
   }
-
   return (
-    <Dialog title={`${supplier.supplierDisplayName || supplier.displayName || supplier.name} · 识别模板`} onClose={onClose}>
+    <Dialog title="供应商模板" onClose={onClose}>
       {['supplierNameKeywords', 'invoiceNoKeywords', 'dateKeywords', 'itemTableStartKeywords', 'itemTableEndKeywords'].map((field) => (
-        <label className="field" key={field}>
-          <span>{field}</span>
-          <textarea rows="2" value={template[field] || ''} onChange={(event) => setTemplate({ ...template, [field]: event.target.value })} />
-        </label>
+        <label className="field" key={field}><span>{field}</span><input value={form[field] || ''} onChange={(event) => update(field, event.target.value)} /></label>
       ))}
-      <div className="grid-2">
-        {['itemNameColumnIndex', 'quantityColumnIndex', 'unitColumnIndex', 'unitPriceColumnIndex', 'totalPriceColumnIndex'].map((field) => (
-          <label className="field" key={field}>
-            <span>{field}</span>
-            <input type="number" value={template[field] ?? 0} onChange={(event) => setTemplate({ ...template, [field]: Number(event.target.value) })} />
-          </label>
-        ))}
-      </div>
-      <label className="field"><span>备注</span><textarea rows="2" value={template.notes || ''} onChange={(event) => setTemplate({ ...template, notes: event.target.value })} /></label>
+      {['itemNameColumnIndex', 'quantityColumnIndex', 'unitColumnIndex', 'unitPriceColumnIndex', 'totalPriceColumnIndex'].map((field) => (
+        <label className="field" key={field}><span>{field}</span><input type="number" value={form[field] || 0} onChange={(event) => update(field, event.target.value)} /></label>
+      ))}
       <button className="primary-button" onClick={save}>保存模板</button>
     </Dialog>
   );
 }
-
 function Page({ title, subtitle, action, children }) {
   return (
     <div className="page">
@@ -3087,7 +2438,7 @@ function CollapsibleSection({ title, children, defaultOpen = false }) {
     <section className="section">
       <button type="button" className="collapsible-toggle" onClick={() => setOpen((value) => !value)}>
         <span>{title}</span>
-        <span>{open ? '收起' : '展开'}</span>
+        <span>{open ? '鏀惰捣' : '灞曞紑'}</span>
       </button>
       {open && <div className="collapsible-content">{children}</div>}
     </section>
@@ -3108,255 +2459,99 @@ const failedInvoiceImageUrls = new Set();
 const invoiceImageRetryCounts = new Map();
 
 function InvoiceImageViewer({ invoice, onUpdated }) {
-  const fileInputRef = useRef(null);
   const [imageUrl, setImageUrl] = useState('');
-  const [loadState, setLoadState] = useState('idle');
-  const [diagnostic, setDiagnostic] = useState({
-    source: 'Unknown',
-    size: 0,
-    status: '检查中',
-    message: ''
-  });
-  const [uploading, setUploading] = useState(false);
+  const [imageStatus, setImageStatus] = useState('idle');
+  const [diagnostic, setDiagnostic] = useState({ source: 'Unknown', size: 0, status: '待加载', message: '' });
   const [showDebug, setShowDebug] = useState(false);
-  const [fullScreen, setFullScreen] = useState(false);
-  const imageKey = [
-    invoice?.id || '',
-    invoice?.imagePath || '',
-    invoice?.imageUrl || '',
-    invoice?.originalImageUrl || '',
-    invoice?.imageId || ''
-  ].join('|');
+  const [reuploading, setReuploading] = useState(false);
+  const fileRef = useRef(null);
+
+  const imageKey = `${invoice?.imageId || ''}|${invoice?.imagePath || ''}|${invoice?.imageUrl || ''}|${invoice?.originalImageUrl || ''}`;
 
   useEffect(() => {
-    let objectUrl = '';
     let cancelled = false;
-    let retryTimer = 0;
-
-    async function resolveImage() {
-      const imagePath = invoice?.imagePath || '';
-      const rawImageUrl = invoice?.imageUrl || '';
-      const originalImageUrl = invoice?.originalImageUrl || '';
-      const imageId = invoice?.imageId || '';
-      if (!imagePath && !rawImageUrl && !originalImageUrl && !imageId) {
-        setImageUrl('');
-        setDiagnostic({ source: 'Unknown', size: 0, status: '缺失', message: '图片不存在' });
-        return;
-      }
-
-      if (String(imagePath).startsWith('blob:')) {
-        setImageUrl('');
-        setDiagnostic({ source: 'Local', size: 0, status: '缺失', message: 'Blob URL 已失效，请重新上传图片。' });
-        return;
-      }
-
-      if (String(imagePath).startsWith('indexeddb:') || imageId) {
-        const image = await localDb.getInvoiceImage(invoice);
-        if (cancelled) return;
-        if (!image?.imageBlob) {
+    let objectUrl = '';
+    async function loadImage() {
+      setImageStatus('loading');
+      setDiagnostic({ source: 'Unknown', size: 0, status: '加载中', message: '' });
+      const imageId = invoice?.imageId || (String(invoice?.imagePath || '').startsWith('indexeddb:') ? String(invoice.imagePath).replace('indexeddb:', '') : '');
+      const serverPath = invoice?.imageUrl || invoice?.originalImageUrl || invoice?.imagePath || '';
+      try {
+        if (imageId) {
+          const record = await localDb.getInvoiceImage(imageId);
+          if (!record?.blob) {
+            if (!cancelled) {
+              setImageUrl('');
+              setImageStatus('error');
+              setDiagnostic({ source: 'IndexedDB', size: 0, status: '缺失', message: '图片不存在' });
+            }
+            return;
+          }
+          objectUrl = URL.createObjectURL(record.blob);
+          if (!cancelled) {
+            setImageUrl(objectUrl);
+            setDiagnostic({ source: 'IndexedDB', size: record.size || record.blob.size || 0, status: '加载中', message: '' });
+          }
+          return;
+        }
+        if (serverPath && !String(serverPath).startsWith('blob:')) {
+          if (!cancelled) {
+            setImageUrl(api.fileUrl(serverPath));
+            setDiagnostic({ source: 'Server', size: 0, status: '加载中', message: '' });
+          }
+          return;
+        }
+        if (!cancelled) {
           setImageUrl('');
-          setDiagnostic({ source: 'IndexedDB', size: 0, status: '缺失', message: '图片不存在' });
-          return;
+          setImageStatus('error');
+          setDiagnostic({ source: 'Unknown', size: 0, status: '缺失', message: '图片不存在' });
         }
-        objectUrl = URL.createObjectURL(image.imageBlob);
-        setImageUrl(objectUrl);
-        setDiagnostic({
-          source: 'IndexedDB',
-          size: image.size || image.imageBlob.size || 0,
-          status: '正常',
-          message: ''
-        });
-        return;
-      }
-
-      const resolvedUrl = api.fileUrl(imagePath || rawImageUrl || originalImageUrl || '');
-      const failedKey = `${invoice?.id || ''}|${resolvedUrl}`;
-      if (failedInvoiceImageUrls.has(failedKey)) {
-        setImageUrl('');
-        setLoadState('error');
-        setDiagnostic({
-          source: /^https?:\/\//.test(resolvedUrl) || String(imagePath).startsWith('/uploads') ? 'Server' : 'Local',
-          size: 0,
-          status: '加载失败',
-          message: '图片加载失败，请重新上传'
-        });
-        return;
-      }
-      setImageUrl('');
-      setLoadState('loading');
-      setDiagnostic({
-        source: /^https?:\/\//.test(resolvedUrl) || String(imagePath).startsWith('/uploads') ? 'Server' : 'Local',
-        size: 0,
-        status: '加载中',
-        message: ''
-      });
-      const tester = new Image();
-      tester.onload = () => {
-        if (cancelled) return;
-        invoiceImageRetryCounts.delete(failedKey);
-        setImageUrl(resolvedUrl);
-        setLoadState('loaded');
-        setDiagnostic({
-          source: /^https?:\/\//.test(resolvedUrl) || String(imagePath).startsWith('/uploads') ? 'Server' : 'Local',
-          size: 0,
-          status: '已加载',
-          message: ''
-        });
-      };
-      tester.onerror = () => {
-        if (cancelled) return;
-        const nextRetryCount = Number(invoiceImageRetryCounts.get(failedKey) || 0) + 1;
-        invoiceImageRetryCounts.set(failedKey, nextRetryCount);
-        if (nextRetryCount < 2) {
-          retryTimer = window.setTimeout(() => {
-            if (!cancelled) resolveImage();
-          }, 500);
-          return;
+      } catch (error) {
+        if (!cancelled) {
+          setImageUrl('');
+          setImageStatus('error');
+          setDiagnostic({ source: 'Unknown', size: 0, status: '加载失败', message: error.message || '图片读取失败' });
         }
-        failedInvoiceImageUrls.add(failedKey);
-        setImageUrl('');
-        setLoadState('error');
-        setDiagnostic({
-          source: /^https?:\/\//.test(resolvedUrl) || String(imagePath).startsWith('/uploads') ? 'Server' : 'Local',
-          size: 0,
-          status: '加载失败',
-          message: '图片加载失败，请重新上传图片'
-        });
-      };
-      tester.src = resolvedUrl;
-      return;
+      }
     }
-
-    resolveImage().catch((error) => {
-      if (!cancelled) {
-        console.error('Invoice image resolve failed', error);
-        setImageUrl('');
-        setDiagnostic({ source: 'Unknown', size: 0, status: '损坏', message: error.message || '图片读取失败' });
-      }
-    });
-
+    loadImage();
     return () => {
       cancelled = true;
-      if (retryTimer) window.clearTimeout(retryTimer);
       if (objectUrl) URL.revokeObjectURL(objectUrl);
     };
   }, [imageKey]);
 
-  async function rebindImage(file) {
+  async function reupload(file) {
     if (!file) return;
-    setUploading(true);
-    setLoadState('loading');
+    setReuploading(true);
     try {
-      if (navigator.onLine) {
-        const data = new FormData();
-        data.append('image', file);
-        const result = await api.uploadInvoiceImage(invoice.id, data);
-        failedInvoiceImageUrls.delete(`${invoice.id}|${api.fileUrl(result.imagePath || '')}`);
-        await localDb.updateInvoiceImageFields(invoice.id, {
-          imagePath: result.imagePath,
-          imageId: '',
-          imageUrl: ''
-        });
-        markSyncPending();
-      } else {
-        const image = await localDb.saveInvoiceImage({ invoiceId: invoice.id, file, source: 'IndexedDB' });
-        await localDb.updateInvoiceImageFields(invoice.id, {
-          imagePath: `indexeddb:${image.id}`,
-          imageId: image.id,
-          imageUrl: ''
-        });
-      }
-      await onUpdated?.();
+      const image = await localDb.saveInvoiceImage(file, { invoiceId: invoice.id, source: 'invoice-reupload' });
+      await localDb.updateInvoiceFields(invoice.id, { imageId: image.id, imagePath: `indexeddb:${image.id}` });
+      markSyncPending();
+      onUpdated?.();
     } catch (error) {
-      console.error('Invoice image rebind failed', error);
-      setLoadState('error');
-      setDiagnostic((current) => ({
-        ...current,
-        status: '缺失',
-        message: error.message || '图片保存失败，请重新上传。'
-      }));
+      setDiagnostic({ source: 'Local', size: 0, status: '上传失败', message: error.message || '重新上传失败' });
+      setImageStatus('error');
     } finally {
-      setUploading(false);
+      setReuploading(false);
     }
   }
 
-  const imageMessage = loadState === 'error' ? '图片加载失败，请重新上传' : diagnostic.message;
-
   return (
-    <div className={`invoice-image-viewer image-state-${loadState}`}>
-      {loadState === 'loading' && <EmptyState text="图片加载中..." />}
-      {imageUrl ? (
-        <button type="button" className="image-open-button" onClick={() => setFullScreen(true)}>
-          <img
-            className="invoice-image"
-            src={imageUrl}
-            style={{
-              display: loadState === 'error' ? 'none' : 'block',
-              opacity: loadState === 'loading' ? 0 : 1,
-              maxHeight: loadState === 'loading' ? 0 : undefined,
-              borderWidth: loadState === 'loading' ? 0 : undefined
-            }}
-            onLoadCapture={() => setLoadState('loaded')}
-            alt="发票原图"
-            onLoad={() => setDiagnostic((current) => ({ ...current, status: '已加载', message: '' }))}
-            onError={() => {
-              console.error('Invoice image load failed', imageUrl);
-              failedInvoiceImageUrls.add(`${invoice?.id || ''}|${imageUrl}`);
-              setImageUrl('');
-              setLoadState('error');
-              setDiagnostic((current) => ({
-                ...current,
-                status: '加载失败',
-                message: '图片加载失败，请重新上传'
-              }));
-            }}
-          />
-        </button>
-      ) : (
-        <EmptyState text={imageMessage || '图片不存在'} />
-      )}
-      <div className="image-diagnostics">
-        <Info label="图片来源" value={diagnostic.source} />
-        <Info label="图片大小" value={diagnostic.size ? formatBytes(diagnostic.size) : '-'} />
-        <Info label="图片状态" value={diagnostic.status} />
-        {imageMessage && <p className="error">{imageMessage}</p>}
-        <button type="button" className="secondary-button" onClick={() => setShowDebug((value) => !value)}>
-          {showDebug ? '隐藏调试信息' : '显示调试信息'}
-        </button>
-        {showDebug && (
-          <div className="debug-fields">
-            <Info label="invoice.imageUrl" value={invoice.imageUrl || '-'} />
-            <Info label="invoice.imagePath" value={invoice.imagePath || '-'} />
-            <Info label="invoice.originalImageUrl" value={invoice.originalImageUrl || '-'} />
-            <Info label="invoice.imageId" value={invoice.imageId || '-'} />
-          </div>
-        )}
-      </div>
+    <div className="invoice-image-viewer">
       <div className="row-actions">
-        {imageUrl && <button className="secondary-button" type="button" onClick={() => setFullScreen(true)}>查看原图</button>}
-        <button className="secondary-button" disabled={uploading} onClick={() => fileInputRef.current?.click()}>
-          {uploading ? '上传中...' : '重新上传图片'}
-        </button>
-        <input
-          ref={fileInputRef}
-          className="hidden-file-input"
-          type="file"
-          accept="image/*"
-          onChange={(event) => {
-            rebindImage(event.target.files?.[0]);
-            event.target.value = '';
-          }}
-        />
+        <button type="button" onClick={() => fileRef.current?.click()}>{reuploading ? '上传中...' : '重新上传图片'}</button>
+        <button type="button" onClick={() => setShowDebug((value) => !value)}>{showDebug ? '隐藏调试信息' : '显示调试信息'}</button>
       </div>
-      {fullScreen && imageUrl && (
-        <div className="image-fullscreen" role="dialog" aria-modal="true">
-          <div className="image-fullscreen-toolbar">
-            <span>{invoice.pageCount ? `Page ${invoice.pageNumber || 1} / ${invoice.pageCount}` : '发票原图'}</span>
-            <button type="button" onClick={() => setFullScreen(false)}>关闭</button>
-          </div>
-          <div className="image-fullscreen-scroll">
-            <img src={imageUrl} alt="发票原图全屏预览" />
-          </div>
+      <input ref={fileRef} className="hidden-file-input" type="file" accept="image/*" onChange={(event) => { reupload(event.target.files?.[0]); event.target.value = ''; }} />
+      <p className="hint">图片来源：{diagnostic.source} · 图片大小：{diagnostic.size ? `${diagnostic.size} bytes` : '-'} · 图片状态：{imageStatus === 'loaded' ? '已加载' : imageStatus === 'error' ? '加载失败' : diagnostic.status}</p>
+      {imageUrl && imageStatus !== 'error' && <img className="invoice-full-image" src={imageUrl} alt="发票原图" onLoad={() => { setImageStatus('loaded'); setDiagnostic((current) => ({ ...current, status: '正常' })); }} onError={() => { setImageStatus('error'); setDiagnostic((current) => ({ ...current, status: '加载失败', message: '图片加载失败，请重新上传图片' })); }} />}
+      {imageStatus === 'error' && <p className="error">{diagnostic.message || '图片加载失败，请重新上传图片'}</p>}
+      {showDebug && (
+        <div className="debug-box">
+          <p className="long-text">imageUrl: {invoice?.imageUrl || '-'}</p>
+          <p className="long-text">imagePath: {invoice?.imagePath || '-'}</p>
+          <p className="long-text">imageId: {invoice?.imageId || '-'}</p>
         </div>
       )}
     </div>
@@ -3399,7 +2594,6 @@ function ConfidenceSummary({ parsed = {} }) {
     </div>
   );
 }
-
 function EmptyState({ text }) {
   return <div className="empty-state">{text}</div>;
 }
@@ -3408,7 +2602,7 @@ function Dialog({ title, onClose, children }) {
   return (
     <div className="dialog-backdrop" role="dialog" aria-modal="true">
       <div className="dialog">
-        <div className="dialog-header"><h2>{title}</h2><button onClick={onClose}>关闭</button></div>
+        <div className="dialog-header"><h2>{title}</h2><button onClick={onClose}>鍏抽棴</button></div>
         {children}
       </div>
     </div>
@@ -3417,13 +2611,13 @@ function Dialog({ title, onClose, children }) {
 
 function BottomNav() {
   const items = [
-    ['/archive', FileText, '文档'],
-    ['/', Home, '首页'],
-    ['/invoices', FileText, '发票'],
-    ['/supplier-center', Building2, '采购'],
-    ['/products', Search, '查询'],
-    ['/analytics', BarChart3, '分析'],
-    ['/settings', Settings, '设置']
+    ['/archive', FileText, '鏂囨。'],
+    ['/', Home, '棣栭〉'],
+    ['/invoices', FileText, '鍙戠エ'],
+    ['/supplier-center', Building2, '閲囪喘'],
+    ['/products', Search, '鏌ヨ'],
+    ['/analytics', BarChart3, '鍒嗘瀽'],
+    ['/settings', Settings, '璁剧疆']
   ];
   return (
     <nav className="bottom-nav">
@@ -3560,7 +2754,6 @@ function invoiceIssueReason(invoice = {}) {
   if (isAbnormalInvoice(invoice) && reasons.length === 0) reasons.push('识别结果或金额校验异常');
   return reasons.join(' | ') || '无';
 }
-
 function parseMaybeJson(value) {
   if (!value || typeof value !== 'string') return {};
   try {
@@ -3575,7 +2768,7 @@ function isAdminRole(role) {
 }
 
 function sourceLabel(source) {
-  if (source === 'template') return '妯℃澘';
+  if (source === 'template') return '模板';
   if (source === 'ai') return 'AI Vision';
   if (source === 'plain_ocr') return 'OCR';
   return 'OCR';
@@ -3590,14 +2783,14 @@ function duplicateStatusLabel(status) {
 
 function batchStatusText(entry) {
   if (entry.status === 'skipped') return 'Skipped duplicate file';
-  if (entry.status === 'recognizing') return '🔄 识别中';
-  if (entry.status === 'failed') return '❌ 失败';
-  if (entry.status === 'success' && entry.autoMerged) return '✅ 已自动合并';
+  if (entry.status === 'recognizing') return '识别中';
+  if (entry.status === 'failed') return '失败';
+  if (entry.status === 'success' && entry.autoMerged) return '已自动合并';
   if (entry.status === 'success' && (entry.duplicateStatus === 'confirmed' || entry.isDuplicate)) return '重复发票';
   if (entry.status === 'success' && entry.duplicateStatus === 'possible') return '疑似重复，请确认';
   if (entry.status === 'success' && entry.sameInvoiceGroup) return '同发票号不同金额，可能是多页/同批次';
-  if (entry.status === 'success') return '✅ 已完成';
-  return '⏳ 等待中';
+  if (entry.status === 'success') return '已完成';
+  return '等待中';
 }
 
 function taskStatusToEntryStatus(status) {
@@ -3608,10 +2801,10 @@ function taskStatusToEntryStatus(status) {
 }
 
 function recognitionTaskStatusText(status) {
-  if (status === 'waiting' || status === 'pending') return '⏳ 等待中';
-  if (status === 'processing') return '🔄 识别中';
-  if (status === 'completed') return '✅ 已完成';
-  if (status === 'failed') return '❌ 失败';
+  if (status === 'waiting' || status === 'pending') return '等待中';
+  if (status === 'processing') return '识别中';
+  if (status === 'completed') return '已完成';
+  if (status === 'failed') return '失败';
   return status || '-';
 }
 
@@ -3623,7 +2816,6 @@ function groupBySupplier(entries) {
     return groups;
   }, {});
 }
-
 function emptyDuplicateInfo() {
   return {
     isDuplicate: false,
@@ -3816,7 +3008,7 @@ function analyzeBatchEntries(entries, existingInvoices = []) {
 
     if (entry.status === 'success' && fingerprint.invoiceNo) {
       for (const invoice of existingInvoices) {
-        duplicateInfo = compareInvoiceFingerprints(fingerprint, invoiceFingerprintFromInvoice(invoice), '本地已有发票');
+        duplicateInfo = compareInvoiceFingerprints(fingerprint, invoiceFingerprintFromInvoice(invoice), '鏈湴宸叉湁鍙戠エ');
         if (duplicateInfo.isDuplicate || duplicateInfo.sameInvoiceGroup) break;
       }
 
@@ -3869,7 +3061,7 @@ function normalizeParsedInvoice(parsed = {}) {
   const items = Array.isArray(parsed.items) ? parsed.items : [];
   return {
     ...parsed,
-    supplierName: (parsed.supplierName || '').trim() || '未识别供应商',
+    supplierName: (parsed.supplierName || '').trim() || '鏈瘑鍒緵搴斿晢',
     invoiceNo: (parsed.invoiceNo || '').trim(),
     invoiceDate: normalizeDateInput(parsed.invoiceDate) || today(),
     pageNumber: Number(parsed.pageNumber || 0),
@@ -3982,7 +3174,7 @@ function detectContinuousInvoiceNumbers(entries) {
       const first = run[0].entry.parsed.invoiceNo;
       const last = run[run.length - 1].entry.parsed.invoiceNo;
       for (const item of run) {
-        notes.set(item.entry.id, `杩炵画鍙戠エ鍙凤細${first} - ${last}`);
+        notes.set(item.entry.id, `鏉╃偟鐢婚崣鎴犮偍閸欏嚖绱?{first} - ${last}`);
       }
       run = [];
     }
@@ -4054,7 +3246,7 @@ function summarizePromoGroups(items = []) {
     const key = item.promoGroupId || normalizedKey(item.promoGroupName || item.productNameNormalized || item.productNameOriginal || item.id);
     const current = groups.get(key) || {
       id: key,
-      name: item.promoGroupName || '需要人工确认分摊组',
+      name: item.promoGroupName || '闇€瑕佷汉宸ョ‘璁ゅ垎鎽婄粍',
       rule: item.promoGroupRule || '',
       chargedQty: 0,
       freeQty: 0,
@@ -4070,10 +3262,44 @@ function summarizePromoGroups(items = []) {
     groups.set(key, current);
   }
   return [...groups.values()]
-    .filter((group) => group.freeQty > 0 || group.name === '需要人工确认分摊组')
+    .filter((group) => group.freeQty > 0 || group.name === '闇€瑕佷汉宸ョ‘璁ゅ垎鎽婄粍')
     .map((group) => ({
       ...group,
       originalUnitCost: group.chargedQty > 0 ? group.invoiceAmount / group.chargedQty : 0,
       effectiveUnitCost: group.actualQty > 0 ? group.invoiceAmount / group.actualQty : 0
     }));
 }
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+

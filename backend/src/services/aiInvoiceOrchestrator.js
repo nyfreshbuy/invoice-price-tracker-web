@@ -32,6 +32,20 @@ export async function recognizeInvoice(file, options = {}) {
   try {
     let ocrText = '';
     let ocrLanguage = '';
+    if (options.forceAI) {
+      console.log('[AI VISION FORCED]', { companyId, supplierHint });
+      const aiResult = await recognizeInvoiceWithAI(recognitionPath, { mimeType: recognitionMimeType });
+      const learnedTemplate = await saveOrUpdateTemplateFromResult(aiResult, sampleImageHash, companyId);
+      return responsePayload({
+        source: 'ai',
+        imagePath,
+        ocrText,
+        result: aiResult,
+        template: learnedTemplate,
+        sampleImageHash,
+        ocrLanguage
+      });
+    }
     const hintedTemplate = await findTemplateBySupplierHint(supplierHint, companyId);
     let templateMissReason = '';
     if (hintedTemplate && hintedTemplate.failCount < 3) {
@@ -54,6 +68,33 @@ export async function recognizeInvoice(file, options = {}) {
       const templated = parseWithTemplate(ocrText, hintedTemplate);
       if (templated.success) {
         await markTemplateSuccess(hintedTemplate.id, companyId);
+        try {
+          console.log('[AI VISION ITEM OVERRIDE]', {
+            companyId,
+            stage: 'supplier_hint_template_success',
+            templateId: hintedTemplate.id,
+            templateName: hintedTemplate.supplierName || ''
+          });
+          const aiResult = await recognizeInvoiceWithAI(recognitionPath, { mimeType: recognitionMimeType });
+          const mergedResult = mergeTemplateHeaderWithAiItems(templated.result, aiResult);
+          const learnedTemplate = await saveOrUpdateTemplateFromResult(mergedResult, sampleImageHash, companyId);
+          return responsePayload({
+            source: 'ai',
+            imagePath,
+            ocrText,
+            result: mergedResult,
+            template: learnedTemplate || hintedTemplate,
+            sampleImageHash,
+            ocrLanguage
+          });
+        } catch (error) {
+          console.warn('[AI VISION ITEM OVERRIDE FAILED]', {
+            companyId,
+            stage: 'supplier_hint_template_success',
+            templateId: hintedTemplate.id,
+            reason: error?.message || error
+          });
+        }
         return responsePayload({
           source: 'template',
           imagePath,
@@ -107,6 +148,33 @@ export async function recognizeInvoice(file, options = {}) {
       const templated = parseWithTemplate(ocrText, textTemplate);
       if (templated.success) {
         await markTemplateSuccess(textTemplate.id, companyId);
+        try {
+          console.log('[AI VISION ITEM OVERRIDE]', {
+            companyId,
+            stage: 'ocr_text_template_success',
+            templateId: textTemplate.id,
+            templateName: textTemplate.supplierName || ''
+          });
+          const aiResult = await recognizeInvoiceWithAI(recognitionPath, { mimeType: recognitionMimeType });
+          const mergedResult = mergeTemplateHeaderWithAiItems(templated.result, aiResult);
+          const learnedTemplate = await saveOrUpdateTemplateFromResult(mergedResult, sampleImageHash, companyId);
+          return responsePayload({
+            source: 'ai',
+            imagePath,
+            ocrText,
+            result: mergedResult,
+            template: learnedTemplate || textTemplate,
+            sampleImageHash,
+            ocrLanguage
+          });
+        } catch (error) {
+          console.warn('[AI VISION ITEM OVERRIDE FAILED]', {
+            companyId,
+            stage: 'ocr_text_template_success',
+            templateId: textTemplate.id,
+            reason: error?.message || error
+          });
+        }
         return responsePayload({
           source: 'template',
           imagePath,
@@ -361,6 +429,12 @@ function responsePayload({ source, imagePath, ocrText, result, template, sampleI
       const displayName = item.name || [item.nameCn, item.nameEn].filter(Boolean).join(' ');
       const standardName = item.standardName || displayName;
       const normalizedName = item.normalizedName || standardName.trim().toLowerCase();
+      const quality = evaluateProductNameQuality({
+        ...item,
+        name: standardName,
+        standardName,
+        normalizedName
+      }, { source });
       return {
         nameCn: item.nameCn || '',
         nameEn: item.nameEn || '',
@@ -369,6 +443,12 @@ function responsePayload({ source, imagePath, ocrText, result, template, sampleI
         normalizedName,
         barcode: item.barcode || '',
         spec: item.spec || '',
+        rawOcrLine: item.rawOcrLine || item.ocrLine || '',
+        itemConfidence: Number(item.itemConfidence ?? item.confidence ?? quality.confidence),
+        nameConfidence: Number(item.itemConfidence ?? item.confidence ?? quality.confidence),
+        nameQualityStatus: quality.ok ? 'trusted' : 'needs_review',
+        nameQualityReason: quality.reasons.join(', '),
+        itemRecognitionSource: source,
         productNameOriginal: standardName,
         productNameNormalized: normalizedName,
         category: '',
@@ -379,7 +459,7 @@ function responsePayload({ source, imagePath, ocrText, result, template, sampleI
         totalPrice: item.totalPrice || 0,
         isFreeItem: Boolean(item.isFreeItem) || Number(item.unitPrice || 0) === 0 || Number(item.totalPrice || 0) === 0,
         freeReason: item.freeReason || ((Number(item.unitPrice || 0) === 0 || Number(item.totalPrice || 0) === 0) ? 'free item' : ''),
-        candidateOnly: Boolean(item.candidateOnly),
+        candidateOnly: Boolean(item.candidateOnly) || !quality.ok,
         isHandwrittenQuantity: Boolean(item.isHandwrittenQuantity),
         isHandwrittenPrice: Boolean(item.isHandwrittenPrice),
         isHandwrittenAmount: Boolean(item.isHandwrittenAmount),
@@ -407,6 +487,49 @@ function responsePayload({ source, imagePath, ocrText, result, template, sampleI
     templateId: template?.id || null,
     sampleImageHash,
     message: source === 'template' ? 'Template parsed invoice' : source === 'ai' ? 'AI Vision parsed invoice' : 'OCR fallback parsed invoice'
+  };
+}
+
+function mergeTemplateHeaderWithAiItems(templateResult = {}, aiResult = {}) {
+  return {
+    ...templateResult,
+    ...aiResult,
+    supplierName: templateResult.supplierName || aiResult.supplierName || '',
+    supplierNameChinese: templateResult.supplierNameChinese || aiResult.supplierNameChinese || '',
+    supplierNameEnglish: templateResult.supplierNameEnglish || aiResult.supplierNameEnglish || '',
+    invoiceNo: templateResult.invoiceNo || aiResult.invoiceNo || '',
+    invoiceDate: templateResult.invoiceDate || aiResult.invoiceDate || '',
+    totalAmount: Number(templateResult.totalAmount || 0) > 0 ? templateResult.totalAmount : aiResult.totalAmount,
+    pageNumber: templateResult.pageNumber || aiResult.pageNumber || 0,
+    pageCount: templateResult.pageCount || aiResult.pageCount || 0,
+    invoiceGroupKey: templateResult.invoiceGroupKey || aiResult.invoiceGroupKey || '',
+    invoiceLayoutType: templateResult.invoiceLayoutType || aiResult.invoiceLayoutType || 'normal_invoice',
+    items: Array.isArray(aiResult.items) ? aiResult.items : [],
+    warnings: [...(templateResult.warnings || []), ...(aiResult.warnings || []), 'Product items were extracted by AI Vision; template/OCR used only as header assistance.'],
+    confidence: Math.max(Number(templateResult.confidence || 0), Number(aiResult.confidence || 0))
+  };
+}
+
+function evaluateProductNameQuality(item = {}, context = {}) {
+  const name = String(item.standardName || item.name || item.productNameOriginal || [item.nameCn, item.nameEn].filter(Boolean).join(' ') || '').trim();
+  const confidence = Number(item.itemConfidence ?? item.confidence ?? (context.source === 'ai' ? 0.82 : 0.45));
+  const reasons = [];
+  if (!name) reasons.push('empty_name');
+  if (confidence < 0.55) reasons.push('low_confidence');
+  if (/={1,}|\*{2,}|\?{2,}|[_|]{3,}/.test(name)) reasons.push('symbol_noise');
+  const compact = name.replace(/\s+/g, '');
+  if (compact.length <= 2 && !/[\u3400-\u9fff]/.test(compact)) reasons.push('too_short');
+  const symbolCount = (name.match(/[^A-Za-z0-9\u3400-\u9fff\s.&'’()\-/]/g) || []).length;
+  if (name.length > 0 && symbolCount / name.length > 0.22) reasons.push('too_many_symbols');
+  const alphaTokens = name.match(/[A-Za-z]+/g) || [];
+  const shortAlphaTokens = alphaTokens.filter((token) => token.length <= 2).length;
+  if (alphaTokens.length >= 3 && shortAlphaTokens / alphaTokens.length > 0.65) reasons.push('broken_english_tokens');
+  if (/^[a-z]{1,4}\s*[=:-]?$/i.test(name)) reasons.push('ocr_fragment');
+  if (context.source !== 'ai') reasons.push('not_ai_verified');
+  return {
+    ok: reasons.length === 0,
+    confidence,
+    reasons
   };
 }
 
