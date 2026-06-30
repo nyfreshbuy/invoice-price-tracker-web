@@ -1803,6 +1803,10 @@ export const localDb = {
     const invoices = allInvoices.filter(approvedForStats);
     const pendingInvoices = allInvoices.filter(pendingReviewInvoice);
     const abnormalInvoices = allInvoices.filter(abnormalInvoice);
+    const duplicateInvoices = allInvoices.filter((invoice) => ['duplicate', 'confirmed'].includes(String(invoice.duplicateStatus || '').toLowerCase())
+      || String(invoice.status || '').toUpperCase() === 'DUPLICATE');
+    const conflictInvoices = allInvoices.filter((invoice) => String(invoice.syncStatus || '').toLowerCase() === 'conflict'
+      || String(invoice.status || '').toUpperCase() === 'CONFLICT');
     const approvedInvoiceIds = invoiceIdSet(invoices);
     const items = (await all('invoice_items')).filter((item) => active(item) && approvedInvoiceIds.has(item.invoiceId) && !Number(item.candidateOnly || 0) && !Number(item.isDiscountLine || 0) && trustedItemName(item));
     const discounts = (await all('invoice_discounts')).filter((discount) => active(discount) && approvedInvoiceIds.has(discount.invoiceId));
@@ -1824,7 +1828,9 @@ export const localDb = {
       giftValueTotal: items.reduce((sum, item) => sum + moneyNumber(item.freeQty) * moneyNumber(item.effectiveUnitCost || item.unitPrice), 0),
       discountTotal: discounts.reduce((sum, discount) => sum + moneyNumber(discount.amount), 0),
       abnormalInvoiceCount: abnormalInvoices.length,
-      pendingInvoiceCount: pendingInvoices.length
+      pendingInvoiceCount: pendingInvoices.length,
+      duplicateInvoiceCount: duplicateInvoices.length,
+      conflictInvoiceCount: conflictInvoices.length
     };
     console.log('[dashboard] local IndexedDB stats query:', {
       companyId: getCurrentCompanyId(),

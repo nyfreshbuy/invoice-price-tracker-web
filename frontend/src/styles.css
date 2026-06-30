@@ -55,6 +55,30 @@ a {
 
 .app-shell { min-height: 100dvh; }
 
+.page-error {
+  width: min(720px, 100%);
+  min-height: 100dvh;
+  margin: 0 auto;
+  padding: calc(24px + env(safe-area-inset-top)) max(16px, env(safe-area-inset-right)) calc(24px + env(safe-area-inset-bottom)) max(16px, env(safe-area-inset-left));
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  overflow-x: hidden;
+}
+
+.page-error h1,
+.page-error p,
+.page-error summary,
+.page-error pre {
+  max-width: 100%;
+  overflow-wrap: anywhere;
+}
+
+.page-error pre {
+  max-height: 45dvh;
+  overflow: auto;
+}
+
 .auth-shell {
   min-height: 100dvh;
   display: grid;

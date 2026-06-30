@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from 'react';
+import { Component, useEffect, useMemo, useRef, useState } from 'react';
 import { Link, NavLink, Route, Routes, useLocation, useNavigate, useParams } from 'react-router-dom';
 import {
   Building2,
@@ -98,6 +98,107 @@ const emptyTemplate = (supplierName = '') => ({
   notes: ''
 });
 
+const APP_VERSION = import.meta.env.VITE_APP_VERSION || 'web-pwa';
+const ERROR_UI_TEXT = {
+  title: '\u9875\u9762\u52a0\u8f7d\u5931\u8d25',
+  body: '\u9875\u9762\u7ec4\u4ef6\u6e32\u67d3\u65f6\u53d1\u751f\u9519\u8bef\uff0c\u9519\u8bef\u65e5\u5fd7\u5df2\u4fdd\u5b58\u5728\u672c\u673a\u3002',
+  reload: '\u91cd\u65b0\u52a0\u8f7d',
+  home: '\u8fd4\u56de\u9996\u9875',
+  log: '\u67e5\u770b\u9519\u8bef\u65e5\u5fd7'
+};
+
+function recordPageError(error, info = {}, pageName = 'unknown') {
+  const session = getAuthSession?.() || {};
+  const entry = {
+    pageName,
+    url: typeof window !== 'undefined' ? window.location.href : '',
+    message: error?.message || String(error || 'Unknown error'),
+    stack: error?.stack || '',
+    componentStack: info?.componentStack || '',
+    user: session?.user?.email || session?.user?.username || '',
+    companyId: session?.company?.id || session?.user?.companyId || '',
+    appVersion: APP_VERSION,
+    createdAt: new Date().toISOString()
+  };
+  console.error('[PAGE_RUNTIME_ERROR]', entry);
+  try {
+    const key = 'invoice_runtime_error_logs';
+    const existing = JSON.parse(localStorage.getItem(key) || '[]');
+    localStorage.setItem(key, JSON.stringify([entry, ...existing].slice(0, 30)));
+  } catch (storageError) {
+    console.warn('[PAGE_RUNTIME_ERROR_LOG_FAILED]', storageError);
+  }
+}
+
+class PageErrorBoundary extends Component {
+  constructor(props) {
+    super(props);
+    this.state = { error: null, info: null };
+  }
+
+  static getDerivedStateFromError(error) {
+    return { error };
+  }
+
+  componentDidCatch(error, info) {
+    this.setState({ info });
+    recordPageError(error, info, this.props.pageName);
+  }
+
+  componentDidUpdate(previousProps) {
+    if (previousProps.resetKey !== this.props.resetKey && this.state.error) {
+      this.setState({ error: null, info: null });
+    }
+  }
+
+  render() {
+    if (!this.state.error) return this.props.children;
+    return <PageErrorFallback error={this.state.error} info={this.state.info} pageName={this.props.pageName} />;
+  }
+}
+
+function PageErrorFallback({ error, info, pageName }) {
+  const log = {
+    pageName,
+    url: typeof window !== 'undefined' ? window.location.href : '',
+    message: error?.message || String(error || ''),
+    stack: error?.stack || '',
+    componentStack: info?.componentStack || '',
+    appVersion: APP_VERSION
+  };
+  return (
+    <div className="page-error">
+      <h1>{ERROR_UI_TEXT.title}</h1>
+      <p>{ERROR_UI_TEXT.body}</p>
+      <div className="row-actions">
+        <button type="button" onClick={() => window.location.reload()}>{ERROR_UI_TEXT.reload}</button>
+        <a className="icon-button" href="/">{ERROR_UI_TEXT.home}</a>
+      </div>
+      <details>
+        <summary>{ERROR_UI_TEXT.log}</summary>
+        <pre className="ocr-text">{JSON.stringify(log, null, 2)}</pre>
+      </details>
+    </div>
+  );
+}
+
+function PageBoundary({ pageName, children }) {
+  const location = useLocation();
+  return (
+    <PageErrorBoundary pageName={pageName} resetKey={`${location.pathname}${location.search}`}>
+      {children}
+    </PageErrorBoundary>
+  );
+}
+
+function ProtectedPage({ pageName, session, children }) {
+  return (
+    <PageBoundary pageName={pageName}>
+      <RequireAuth session={session}>{children}</RequireAuth>
+    </PageBoundary>
+  );
+}
+
 export default function App() {
   const [authSession, setAuthState] = useState(() => getAuthSession());
   const [authStatus, setAuthStatus] = useState(() => {
@@ -108,6 +209,21 @@ export default function App() {
   const [authNotice, setAuthNotice] = useState('');
   const [syncState, setSyncState] = useState({ label: '已同步', pendingCount: 0, online: navigator.onLine, syncing: false });
   const [syncingNow, setSyncingNow] = useState(false);
+
+  useEffect(() => {
+    const handleWindowError = (event) => {
+      recordPageError(event.error || event.message, { componentStack: 'window.error' }, 'global');
+    };
+    const handleUnhandledRejection = (event) => {
+      recordPageError(event.reason || 'Unhandled promise rejection', { componentStack: 'unhandledrejection' }, 'global');
+    };
+    window.addEventListener('error', handleWindowError);
+    window.addEventListener('unhandledrejection', handleUnhandledRejection);
+    return () => {
+      window.removeEventListener('error', handleWindowError);
+      window.removeEventListener('unhandledrejection', handleUnhandledRejection);
+    };
+  }, []);
 
   useEffect(() => {
     let mounted = true;
@@ -256,7 +372,7 @@ export default function App() {
   if (window.location.pathname.startsWith('/invite/')) {
     return (
       <Routes>
-        <Route path="/invite/:token" element={<InvitationAcceptPage onAuthenticated={setAuthState} />} />
+        <Route path="/invite/:token" element={<PageBoundary pageName="InvitationAccept"><InvitationAcceptPage onAuthenticated={setAuthState} /></PageBoundary>} />
       </Routes>
     );
   }
@@ -275,24 +391,24 @@ export default function App() {
       <AuthStatusBanner status={authStatus} message={authNotice} onRetry={handleRetryAuth} />
       <main className="main">
         <Routes>
-          <Route path="/" element={<RequireAuth session={authSession}><HomeDashboardPage /></RequireAuth>} />
-          <Route path="/invoices" element={<RequireAuth session={authSession}><InvoiceListPage /></RequireAuth>} />
-          <Route path="/invoices/new" element={<RequireAuth session={authSession}><InvoiceFormPage /></RequireAuth>} />
-          <Route path="/invoices/batch" element={<RequireAuth session={authSession}><BatchImportPage /></RequireAuth>} />
-          <Route path="/recognition-tasks" element={<RequireAuth session={authSession}><RecognitionTaskListPage /></RequireAuth>} />
-          <Route path="/archive" element={<RequireAuth session={authSession}><InvoiceArchivePage /></RequireAuth>} />
-          <Route path="/invoices/:id" element={<RequireAuth session={authSession}><InvoiceDetailPageWithGifts /></RequireAuth>} />
-          <Route path="/products" element={<RequireAuth session={authSession}><ProductSearchPage /></RequireAuth>} />
-          <Route path="/products/:name" element={<RequireAuth session={authSession}><ProductDetailPage /></RequireAuth>} />
-          <Route path="/supplier-center" element={<RequireAuth session={authSession}><SupplierCenterPage /></RequireAuth>} />
-          <Route path="/suppliers/:id" element={<RequireAuth session={authSession}><SupplierDetailPage /></RequireAuth>} />
-          <Route path="/suppliers/:id/products" element={<RequireAuth session={authSession}><SupplierProductsPage /></RequireAuth>} />
-          <Route path="/suppliers" element={<RequireAuth session={authSession}><SupplierPage /></RequireAuth>} />
-          <Route path="/suppliers/:id/invoices" element={<RequireAuth session={authSession}><SupplierInvoiceHistoryPage /></RequireAuth>} />
-          <Route path="/account-connections" element={<RequireAuth session={authSession}><AccountConnectionPage /></RequireAuth>} />
-          <Route path="/invite/:token" element={<InvitationAcceptPage onAuthenticated={setAuthState} />} />
-          <Route path="/analytics" element={<RequireAuth session={authSession}><PurchaseAnalysisPage /></RequireAuth>} />
-          <Route path="/settings" element={<RequireAuth session={authSession}><SettingsPage /></RequireAuth>} />
+          <Route path="/" element={<ProtectedPage pageName="HomeDashboard" session={authSession}><HomeDashboardPage /></ProtectedPage>} />
+          <Route path="/invoices" element={<ProtectedPage pageName="InvoiceList" session={authSession}><InvoiceListPage /></ProtectedPage>} />
+          <Route path="/invoices/new" element={<ProtectedPage pageName="InvoiceForm" session={authSession}><InvoiceFormPage /></ProtectedPage>} />
+          <Route path="/invoices/batch" element={<ProtectedPage pageName="BatchImport" session={authSession}><BatchImportPage /></ProtectedPage>} />
+          <Route path="/recognition-tasks" element={<ProtectedPage pageName="RecognitionTaskList" session={authSession}><RecognitionTaskListPage /></ProtectedPage>} />
+          <Route path="/archive" element={<ProtectedPage pageName="InvoiceArchive" session={authSession}><InvoiceArchivePage /></ProtectedPage>} />
+          <Route path="/invoices/:id" element={<ProtectedPage pageName="InvoiceDetail" session={authSession}><InvoiceDetailPageWithGifts /></ProtectedPage>} />
+          <Route path="/products" element={<ProtectedPage pageName="ProductSearch" session={authSession}><ProductSearchPage /></ProtectedPage>} />
+          <Route path="/products/:name" element={<ProtectedPage pageName="ProductDetail" session={authSession}><ProductDetailPage /></ProtectedPage>} />
+          <Route path="/supplier-center" element={<ProtectedPage pageName="SupplierCenter" session={authSession}><SupplierCenterPage /></ProtectedPage>} />
+          <Route path="/suppliers/:id" element={<ProtectedPage pageName="SupplierDetail" session={authSession}><SupplierDetailPage /></ProtectedPage>} />
+          <Route path="/suppliers/:id/products" element={<ProtectedPage pageName="SupplierProducts" session={authSession}><SupplierProductsPage /></ProtectedPage>} />
+          <Route path="/suppliers" element={<ProtectedPage pageName="SupplierList" session={authSession}><SupplierPage /></ProtectedPage>} />
+          <Route path="/suppliers/:id/invoices" element={<ProtectedPage pageName="SupplierInvoiceHistory" session={authSession}><SupplierInvoiceHistoryPage /></ProtectedPage>} />
+          <Route path="/account-connections" element={<ProtectedPage pageName="AccountConnection" session={authSession}><AccountConnectionPage /></ProtectedPage>} />
+          <Route path="/invite/:token" element={<PageBoundary pageName="InvitationAccept"><InvitationAcceptPage onAuthenticated={setAuthState} /></PageBoundary>} />
+          <Route path="/analytics" element={<ProtectedPage pageName="PurchaseAnalysis" session={authSession}><PurchaseAnalysisPage /></ProtectedPage>} />
+          <Route path="/settings" element={<ProtectedPage pageName="Settings" session={authSession}><SettingsPage /></ProtectedPage>} />
         </Routes>
       </main>
       <BottomNav />
@@ -450,9 +566,9 @@ function SyncBar({ state, session, syncingNow, onSyncNow, onLogout }) {
   );
 }
 
-function HomePage() {
-  return (
-    <Page title="InvoicePriceTracker" subtitle="云端存储、本地离线、自动同步">
+function HomePage({ embedded = false }) {
+  const content = (
+    <>
       <Section title="发票">
         <ActionLink to="/invoices/new" icon={<Camera />} title="新增发票" subtitle="上传后创建后台识别任务，完成后自动保存" />
         <ActionLink to="/invoices/batch" icon={<Upload />} title="批量导入发票" subtitle="多张图片批量创建后台识别任务" />
@@ -467,8 +583,10 @@ function HomePage() {
         <ActionLink to="/account-connections" icon={<UserPlus />} title="账户连接" subtitle="搜索账户、发送连接申请、审批收到的申请" />
         <ActionLink to="/settings" icon={<Settings />} title="设置/导出" subtitle="查看本地统计、导出云端 CSV" />
       </Section>
-    </Page>
+    </>
   );
+  if (embedded) return content;
+  return <Page title="InvoicePriceTracker" subtitle="云端存储、本地离线、自动同步">{content}</Page>;
 }
 function InvoiceListPage() {
   const location = useLocation();
@@ -1340,7 +1458,14 @@ function InvoiceDetailPage() {
 }
 function HomeDashboardPage() {
   const [dashboard, setDashboard] = useState(null);
-  const load = () => localDb.getDashboardStats().then(setDashboard);
+  const load = () => {
+    const readDashboard = localDb.getDashboardStats || localDb.getDashboardMetrics;
+    if (typeof readDashboard !== 'function') {
+      setDashboard({});
+      return Promise.resolve();
+    }
+    return readDashboard.call(localDb).then((data) => setDashboard(data || {}));
+  };
   useLocalReload(load);
   return (
     <Page title="InvoicePriceTracker" subtitle="采购数据库、供应商数据库、历史价格数据库">
@@ -1361,7 +1486,7 @@ function HomeDashboardPage() {
           <Metric label="折扣总金额" value={money(dashboard?.discountAmount)} />
         </div>
       </Section>
-      <HomePage />
+      <HomePage embedded />
     </Page>
   );
 }
@@ -1558,7 +1683,7 @@ function InvoiceDetailPageWithGifts() {
         {items.map((item) => (
           <div className="detail-item" key={item.id}>
             <div className="split"><strong>{item.productNameOriginal}</strong><button type="button" onClick={() => setEditingItem(item)}>编辑</button></div>
-            <p>标准名：{item.productNameNormalized || '-'}</p>
+            <p>标准名：{standardProductNameText(item)}</p>
             <p>数量 {numberText(item.quantity)} {item.unit} · 原单价 {money(item.unitPrice)} · 总价 {money(item.totalPrice)}</p>
             <p>是否赠品：{Number(item.isFreeItem || 0) ? `是（${item.freeReason || '免费行'}）` : '否'} · 收费数量 {numberText(item.chargedQty)} · 免费数量 {numberText(item.freeQty)} · 实际数量 {numberText(item.totalQty)}</p>
             <p>原始单价 {money(item.originalUnitCost || item.unitPrice)} · 实际摊薄成本 {money(item.effectiveUnitCost || item.unitPrice)} · 折后实际成本 {money(item.discountedEffectiveUnitCost || item.effectiveUnitCost || item.unitPrice)}</p>
@@ -1614,7 +1739,7 @@ function InvoiceEditDialog({ invoice, onClose, onSave }) {
         <label className="field"><span>金额</span><input type="number" value={form.totalAmount} onChange={(event) => update('totalAmount', event.target.value)} /></label>
       </div>
       <label className="field"><span>备注</span><textarea value={form.notes} onChange={(event) => update('notes', event.target.value)} /></label>
-      <div className="dialog-actions sticky-actions">
+      <div className="dialog-actions sticky-actions sticky-dialog-actions">
         <button className="secondary-button" type="button" disabled={saving} onClick={onClose}>取消</button>
         <button className="primary-button success-button" type="button" disabled={saving} onClick={save}>{saving ? '处理中...' : '保存发票'}</button>
       </div>
@@ -1685,7 +1810,7 @@ function InvoiceItemEditDialog({ item, onClose, onSave }) {
           <label className="field"><span>OCR 原文行</span><input value={form.rawOcrLine || ''} onChange={(event) => update('rawOcrLine', event.target.value)} /></label>
         </CollapsibleSection>
       </div>
-      <div className="dialog-actions sticky-actions">
+      <div className="dialog-actions sticky-actions sticky-dialog-actions">
         <button className="secondary-button" type="button" disabled={saving} onClick={onClose}>取消</button>
         <button className="primary-button success-button" type="button" disabled={saving} onClick={save}>{saving ? '保存中...' : '保存商品'}</button>
       </div>
@@ -1732,7 +1857,7 @@ function PromoAllocationDialog({ items, onClose, onSave }) {
           </div>
         ))}
       </div>
-      <div className="dialog-actions sticky-actions">
+      <div className="dialog-actions sticky-actions sticky-dialog-actions">
         <button className="secondary-button" type="button" disabled={saving} onClick={onClose}>取消</button>
         <button className="primary-button success-button" type="button" disabled={saving} onClick={save}>{saving ? '保存中...' : '保存分摊'}</button>
       </div>
@@ -2301,10 +2426,10 @@ function SettingsPage() {
     window.addEventListener('sync-state-change', handler);
     return () => window.removeEventListener('sync-state-change', handler);
   }, []);
-  async function syncNow() {
+  async function handleSettingsSyncNow() {
     setSyncing(true);
     try {
-      const result = await manualSyncNow();
+      const result = await syncNow({ force: true, reason: 'settings' });
       setMessage(result?.ok === false ? '同步失败，请查看同步状态' : '同步完成');
       await load();
     } catch (error) {
@@ -2361,7 +2486,7 @@ function SettingsPage() {
         <Info label="最后同步时间" value={syncSnapshot.lastSyncTime || '-'} />
         <Info label="最近错误" value={syncSnapshot.lastError || '无'} />
         <div className="row-actions">
-          <button className="primary-button" disabled={syncing || syncSnapshot.syncing} onClick={syncNow}>{syncing || syncSnapshot.syncing ? '同步中...' : '立即同步'}</button>
+          <button className="primary-button" disabled={syncing || syncSnapshot.syncing} onClick={handleSettingsSyncNow}><RefreshCw size={16} />{syncing || syncSnapshot.syncing ? '同步中...' : '立即同步'}</button>
           <button type="button" disabled={syncing} onClick={restoreCloud}>从云端恢复</button>
           <button type="button" disabled={syncing} onClick={clearLocalAndRestore}>清空本地缓存后重新拉取</button>
         </div>
@@ -2544,7 +2669,7 @@ function InvoiceImageViewer({ invoice, onUpdated }) {
         <button type="button" onClick={() => setShowDebug((value) => !value)}>{showDebug ? '隐藏调试信息' : '显示调试信息'}</button>
       </div>
       <input ref={fileRef} className="hidden-file-input" type="file" accept="image/*" onChange={(event) => { reupload(event.target.files?.[0]); event.target.value = ''; }} />
-      <p className="hint">图片来源：{diagnostic.source} · 图片大小：{diagnostic.size ? `${diagnostic.size} bytes` : '-'} · 图片状态：{imageStatus === 'loaded' ? '已加载' : imageStatus === 'error' ? '加载失败' : diagnostic.status}</p>
+      <p className="hint image-diagnostics">图片来源：{diagnostic.source} · 图片大小：{diagnostic.size ? `${diagnostic.size} bytes` : '-'} · 图片状态：{imageStatus === 'loaded' ? '已加载' : imageStatus === 'error' ? '加载失败' : diagnostic.status}</p>
       {imageUrl && imageStatus !== 'error' && <img className="invoice-full-image" src={imageUrl} alt="发票原图" onLoad={() => { setImageStatus('loaded'); setDiagnostic((current) => ({ ...current, status: '正常' })); }} onError={() => { setImageStatus('error'); setDiagnostic((current) => ({ ...current, status: '加载失败', message: '图片加载失败，请重新上传图片' })); }} />}
       {imageStatus === 'error' && <p className="error">{diagnostic.message || '图片加载失败，请重新上传图片'}</p>}
       {showDebug && (
@@ -3116,6 +3241,13 @@ function displayInvoiceItemName(item = {}) {
 
 function displayInvoiceItemNormalizedName(item = {}) {
   return String(item.normalizedName || item.productNameNormalized || displayInvoiceItemName(item)).trim().toLowerCase();
+}
+
+function standardProductNameText(item = {}) {
+  const original = displayInvoiceItemName(item).trim().toLowerCase();
+  const normalized = displayInvoiceItemNormalizedName(item);
+  if (!normalized) return '-';
+  return normalized === original ? '同商品名称' : normalized;
 }
 
 function normalizeDateInput(value) {
