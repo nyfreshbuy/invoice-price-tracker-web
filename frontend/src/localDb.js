@@ -1,4 +1,5 @@
 import { getCompanyId as getAuthCompanyId } from './api.js';
+import { hasEncodingDamage, repairRecordEncoding, repairTextEncoding } from './encoding.js';
 
 const DB_NAME = 'InvoicePriceTrackerLocal';
 const DB_VERSION = 12;
@@ -42,7 +43,7 @@ export function getDeviceId() {
 }
 
 export function normalizeProductName(value = '') {
-  return value
+  return repairTextEncoding(value)
     .trim()
     .replace(/干页豆腐/g, '千页豆腐')
     .replace(/仟页豆腐/g, '千页豆腐')
@@ -75,7 +76,7 @@ const supplierTraditionalMap = {
 };
 
 export function normalizeSupplierName(value = '') {
-  const simplified = String(value || '')
+  const simplified = String(repairTextEncoding(value) || '')
     .replace(/[\uFF01-\uFF5E]/g, (char) => String.fromCharCode(char.charCodeAt(0) - 0xFEE0))
     .replace(/\u3000/g, ' ')
     .replace(/[閩國際貿進東華聯業]/g, (char) => supplierTraditionalMap[char] || char)
@@ -86,7 +87,7 @@ export function normalizeSupplierName(value = '') {
 }
 
 function supplierAliasesFromName(value = '') {
-  const raw = String(value || '').trim();
+  const raw = String(repairTextEncoding(value) || '').trim();
   const normalized = normalizeSupplierName(raw);
   const english = cleanSupplierEnglishName(raw.match(/[A-Za-z][A-Za-z0-9&.,'\-\s]+/g)?.join(' ') || '');
   const chinese = raw.match(/[\u3400-\u9fff]+/g)?.join('').trim() || '';
@@ -110,7 +111,7 @@ function titleCaseEnglishCompany(value = '') {
     'CORP.': 'Corp.',
     CORPORATION: 'Corp.'
   };
-  return String(value || '')
+  return String(repairTextEncoding(value) || '')
     .split(/\s+/)
     .filter(Boolean)
     .map((word) => {
@@ -145,7 +146,7 @@ function collapseRepeatedWordSequence(words = []) {
 }
 
 function cleanSupplierEnglishName(value = '') {
-  const normalized = String(value || '')
+  const normalized = String(repairTextEncoding(value) || '')
     .replace(/[\uFF01-\uFF5E]/g, (char) => String.fromCharCode(char.charCodeAt(0) - 0xFEE0))
     .replace(/[^A-Za-z0-9&.'\-\s]/g, ' ')
     .replace(/\s+/g, ' ')
@@ -156,7 +157,7 @@ function cleanSupplierEnglishName(value = '') {
 }
 
 function splitSupplierNameParts(value = '') {
-  const raw = String(value || '')
+  const raw = String(repairTextEncoding(value) || '')
     .replace(/[\uFF01-\uFF5E]/g, (char) => String.fromCharCode(char.charCodeAt(0) - 0xFEE0))
     .replace(/\u3000/g, ' ');
   return {
@@ -167,7 +168,7 @@ function splitSupplierNameParts(value = '') {
 
 function buildSupplierDisplayName({ supplierNameChinese = '', supplierNameEnglish = '', supplierDisplayName = '', displayName = '', name = '' } = {}) {
   const fallback = splitSupplierNameParts(supplierDisplayName || displayName || name);
-  const chinese = String(supplierNameChinese || fallback.supplierNameChinese || '').trim();
+  const chinese = String(repairTextEncoding(supplierNameChinese) || fallback.supplierNameChinese || '').trim();
   const english = cleanSupplierEnglishName(supplierNameEnglish || fallback.supplierNameEnglish || '');
   return [chinese, english].filter(Boolean).join(' ') || cleanSupplierEnglishName(supplierDisplayName || displayName || name) || String(supplierDisplayName || displayName || name || '').trim();
 }
@@ -207,7 +208,81 @@ function giftAccountingKey(item = {}) {
 }
 
 function displayItemName(item = {}) {
-  return String(item.name || item.productNameOriginal || [item.nameCn, item.nameEn].filter(Boolean).join(' ') || item.rawName || '').trim();
+  return repairTextEncoding(String(item.name || item.productNameOriginal || [item.nameCn, item.nameEn].filter(Boolean).join(' ') || item.rawName || '').trim());
+}
+
+function productRawName(record = {}, item = {}, product = {}) {
+  return repairTextEncoding(String(
+    record.productName
+    || record.productNameOriginal
+    || record.originalName
+    || record.itemName
+    || record.name
+    || item.productNameOriginal
+    || item.rawName
+    || item.name
+    || product.name
+    || ''
+  ).trim());
+}
+
+function productStandardName(record = {}, item = {}, product = {}) {
+  return repairTextEncoding(String(
+    record.normalizedName
+    || record.productNameNormalized
+    || record.standardName
+    || product.normalizedName
+    || product.name
+    || item.productNameNormalized
+    || item.normalizedName
+    || productRawName(record, item, product)
+    || ''
+  ).trim());
+}
+
+function productDisplayName(record = {}, item = {}, product = {}) {
+  const cn = repairTextEncoding(String(record.nameCn || item.nameCn || '').trim());
+  const en = repairTextEncoding(String(record.nameEn || item.nameEn || '').trim());
+  if (cn && en) return `${cn} / ${en}`;
+  return productRawName(record, item, product)
+    || productStandardName(record, item, product)
+    || '未命名商品';
+}
+
+function productSearchText(record = {}, item = {}, product = {}) {
+  return [
+    productDisplayName(record, item, product),
+    productRawName(record, item, product),
+    productStandardName(record, item, product),
+    record.productName,
+    record.productNameOriginal,
+    record.originalName,
+    record.itemName,
+    record.name,
+    item.productNameOriginal,
+    item.productNameNormalized,
+    item.rawName,
+    item.name,
+    product.name,
+    product.normalizedName
+  ].map((value) => normalizeProductName(value || '')).filter(Boolean).join(' ');
+}
+
+function priceHistoryNameFields(item = {}, product = {}) {
+  const productNameOriginal = productRawName({}, item, product);
+  const productNameNormalized = productStandardName({}, item, product) || normalizeProductName(productNameOriginal);
+  const productName = productDisplayName({}, item, product);
+  return {
+    productName,
+    productNameOriginal,
+    productNameNormalized,
+    normalizedName: normalizeProductName(productNameNormalized || productNameOriginal),
+    originalName: productNameOriginal,
+    itemName: productNameOriginal,
+    name: productName,
+    nameCn: item.nameCn || '',
+    nameEn: item.nameEn || ''
+  };
 }
 
 function promoGroupCandidate(item = {}) {
@@ -372,14 +447,15 @@ async function all(table) {
 
 async function put(table, record) {
   const { objectStore } = await store(table, 'readwrite');
-  await promisify(objectStore.put(record));
+  const nextRecord = table === 'invoice_images' ? record : repairRecordEncoding(record);
+  await promisify(objectStore.put(nextRecord));
   window.dispatchEvent(new CustomEvent('local-db-change', { detail: { table } }));
-  return record;
+  return nextRecord;
 }
 
 async function putMany(table, records) {
   const { tx, objectStore } = await store(table, 'readwrite');
-  for (const record of records) objectStore.put(record);
+  for (const record of records) objectStore.put(table === 'invoice_images' ? record : repairRecordEncoding(record));
   await new Promise((resolve, reject) => {
     tx.oncomplete = resolve;
     tx.onerror = () => reject(tx.error);
@@ -731,20 +807,24 @@ export const localDb = {
 
   async mergeRemote(table, remote) {
     if (!belongsToCurrentCompany(remote)) return;
+    const repairedRemote = repairRecordEncoding(remote);
+    const encodingFixed = repairedRemote !== remote;
     const records = await all(table);
     const local = records.find((record) => record.serverId === remote.serverId || record.serverId === remote.id || record.id === remote.serverId || record.id === remote.id);
     if (local && local.syncStatus === 'pending' && local.updatedAt > remote.updatedAt) return;
     if (local && local.syncStatus === 'pending' && local.updatedAt <= remote.updatedAt && ['invoices', 'invoice_items'].includes(table)) {
-      await put(table, { ...local, syncStatus: 'conflict', conflictRecord: JSON.stringify(remote) });
+      await put(table, { ...local, syncStatus: 'conflict', conflictRecord: JSON.stringify(repairedRemote) });
       return;
     }
     const id = local?.id || remote.serverId || remote.id || generateId();
     await put(table, {
-      ...remote,
+      ...repairedRemote,
       id,
       localId: local?.localId || remote.localId || id,
       serverId: remote.serverId || remote.id,
-      syncStatus: remote.deletedAt ? 'deleted' : 'synced',
+      syncStatus: remote.deletedAt ? 'deleted' : (encodingFixed ? 'pending' : 'synced'),
+      encodingFixedAt: encodingFixed ? nowIso() : repairedRemote.encodingFixedAt,
+      updatedAt: encodingFixed ? nowIso() : repairedRemote.updatedAt,
       version: Number(remote.version || local?.version || 1)
     });
   },
@@ -761,25 +841,29 @@ export const localDb = {
     let imported = 0;
     let skipped = 0;
     for (const remote of incoming) {
+      const repairedRemote = repairRecordEncoding(remote);
+      const encodingFixed = repairedRemote !== remote;
       const local = localByKey.get(remote.serverId) || localByKey.get(remote.id);
       if (local && local.syncStatus === 'pending' && local.updatedAt > remote.updatedAt) {
         skipped += 1;
         continue;
       }
       if (local && local.syncStatus === 'pending' && local.updatedAt <= remote.updatedAt && ['invoices', 'invoice_items'].includes(table)) {
-        objectStore.put({ ...local, syncStatus: 'conflict', conflictRecord: JSON.stringify(remote) });
+        objectStore.put(repairRecordEncoding({ ...local, syncStatus: 'conflict', conflictRecord: JSON.stringify(repairedRemote) }));
         imported += 1;
         continue;
       }
       const id = local?.id || remote.serverId || remote.id || generateId();
-      objectStore.put({
-        ...remote,
+      objectStore.put(repairRecordEncoding({
+        ...repairedRemote,
         id,
         localId: local?.localId || remote.localId || id,
         serverId: remote.serverId || remote.id,
-        syncStatus: remote.deletedAt ? 'deleted' : 'synced',
+        syncStatus: remote.deletedAt ? 'deleted' : (encodingFixed ? 'pending' : 'synced'),
+        encodingFixedAt: encodingFixed ? nowIso() : repairedRemote.encodingFixedAt,
+        updatedAt: encodingFixed ? nowIso() : repairedRemote.updatedAt,
         version: Number(remote.version || local?.version || 1)
-      });
+      }));
       imported += 1;
     }
     await new Promise((resolve, reject) => {
@@ -1166,6 +1250,7 @@ export const localDb = {
         invoiceId: detail.invoice.id,
         invoiceItemId: item.id,
         supplierId: detail.invoice.supplierId || item.supplierId || '',
+        ...priceHistoryNameFields(item, product || {}),
         price: item.discountedEffectiveUnitCost || item.effectiveUnitCost || item.unitPrice,
         quantity: item.actualQty || item.totalQty || item.quantity,
         unit: item.unit || '',
@@ -1303,6 +1388,7 @@ export const localDb = {
           invoiceId: invoice.id,
           invoiceItemId: item.id,
           supplierId: supplier?.id || '',
+          ...priceHistoryNameFields(item, product || {}),
           price: item.discountedEffectiveUnitCost || item.effectiveUnitCost || item.unitPrice,
           quantity: item.actualQty || item.totalQty || item.quantity,
           unit: item.unit,
@@ -1560,6 +1646,7 @@ export const localDb = {
         productId: product?.id || item.productId || '',
         invoiceItemId: item.id,
         supplierId: updatedInvoice.supplierId || '',
+        ...priceHistoryNameFields(item, product || {}),
         price: item.discountedEffectiveUnitCost || item.effectiveUnitCost || item.unitPrice,
         quantity: item.actualQty || item.totalQty || item.quantity,
         unit: item.unit || '',
@@ -1589,43 +1676,121 @@ export const localDb = {
     return localDb.getInvoice(invoiceId);
   },
 
+  async repairPriceHistoryProductNames() {
+    const priceRows = (await all('price_history')).filter((row) => belongsToCurrentCompany(row) && active(row));
+    const items = (await all('invoice_items')).filter((item) => belongsToCurrentCompany(item) && active(item));
+    const products = (await all('products')).filter((product) => belongsToCurrentCompany(product) && active(product));
+    const itemById = new Map(items.flatMap((item) => idsFor(item).map((idValue) => [idValue, item])));
+    const productById = new Map(products.flatMap((product) => idsFor(product).map((idValue) => [idValue, product])));
+    const repaired = [];
+    for (const row of priceRows) {
+      const item = itemById.get(row.invoiceItemId) || {};
+      const product = productById.get(row.productId) || {};
+      const existingName = String(row.productName || row.productNameOriginal || row.productNameNormalized || row.normalizedName || row.itemName || row.name || '').trim();
+      const fallbackName = productRawName(row, item, product) || productStandardName(row, item, product);
+      if (existingName || !fallbackName) continue;
+      repaired.push(syncFields({
+        ...row,
+        ...priceHistoryNameFields(item, product),
+        syncStatus: row.syncStatus === 'synced' ? 'pending' : row.syncStatus
+      }, row.deletedAt ? 'deleted' : (row.syncStatus === 'synced' ? 'pending' : row.syncStatus || 'pending')));
+    }
+    if (repaired.length) await putMany('price_history', repaired);
+    return repaired.length;
+  },
+
   async searchProducts(query) {
+    await localDb.repairPriceHistoryProductNames();
     const q = normalizeProductName(query);
     const allActiveInvoices = (await all('invoices')).filter(active);
     const invoiceById = new Map(allActiveInvoices.flatMap((invoice) => idsFor(invoice).map((idValue) => [idValue, invoice])));
     const approvedInvoiceIds = invoiceIdSet(allActiveInvoices.filter(approvedForStats));
     const activeInvoiceIds = invoiceIdSet(allActiveInvoices);
     const suppliers = await all('suppliers');
+    const products = (await all('products')).filter(active);
+    const productById = new Map(products.flatMap((product) => idsFor(product).map((idValue) => [idValue, product])));
     const aliases = (await all('product_aliases')).filter(active);
     const aliasProductIds = new Set(aliases
       .filter((alias) => `${normalizeProductName(alias.aliasName || alias.rawName || alias.keyword || '')} ${normalizeProductName(alias.normalizedAlias || '')} ${normalizeProductName(alias.standardName || '')}`.includes(q))
       .map((alias) => alias.productId)
       .filter(Boolean));
-    const items = (await all('invoice_items')).filter((item) => {
+    const allItems = (await all('invoice_items')).filter((item) => {
       if (!active(item) || Number(item.isDiscountLine || 0) || Number(item.candidateOnly || 0) || !trustedItemName(item)) return false;
       if (!activeInvoiceIds.has(item.invoiceId)) return false;
-      if (!q) return true;
-      const haystack = `${normalizeProductName(item.rawName || item.productNameOriginal || '')} ${normalizeProductName(item.normalizedName || item.productNameNormalized || '')}`;
-      return haystack.includes(q) || aliasProductIds.has(item.productId);
+      return true;
     });
+    const itemById = new Map(allItems.flatMap((item) => idsFor(item).map((idValue) => [idValue, item])));
+    const itemRecords = allItems.filter((item) => {
+      if (!q) return true;
+      const haystack = productSearchText(item, item, productById.get(item.productId) || {});
+      return haystack.includes(q) || aliasProductIds.has(item.productId);
+    }).map((item) => {
+      const product = productById.get(item.productId) || {};
+      return {
+        ...item,
+        sourceType: 'invoice_item',
+        displayName: productDisplayName(item, item, product),
+        standardName: productStandardName(item, item, product),
+        effectiveSearchPrice: Number(item.discountedEffectiveUnitCost || item.effectiveUnitCost || item.unitPrice || 0)
+      };
+    });
+    const priceRecordsFromHistory = (await all('price_history')).filter((row) => {
+      if (!active(row) || ['deleted', 'inactive'].includes(String(row.status || '').toLowerCase())) return false;
+      const invoice = invoiceById.get(row.invoiceId);
+      if (row.invoiceId && !invoice) return false;
+      const item = itemById.get(row.invoiceItemId) || {};
+      const product = productById.get(row.productId) || {};
+      if (Number(item.isDiscountLine || 0) || Number(item.candidateOnly || 0) || Number(item.isFreeItem || 0)) return false;
+      if (!q) return true;
+      return productSearchText(row, item, product).includes(q) || aliasProductIds.has(row.productId);
+    }).map((row) => {
+      const item = itemById.get(row.invoiceItemId) || {};
+      const product = productById.get(row.productId) || {};
+      const invoice = invoiceById.get(row.invoiceId);
+      return {
+        ...item,
+        ...row,
+        sourceType: 'price_history',
+        invoiceId: row.invoiceId || item.invoiceId,
+        supplierId: row.supplierId || item.supplierId || invoice?.supplierId || '',
+        invoiceDate: row.invoiceDate || item.invoiceDate || invoice?.invoiceDate || '',
+        displayName: productDisplayName(row, item, product),
+        standardName: productStandardName(row, item, product),
+        effectiveSearchPrice: Number(row.price || item.discountedEffectiveUnitCost || item.effectiveUnitCost || item.unitPrice || 0)
+      };
+    });
+    const recordsByKey = new Map();
+    for (const record of [...itemRecords, ...priceRecordsFromHistory]) {
+      const key = record.invoiceItemId || record.id || `${record.productId || record.standardName}-${record.invoiceId}-${record.invoiceDate}`;
+      if (!recordsByKey.has(key) || record.sourceType === 'price_history') recordsByKey.set(key, record);
+    }
+    const items = [...recordsByKey.values()].filter((record) => productDisplayName(record, record, productById.get(record.productId) || {}) !== '未命名商品');
     const groups = new Map();
     for (const item of items) {
-      const key = item.productNameNormalized || normalizeProductName(item.productNameOriginal);
+      const key = item.productId || normalizeProductName(item.standardName || item.productNameNormalized || item.productNameOriginal || item.displayName);
       const group = groups.get(key) || [];
       group.push(item);
       groups.set(key, group);
     }
-    return [...groups.entries()].map(([standardName, records]) => {
+    return [...groups.entries()].map(([groupKey, records]) => {
       const sorted = [...records].sort((a, b) => `${b.invoiceDate}${b.createdAt}`.localeCompare(`${a.invoiceDate}${a.createdAt}`));
       const confirmedRecords = records.filter((record) => approvedInvoiceIds.has(record.invoiceId));
-      const priceRecords = confirmedRecords.length ? confirmedRecords : records;
-      const prices = priceRecords.map((record) => Number(record.discountedEffectiveUnitCost || record.effectiveUnitCost || record.unitPrice || 0)).filter((price) => price > 0);
+      const groupedPriceRecords = confirmedRecords.length ? confirmedRecords : records;
+      const prices = groupedPriceRecords.map((record) => Number(record.effectiveSearchPrice || record.discountedEffectiveUnitCost || record.effectiveUnitCost || record.unitPrice || record.price || 0)).filter((price) => price > 0);
       const recentInvoice = invoiceById.get(sorted[0]?.invoiceId);
       const recentSupplier = resolveByAnyId(suppliers, sorted[0]?.supplierId || recentInvoice?.supplierId);
+      const product = productById.get(records[0]?.productId) || {};
+      const productNameOriginal = productDisplayName(sorted[0], sorted[0], product);
+      const productNameNormalized = productStandardName(sorted[0], sorted[0], product) || normalizeProductName(productNameOriginal);
       return {
         productId: records[0]?.productId || '',
-        standardName,
-        recentPrice: Number(sorted[0]?.discountedEffectiveUnitCost || sorted[0]?.effectiveUnitCost || sorted[0]?.unitPrice || 0),
+        productName: productNameOriginal,
+        name: productNameOriginal,
+        productNameOriginal,
+        productNameNormalized,
+        normalizedName: normalizeProductName(productNameNormalized || productNameOriginal),
+        standardName: productNameNormalized || productNameOriginal || groupKey,
+        recentPrice: Number(sorted[0]?.effectiveSearchPrice || sorted[0]?.discountedEffectiveUnitCost || sorted[0]?.effectiveUnitCost || sorted[0]?.unitPrice || sorted[0]?.price || 0),
         minPrice: prices.length ? Math.min(...prices) : 0,
         maxPrice: prices.length ? Math.max(...prices) : 0,
         averagePrice: prices.length ? prices.reduce((sum, price) => sum + price, 0) / prices.length : 0,
@@ -1638,24 +1803,65 @@ export const localDb = {
   },
 
   async getProduct(name) {
+    await localDb.repairPriceHistoryProductNames();
     const suppliers = await all('suppliers');
     const invoices = (await all('invoices')).filter(active);
     const activeInvoiceIds = invoiceIdSet(invoices);
     const q = normalizeProductName(name);
+    const products = (await all('products')).filter(active);
+    const productById = new Map(products.flatMap((product) => idsFor(product).map((idValue) => [idValue, product])));
     const aliases = (await all('product_aliases')).filter(active);
     const aliasProductIds = new Set(aliases
       .filter((alias) => `${normalizeProductName(alias.aliasName || alias.rawName || alias.keyword || '')} ${normalizeProductName(alias.normalizedAlias || '')} ${normalizeProductName(alias.standardName || '')}`.includes(q) || alias.productId === name)
       .map((alias) => alias.productId)
       .filter(Boolean));
-    return (await all('invoice_items')).filter((item) => {
+    const allItems = (await all('invoice_items')).filter((item) => {
       if (!active(item) || Number(item.isDiscountLine || 0) || Number(item.candidateOnly || 0) || !trustedItemName(item)) return false;
       if (!activeInvoiceIds.has(item.invoiceId)) return false;
-      const haystack = `${normalizeProductName(item.rawName || item.productNameOriginal || '')} ${normalizeProductName(item.normalizedName || item.productNameNormalized || '')}`;
+      const haystack = productSearchText(item, item, productById.get(item.productId) || {});
       return haystack.includes(q) || item.productId === name || aliasProductIds.has(item.productId);
-    }).map((item) => {
+    });
+    const itemById = new Map(allItems.flatMap((item) => idsFor(item).map((idValue) => [idValue, item])));
+    const priceRows = (await all('price_history')).filter((row) => {
+      if (!active(row) || ['deleted', 'inactive'].includes(String(row.status || '').toLowerCase())) return false;
+      const invoice = resolveByAnyId(invoices, row.invoiceId);
+      if (row.invoiceId && !invoice) return false;
+      const item = itemById.get(row.invoiceItemId) || {};
+      const product = productById.get(row.productId) || {};
+      const haystack = productSearchText(row, item, product);
+      return haystack.includes(q) || row.productId === name || aliasProductIds.has(row.productId);
+    }).map((row) => {
+      const item = itemById.get(row.invoiceItemId) || {};
+      const product = productById.get(row.productId) || {};
+      return {
+        ...item,
+        ...row,
+        productNameOriginal: productRawName(row, item, product),
+        productNameNormalized: productStandardName(row, item, product),
+        unitPrice: Number(row.price || item.unitPrice || 0),
+        effectiveUnitCost: Number(row.price || item.effectiveUnitCost || item.unitPrice || 0),
+        quantity: Number(row.quantity || item.quantity || 0)
+      };
+    });
+    const rowsByKey = new Map();
+    for (const row of [...allItems, ...priceRows]) {
+      const key = row.invoiceItemId || row.id || `${row.productId}-${row.invoiceId}-${row.invoiceDate}`;
+      if (!rowsByKey.has(key) || row.price) rowsByKey.set(key, row);
+    }
+    return [...rowsByKey.values()].map((item) => {
       const supplier = resolveByAnyId(suppliers, item.supplierId);
       const invoice = resolveByAnyId(invoices, item.invoiceId);
-      return { ...item, supplierName: supplierDisplayName(supplier), invoiceNo: invoice?.invoiceNo || '', invoiceImagePath: invoice?.imagePath || '', invoiceRecordId: invoice?.id || '', invoiceStatus: invoice?.status || '' };
+      const product = productById.get(item.productId) || {};
+      return {
+        ...item,
+        productNameOriginal: productDisplayName(item, item, product),
+        productNameNormalized: productStandardName(item, item, product),
+        supplierName: supplierDisplayName(supplier),
+        invoiceNo: invoice?.invoiceNo || item.invoiceNo || '',
+        invoiceImagePath: invoice?.imagePath || '',
+        invoiceRecordId: invoice?.id || '',
+        invoiceStatus: invoice?.status || ''
+      };
     }).sort((a, b) => `${b.invoiceDate}${b.createdAt}`.localeCompare(`${a.invoiceDate}${a.createdAt}`));
   },
 
@@ -2008,6 +2214,29 @@ export const localDb = {
         invoices: monthInvoices.sort((a, b) => `${b.invoiceDate || ''}${b.createdAt || ''}`.localeCompare(`${a.invoiceDate || ''}${a.createdAt || ''}`))
       })).sort((a, b) => b.month.localeCompare(a.month))
     })).sort((a, b) => a.supplierName.localeCompare(b.supplierName));
+  },
+
+  async repairEncodingForCurrentCompany() {
+    const repairedByTable = {};
+    for (const table of syncTables) {
+      const records = (await all(table)).filter(belongsToCurrentCompany);
+      const repaired = [];
+      for (const record of records) {
+        if (!hasEncodingDamage(record)) continue;
+        const next = repairRecordEncoding(record);
+        repaired.push({
+          ...next,
+          syncStatus: record.deletedAt ? record.syncStatus : (record.syncStatus === 'synced' ? 'pending' : record.syncStatus),
+          updatedAt: record.deletedAt ? record.updatedAt : nowIso(),
+          encodingFixedAt: nowIso()
+        });
+      }
+      if (repaired.length) {
+        await putMany(table, repaired);
+        repairedByTable[table] = repaired.length;
+      }
+    }
+    return repairedByTable;
   },
 
   async getStats() {

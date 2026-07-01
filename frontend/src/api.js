@@ -1,3 +1,5 @@
+import { repairRecordEncoding } from './encoding.js';
+
 const API_BASE = (import.meta.env.VITE_API_BASE_URL || 'http://localhost:3000').replace(/\/$/, '');
 const AUTH_KEY = 'invoicePriceTrackerAuth';
 const AUTH_TOKEN_KEY = 'authToken';
@@ -75,7 +77,7 @@ export function clearAuthStorage() {
 
 export function sanitizeAuthStorage() {
   const authToken = localStorage.getItem(AUTH_TOKEN_KEY) || '';
-  const session = parseStoredSession();
+  const session = repairRecordEncoding(parseStoredSession());
   if (!session) {
     clearAuthStorage();
     return null;
@@ -84,6 +86,7 @@ export function sanitizeAuthStorage() {
     clearAuthStorage();
     return null;
   }
+  localStorage.setItem(AUTH_KEY, JSON.stringify(session));
   return session;
 }
 
@@ -95,13 +98,14 @@ export function getAuthSession() {
 
 export function setAuthSession(session) {
   if (session?.token) {
-    if (isLegacyDemoSession(session)) {
+    const safeSession = repairRecordEncoding(session);
+    if (isLegacyDemoSession(safeSession)) {
       clearAuthStorage();
       window.dispatchEvent(new Event('auth-change'));
       return;
     }
-    localStorage.setItem(AUTH_TOKEN_KEY, session.token);
-    localStorage.setItem(AUTH_KEY, JSON.stringify(session));
+    localStorage.setItem(AUTH_TOKEN_KEY, safeSession.token);
+    localStorage.setItem(AUTH_KEY, JSON.stringify(safeSession));
   } else {
     clearAuthStorage();
   }
@@ -131,7 +135,7 @@ async function request(path, options = {}) {
   if (!token && !publicPaths.includes(pathname) && !isPublicInvitationRead && !isPublicInvitationAccept) {
     throw makeApiError('请先登录', { status: 401 });
   }
-  const headers = options.body instanceof FormData ? {} : { 'Content-Type': 'application/json' };
+  const headers = options.body instanceof FormData ? {} : { 'Content-Type': 'application/json; charset=utf-8' };
   if (token) headers.Authorization = `Bearer ${token}`;
   const timeoutMs = Number(options.timeoutMs ?? DEFAULT_TIMEOUT_MS);
   const controller = new AbortController();

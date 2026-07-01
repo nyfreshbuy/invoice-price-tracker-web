@@ -6,7 +6,7 @@ import './styles.css';
 import { sanitizeAuthStorage } from './api.js';
 
 sanitizeAuthStorage();
-const ACTIVE_CACHE_NAME = 'invoice-price-tracker-runtime-guard-v10';
+const ACTIVE_CACHE_NAME = 'invoice-price-tracker-utf8-v11';
 if ('caches' in window) {
   caches.keys()
     .then((keys) => Promise.all(keys

@@ -151,6 +151,11 @@ app.use(cors({
   },
   credentials: true
 }));
+app.use((req, res, next) => {
+  res.setHeader('X-Content-Type-Options', 'nosniff');
+  res.charset = 'utf-8';
+  next();
+});
 app.use(express.json({ limit: '10mb' }));
 app.use('/uploads', express.static(uploadDir));
 
@@ -977,6 +982,23 @@ function itemNameParts(item = {}) {
   };
 }
 
+function priceHistoryNameFields(item = {}, product = {}) {
+  const rawName = itemRawName(item) || product.name || '';
+  const standardName = itemStandardName(item) || product.normalizedName || product.name || rawName;
+  const displayName = [item.nameCn, item.nameEn].filter(Boolean).join(' / ') || rawName || standardName || '未命名商品';
+  return {
+    productName: displayName,
+    productNameOriginal: rawName || displayName,
+    productNameNormalized: standardName || normalizeProductNameAdvanced(rawName || displayName),
+    normalizedName: normalizeProductNameAdvanced(standardName || rawName || displayName),
+    originalName: rawName || displayName,
+    itemName: rawName || displayName,
+    name: displayName,
+    nameCn: item.nameCn || '',
+    nameEn: item.nameEn || ''
+  };
+}
+
 function giftAccountingKey(item = {}) {
   const candidate = promoGroupCandidate(item);
   const manual = Number(item.participatesInGiftAllocation || 0) || String(item.promoGroupRule || '').includes('manual');
@@ -1292,6 +1314,7 @@ async function learnPrice({ itemRecord, invoice, supplier, product, deviceId, co
     invoiceId: invoice.serverId || invoice.id,
     invoiceItemId: itemRecord.serverId || itemRecord.id,
     supplierId: supplier?.serverId || supplier?.id || '',
+    ...priceHistoryNameFields(itemRecord, product),
     price: unitPrice,
     quantity: Number(itemRecord.actualQty || itemRecord.totalQty || itemRecord.quantity || 0),
     unit: itemRecord.unit || '',

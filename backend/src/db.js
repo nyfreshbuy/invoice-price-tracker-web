@@ -66,7 +66,7 @@ export const tableColumns = {
   invoices: ['id', 'companyId', 'localId', 'serverId', 'syncStatus', 'version', 'batchId', 'scanBatchId', 'importSessionId', 'invoiceGroupId', 'supplierId', 'invoiceNo', 'invoiceDate', 'pageNumber', 'pageCount', 'invoiceGroupKey', 'isMergedInvoice', 'isMultiPage', 'mergedInvoiceIds', 'invoiceLayoutType', 'imagePath', 'imageHash', 'originalFilePath', 'archiveFilePath', 'fileHash', 'archiveStatus', 'archiveFolder', 'invoiceMonth', 'ocrText', 'ocrTextHash', 'subtotal', 'tax', 'totalAmount', 'calculatedTotal', 'totalDifference', 'duplicateStatus', 'duplicateOfInvoiceId', 'recognitionSource', 'recognitionWarnings', 'status', 'createdAt', 'updatedAt', 'deletedAt', 'deviceId'],
   invoice_items: ['id', 'companyId', 'localId', 'serverId', 'syncStatus', 'version', 'invoiceId', 'supplierId', 'productId', 'rawName', 'nameCn', 'nameEn', 'spec', 'productNameOriginal', 'productNameNormalized', 'normalizedName', 'nameConfidence', 'nameQualityStatus', 'nameQualityReason', 'rawOcrLine', 'itemRecognitionSource', 'category', 'quantity', 'unit', 'unitPrice', 'totalPrice', 'chargedQty', 'freeQty', 'totalQty', 'actualQty', 'originalUnitCost', 'effectiveUnitCost', 'discountAmount', 'discountedEffectiveUnitCost', 'promoGroupId', 'promoGroupName', 'promoGroupRule', 'participatesInGiftAllocation', 'isFreeItem', 'isDiscountLine', 'candidateOnly', 'correctedByUser', 'isHandwrittenQuantity', 'isHandwrittenPrice', 'isHandwrittenAmount', 'isCircled', 'isChecked', 'freeReason', 'invoiceDate', 'notes', 'createdAt', 'updatedAt', 'deletedAt', 'deviceId'],
   products: ['id', 'companyId', 'localId', 'serverId', 'syncStatus', 'version', 'name', 'normalizedName', 'category', 'notes', 'createdAt', 'updatedAt', 'deletedAt', 'deviceId'],
-  price_history: ['id', 'companyId', 'localId', 'serverId', 'syncStatus', 'version', 'productId', 'invoiceId', 'invoiceItemId', 'supplierId', 'price', 'quantity', 'unit', 'invoiceDate', 'invoiceNo', 'status', 'createdAt', 'updatedAt', 'deletedAt', 'deviceId'],
+  price_history: ['id', 'companyId', 'localId', 'serverId', 'syncStatus', 'version', 'productId', 'invoiceId', 'invoiceItemId', 'supplierId', 'productName', 'productNameOriginal', 'productNameNormalized', 'normalizedName', 'originalName', 'itemName', 'name', 'nameCn', 'nameEn', 'price', 'quantity', 'unit', 'invoiceDate', 'invoiceNo', 'status', 'createdAt', 'updatedAt', 'deletedAt', 'deviceId'],
   invoice_discounts: ['id', 'companyId', 'localId', 'serverId', 'syncStatus', 'version', 'invoiceId', 'supplierId', 'discountName', 'amount', 'discountType', 'appliedToProductIds', 'createdAt', 'updatedAt', 'deletedAt', 'deviceId'],
   gift_allocation_rules: ['id', 'companyId', 'localId', 'serverId', 'syncStatus', 'version', 'supplierId', 'ruleKey', 'productNames', 'promoGroupName', 'promoGroupRule', 'chargedQty', 'freeQty', 'actualQty', 'invoiceAmount', 'originalUnitCost', 'effectiveUnitCost', 'createdAt', 'updatedAt', 'deletedAt', 'deviceId'],
   supplier_templates: ['id', 'companyId', 'localId', 'serverId', 'syncStatus', 'version', 'supplierId', 'supplierNameKeywords', 'invoiceNoKeywords', 'dateKeywords', 'itemTableStartKeywords', 'itemTableEndKeywords', 'itemNameColumnIndex', 'quantityColumnIndex', 'unitColumnIndex', 'unitPriceColumnIndex', 'totalPriceColumnIndex', 'notes', 'createdAt', 'updatedAt', 'deletedAt', 'deviceId'],
@@ -365,6 +365,63 @@ export async function migrate() {
     WHERE (${quoteIdentifier('invoiceId')} IS NULL OR ${quoteIdentifier('invoiceId')} = '')
       AND ${quoteIdentifier('invoiceItemId')} IS NOT NULL
       AND ${quoteIdentifier('invoiceItemId')} != ''
+  `);
+  await execute(`
+    UPDATE ${quoteTable('price_history')}
+    SET ${quoteIdentifier('productNameOriginal')} = (
+      SELECT invoice_items.${quoteIdentifier('productNameOriginal')}
+      FROM ${quoteTable('invoice_items')} invoice_items
+      WHERE (invoice_items.${quoteIdentifier('companyId')} = ${quoteTable('price_history')}.${quoteIdentifier('companyId')}
+             OR (invoice_items.${quoteIdentifier('companyId')} IS NULL AND ${quoteTable('price_history')}.${quoteIdentifier('companyId')} IS NULL))
+        AND (${quoteTable('price_history')}.${quoteIdentifier('invoiceItemId')} = invoice_items.${quoteIdentifier('id')}
+             OR ${quoteTable('price_history')}.${quoteIdentifier('invoiceItemId')} = invoice_items.${quoteIdentifier('serverId')}
+             OR ${quoteTable('price_history')}.${quoteIdentifier('invoiceItemId')} = invoice_items.${quoteIdentifier('localId')})
+      LIMIT 1
+    )
+    WHERE (${quoteIdentifier('productNameOriginal')} IS NULL OR ${quoteIdentifier('productNameOriginal')} = '')
+      AND ${quoteIdentifier('invoiceItemId')} IS NOT NULL
+      AND ${quoteIdentifier('invoiceItemId')} != ''
+  `);
+  await execute(`
+    UPDATE ${quoteTable('price_history')}
+    SET ${quoteIdentifier('productNameNormalized')} = (
+      SELECT invoice_items.${quoteIdentifier('productNameNormalized')}
+      FROM ${quoteTable('invoice_items')} invoice_items
+      WHERE (invoice_items.${quoteIdentifier('companyId')} = ${quoteTable('price_history')}.${quoteIdentifier('companyId')}
+             OR (invoice_items.${quoteIdentifier('companyId')} IS NULL AND ${quoteTable('price_history')}.${quoteIdentifier('companyId')} IS NULL))
+        AND (${quoteTable('price_history')}.${quoteIdentifier('invoiceItemId')} = invoice_items.${quoteIdentifier('id')}
+             OR ${quoteTable('price_history')}.${quoteIdentifier('invoiceItemId')} = invoice_items.${quoteIdentifier('serverId')}
+             OR ${quoteTable('price_history')}.${quoteIdentifier('invoiceItemId')} = invoice_items.${quoteIdentifier('localId')})
+      LIMIT 1
+    )
+    WHERE (${quoteIdentifier('productNameNormalized')} IS NULL OR ${quoteIdentifier('productNameNormalized')} = '')
+      AND ${quoteIdentifier('invoiceItemId')} IS NOT NULL
+      AND ${quoteIdentifier('invoiceItemId')} != ''
+  `);
+  await execute(`
+    UPDATE ${quoteTable('price_history')}
+    SET ${quoteIdentifier('productName')} = COALESCE(NULLIF(${quoteIdentifier('productNameOriginal')}, ''), NULLIF(${quoteIdentifier('productNameNormalized')}, ''), (
+      SELECT products.${quoteIdentifier('name')}
+      FROM ${quoteTable('products')} products
+      WHERE (products.${quoteIdentifier('companyId')} = ${quoteTable('price_history')}.${quoteIdentifier('companyId')}
+             OR (products.${quoteIdentifier('companyId')} IS NULL AND ${quoteTable('price_history')}.${quoteIdentifier('companyId')} IS NULL))
+        AND (${quoteTable('price_history')}.${quoteIdentifier('productId')} = products.${quoteIdentifier('id')}
+             OR ${quoteTable('price_history')}.${quoteIdentifier('productId')} = products.${quoteIdentifier('serverId')}
+             OR ${quoteTable('price_history')}.${quoteIdentifier('productId')} = products.${quoteIdentifier('localId')})
+      LIMIT 1
+    ))
+    WHERE (${quoteIdentifier('productName')} IS NULL OR ${quoteIdentifier('productName')} = '')
+  `);
+  await execute(`
+    UPDATE ${quoteTable('price_history')}
+    SET ${quoteIdentifier('normalizedName')} = COALESCE(NULLIF(${quoteIdentifier('productNameNormalized')}, ''), NULLIF(${quoteIdentifier('productNameOriginal')}, ''), NULLIF(${quoteIdentifier('productName')}, '')),
+        ${quoteIdentifier('originalName')} = COALESCE(NULLIF(${quoteIdentifier('productNameOriginal')}, ''), NULLIF(${quoteIdentifier('productName')}, '')),
+        ${quoteIdentifier('itemName')} = COALESCE(NULLIF(${quoteIdentifier('productNameOriginal')}, ''), NULLIF(${quoteIdentifier('productName')}, '')),
+        ${quoteIdentifier('name')} = COALESCE(NULLIF(${quoteIdentifier('productName')}, ''), NULLIF(${quoteIdentifier('productNameOriginal')}, ''), NULLIF(${quoteIdentifier('productNameNormalized')}, ''))
+    WHERE (${quoteIdentifier('name')} IS NULL OR ${quoteIdentifier('name')} = '')
+       OR (${quoteIdentifier('itemName')} IS NULL OR ${quoteIdentifier('itemName')} = '')
+       OR (${quoteIdentifier('normalizedName')} IS NULL OR ${quoteIdentifier('normalizedName')} = '')
+       OR (${quoteIdentifier('originalName')} IS NULL OR ${quoteIdentifier('originalName')} = '')
   `);
 }
 

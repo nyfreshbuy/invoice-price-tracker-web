@@ -411,6 +411,14 @@ export default function App() {
       setAuthState(getAuthSession());
       setAuthStatus('authenticated');
       setAuthNotice('');
+      const repairedEncoding = await localDb.repairEncodingForCurrentCompany().catch((repairError) => {
+        console.warn('[encoding] local repair failed', repairError);
+        return {};
+      });
+      if (Object.keys(repairedEncoding || {}).length) {
+        console.info('[encoding] repaired local records', repairedEncoding);
+        markSyncPending();
+      }
       await syncNow({ reason: 'startup' });
     } catch (error) {
       if (error?.status === 401 || error?.status === 403) {
@@ -1036,9 +1044,9 @@ function BatchImportPage() {
         )}
         {batchId && (
           <div className="row-actions">
-            <button type="button" disabled={Boolean(batchAction)} onClick={() => controlBatch('resume')}>{batchAction === 'resume' ? '澶勭悊涓?..' : '缁х画璇嗗埆'}</button>
-            <button type="button" disabled={Boolean(batchAction)} onClick={() => controlBatch('pause')}>{batchAction === 'pause' ? '澶勭悊涓?..' : '鏆傚仠璇嗗埆'}</button>
-            <button type="button" className="danger-button" disabled={Boolean(batchAction)} onClick={() => controlBatch('cancel')}>{batchAction === 'cancel' ? '澶勭悊涓?..' : '鍙栨秷鍓╀綑璇嗗埆'}</button>
+            <button type="button" disabled={Boolean(batchAction)} onClick={() => controlBatch('resume')}>{batchAction === 'resume' ? '处理中...' : '继续识别'}</button>
+            <button type="button" disabled={Boolean(batchAction)} onClick={() => controlBatch('pause')}>{batchAction === 'pause' ? '处理中...' : '暂停识别'}</button>
+            <button type="button" className="danger-button" disabled={Boolean(batchAction)} onClick={() => controlBatch('cancel')}>{batchAction === 'cancel' ? '处理中...' : '取消剩余识别'}</button>
           </div>
         )}
       </Section>
@@ -2453,17 +2461,21 @@ function ProductSearchPage() {
       </Section>
       {productResults.length === 0 && <EmptyState text="暂无商品记录" />}
       <div className="card-list">
-        {productResults.map((item, index) => (
-          <Link className="row-card" to={`/products/${encodeURIComponent(item?.productNameNormalized || item?.name || item?.productNameOriginal || '')}`} key={item?.productNameNormalized || item?.name || item?.productNameOriginal || index}>
+        {productResults.map((item, index) => {
+          const displayName = item?.productName || item?.productNameOriginal || item?.name || item?.standardName || item?.productNameNormalized || '未命名商品';
+          const routeName = item?.productNameNormalized || item?.normalizedName || item?.standardName || displayName;
+          return (
+          <Link className="row-card" to={`/products/${encodeURIComponent(routeName || '')}`} key={routeName || item?.productId || index}>
             <div>
-              <h3>{item?.productNameNormalized || item?.name || item?.productNameOriginal || '-'}</h3>
+              <h3>{displayName}</h3>
               <p>最近价格 {money(item?.recentPrice)} · 最低价 {money(item?.minPrice)} · 最高价 {money(item?.maxPrice)}</p>
               <p>均价 {money(item?.averagePrice)} · 最近供应商 {item?.recentSupplierName || '-'} · 最近采购 {item?.recentPurchaseDate || '-'} · {item?.recordCount || 0} 条</p>
               {Number(item?.pendingCount || 0) > 0 && <p className="warning-text">{item.pendingCount} 条价格来自待确认/异常发票</p>}
             </div>
             <ChevronRight />
           </Link>
-        ))}
+          );
+        })}
       </div>
     </Page>
   );
@@ -3009,6 +3021,7 @@ function SettingsPage() {
   }, []);
   async function handleSettingsSyncNow() {
     setSyncing(true);
+    setMessage('同步中...');
     try {
       const result = await syncNow({ force: true, reason: 'settings' });
       setMessage(result?.ok === false ? '同步失败，请查看同步状态' : '同步完成');
@@ -3071,7 +3084,7 @@ function SettingsPage() {
           <button type="button" disabled={syncing} onClick={restoreCloud}>从云端恢复</button>
           <button type="button" disabled={syncing} onClick={clearLocalAndRestore}>清空本地缓存后重新拉取</button>
         </div>
-        {message && <p className={message.includes('失败') ? 'error' : 'success-text'}>{message}</p>}
+        {(message || syncing || syncSnapshot.syncing) && <p className={(message || '').includes('失败') ? 'error' : 'success-text'}>{message || '同步中...'}</p>}
       </Section>
       <MemberManagementPanel />
       <Section title="数据库统计">
@@ -3144,7 +3157,7 @@ function CollapsibleSection({ title, children, defaultOpen = false }) {
     <section className="section">
       <button type="button" className="collapsible-toggle" onClick={() => setOpen((value) => !value)}>
         <span>{title}</span>
-        <span>{open ? '鏀惰捣' : '灞曞紑'}</span>
+        <span>{open ? '收起' : '展开'}</span>
       </button>
       {open && <div className="collapsible-content">{children}</div>}
     </section>
@@ -3732,7 +3745,7 @@ function analyzeBatchEntries(entries, existingInvoices = []) {
 
     if (entry.status === 'success' && fingerprint.invoiceNo) {
       for (const invoice of existingInvoices) {
-        duplicateInfo = compareInvoiceFingerprints(fingerprint, invoiceFingerprintFromInvoice(invoice), '鏈湴宸叉湁鍙戠エ');
+        duplicateInfo = compareInvoiceFingerprints(fingerprint, invoiceFingerprintFromInvoice(invoice), '本地已有发票');
         if (duplicateInfo.isDuplicate || duplicateInfo.sameInvoiceGroup) break;
       }
 
@@ -3785,7 +3798,7 @@ function normalizeParsedInvoice(parsed = {}) {
   const items = Array.isArray(parsed.items) ? parsed.items : [];
   return {
     ...parsed,
-    supplierName: (parsed.supplierName || '').trim() || '鏈瘑鍒緵搴斿晢',
+    supplierName: (parsed.supplierName || '').trim() || '未识别供应商',
     invoiceNo: (parsed.invoiceNo || '').trim(),
     invoiceDate: normalizeDateInput(parsed.invoiceDate) || today(),
     pageNumber: Number(parsed.pageNumber || 0),
@@ -3905,7 +3918,7 @@ function detectContinuousInvoiceNumbers(entries) {
       const first = run[0].entry.parsed.invoiceNo;
       const last = run[run.length - 1].entry.parsed.invoiceNo;
       for (const item of run) {
-        notes.set(item.entry.id, `鏉╃偟鐢婚崣鎴犮偍閸欏嚖绱?{first} - ${last}`);
+        notes.set(item.entry.id, `连续发票号范围：${first} - ${last}`);
       }
       run = [];
     }
@@ -4000,8 +4013,6 @@ function summarizePromoGroups(items = []) {
       effectiveUnitCost: group.actualQty > 0 ? group.invoiceAmount / group.actualQty : 0
     }));
 }
-
-
 
 
 

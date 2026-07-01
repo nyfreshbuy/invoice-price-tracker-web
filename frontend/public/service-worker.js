@@ -1,4 +1,4 @@
-const CACHE_NAME = 'invoice-price-tracker-runtime-guard-v10';
+const CACHE_NAME = 'invoice-price-tracker-utf8-v11';
 const APP_SHELL = [
   '/',
   '/index.html',
@@ -45,7 +45,7 @@ self.addEventListener('fetch', (event) => {
     event.respondWith(
       fetch(request).catch(() => new Response(
         JSON.stringify({ error: '当前离线，请检查网络', offline: true }),
-        { status: 503, headers: { 'Content-Type': 'application/json' } }
+        { status: 503, headers: { 'Content-Type': 'application/json; charset=utf-8' } }
       ))
     );
     return;
