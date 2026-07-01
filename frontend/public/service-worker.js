@@ -1,4 +1,4 @@
-const CACHE_NAME = 'invoice-price-tracker-utf8-v11';
+const CACHE_NAME = 'invoice-price-tracker-utf8-v12';
 const APP_SHELL = [
   '/',
   '/index.html',
@@ -44,7 +44,7 @@ self.addEventListener('fetch', (event) => {
   if (url.pathname.startsWith('/api/')) {
     event.respondWith(
       fetch(request).catch(() => new Response(
-        JSON.stringify({ error: '当前离线，请检查网络', offline: true }),
+        JSON.stringify({ error: '\u5f53\u524d\u79bb\u7ebf\uff0c\u8bf7\u68c0\u67e5\u7f51\u7edc', offline: true }),
         { status: 503, headers: { 'Content-Type': 'application/json; charset=utf-8' } }
       ))
     );

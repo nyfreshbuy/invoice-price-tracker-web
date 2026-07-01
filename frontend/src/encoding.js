@@ -30,6 +30,11 @@ function hexToBytes(hex) {
   return bytes;
 }
 
+function decodeUnicodeEscapes(value) {
+  if (typeof value !== 'string' || !/\\u[0-9a-fA-F]{4}/.test(value)) return value;
+  return value.replace(/\\u([0-9a-fA-F]{4})/g, (_, hex) => String.fromCharCode(Number.parseInt(hex, 16)));
+}
+
 function decodeGb18030Mojibake(value) {
   const bytes = [];
   for (const char of value) {
@@ -88,7 +93,7 @@ export function looksMojibake(value) {
 
 export function repairTextEncoding(value) {
   if (typeof value !== 'string' || !value) return value;
-  let replaced = value;
+  let replaced = decodeUnicodeEscapes(value);
   for (const [bad, good] of knownMojibakeReplacements.entries()) {
     replaced = replaced.split(bad).join(good);
   }

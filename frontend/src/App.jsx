@@ -93,6 +93,10 @@ const emptySupplier = {
   notes: ''
 };
 
+function uiText(value) {
+  return typeof value === 'string' ? repairTextEncoding(value) : value;
+}
+
 const emptyTemplate = (supplierName = '') => ({
   supplierNameKeywords: supplierName,
   invoiceNoKeywords: '发票号,单号,票号,invoice no,invoice #',
@@ -639,12 +643,12 @@ function SyncBar({ state, session, syncingNow, onSyncNow, onLogout }) {
   const busy = Boolean(state.syncing || syncingNow);
   return (
     <div className={`sync-bar ${state.online ? '' : 'offline'}`}>
-      <span>{displayCompanyName(session)} / {state.label || '\u2601 \u5df2\u540c\u6b65'}</span>
+      <span>{uiText(displayCompanyName(session))} / {uiText(state.label || '\u2601 \u5df2\u540c\u6b65')}</span>
       <button onClick={onSyncNow} disabled={busy || !state.online}>
         <RefreshCw size={15} className={busy ? 'spin' : ''} />
-        {busy ? '\u540c\u6b65\u4e2d...' : '\u7acb\u5373\u540c\u6b65'}
+        {uiText(busy ? '\u540c\u6b65\u4e2d...' : '\u7acb\u5373\u540c\u6b65')}
       </button>
-      <button type="button" onClick={onLogout}>{'\u9000\u51fa'}</button>
+      <button type="button" onClick={onLogout}>{uiText('\u9000\u51fa')}</button>
     </div>
   );
 }
@@ -3255,8 +3259,8 @@ function Page({ title, subtitle, action, children }) {
     <div className="page">
       <header className="page-header">
         <div>
-          <h1>{title}</h1>
-          {subtitle && <p>{subtitle}</p>}
+          <h1>{uiText(title)}</h1>
+          {subtitle && <p>{uiText(subtitle)}</p>}
         </div>
         {action}
       </header>
@@ -3266,7 +3270,7 @@ function Page({ title, subtitle, action, children }) {
 }
 
 function Section({ title, children }) {
-  return <section className="section"><h2>{title}</h2>{children}</section>;
+  return <section className="section"><h2>{uiText(title)}</h2>{children}</section>;
 }
 
 function CollapsibleSection({ title, children, defaultOpen = false }) {
@@ -3274,8 +3278,8 @@ function CollapsibleSection({ title, children, defaultOpen = false }) {
   return (
     <section className="section">
       <button type="button" className="collapsible-toggle" onClick={() => setOpen((value) => !value)}>
-        <span>{title}</span>
-        <span>{open ? '收起' : '展开'}</span>
+        <span>{uiText(title)}</span>
+        <span>{uiText(open ? '\u6536\u8d77' : '\u5c55\u5f00')}</span>
       </button>
       {open && <div className="collapsible-content">{children}</div>}
     </section>
@@ -3286,7 +3290,7 @@ function ActionLink({ to, icon, title, subtitle }) {
   return (
     <Link className="action-row" to={to}>
       <span className="action-icon">{icon}</span>
-      <span><strong>{title}</strong><small>{subtitle}</small></span>
+      <span><strong>{uiText(title)}</strong><small>{uiText(subtitle)}</small></span>
       <ChevronRight />
     </Link>
   );
@@ -3494,11 +3498,11 @@ function InvoiceImageViewer({ invoice, onUpdated }) {
 }
 
 function Info({ label, value }) {
-  return <div className="info-row"><span>{label}</span><strong>{value}</strong></div>;
+  return <div className="info-row"><span>{uiText(label)}</span><strong>{uiText(value)}</strong></div>;
 }
 
 function Metric({ label, value, to }) {
-  const content = <><span>{label}</span><strong>{value}</strong></>;
+  const content = <><span>{uiText(label)}</span><strong>{uiText(value)}</strong></>;
   if (to) return <Link className="metric-card metric-link" to={to}>{content}</Link>;
   return <div className="metric-card">{content}</div>;
 }
@@ -3506,7 +3510,7 @@ function Metric({ label, value, to }) {
 function SwitchField({ label, checked, onChange }) {
   return (
     <label className="switch-field">
-      <span>{label}</span>
+      <span>{uiText(label)}</span>
       <button type="button" className={`ios-switch ${checked ? 'on' : ''}`} onClick={() => onChange(!checked)} aria-pressed={checked}>
         <span />
       </button>
@@ -3531,14 +3535,14 @@ function ConfidenceSummary({ parsed = {} }) {
   );
 }
 function EmptyState({ text }) {
-  return <div className="empty-state">{text}</div>;
+  return <div className="empty-state">{uiText(text)}</div>;
 }
 
 function Dialog({ title, onClose, children }) {
   return (
     <div className="dialog-backdrop" role="dialog" aria-modal="true">
       <div className="dialog">
-        <div className="dialog-header"><h2>{title}</h2><button onClick={onClose}>鍏抽棴</button></div>
+        <div className="dialog-header"><h2>{uiText(title)}</h2><button onClick={onClose}>{uiText('\u5173\u95ed')}</button></div>
         {children}
       </div>
     </div>
