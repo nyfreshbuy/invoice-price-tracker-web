@@ -199,6 +199,56 @@ export function nowIso() {
   return new Date().toISOString();
 }
 
+function syncIdentityValues(value = {}) {
+  const record = value.record || {};
+  return [
+    value.localId,
+    value.serverId,
+    value.id,
+    value.clientId,
+    value.recordId,
+    value.uuid,
+    record.localId,
+    record.serverId,
+    record.id,
+    record.clientId,
+    record.recordId,
+    record.uuid
+  ].filter(Boolean).map(String);
+}
+
+function recordIdentityValues(record = {}) {
+  return [
+    record.localId,
+    record.id,
+    record.serverId,
+    record.clientId,
+    record.recordId,
+    record.uuid
+  ].filter(Boolean).map(String);
+}
+
+function findSyncedLocalRecord(records = [], result = {}) {
+  const keys = new Set(syncIdentityValues(result));
+  return records.find((record) => recordIdentityValues(record).some((key) => keys.has(key)));
+}
+
+function syncedFields(record = {}, result = {}, extra = {}) {
+  const serverRecord = result.record || {};
+  const timestamp = nowIso();
+  return {
+    ...record,
+    ...extra,
+    serverId: extra.serverId || result.serverId || serverRecord.serverId || serverRecord.id || record.serverId || record.id,
+    syncStatus: 'synced',
+    pendingSync: false,
+    dirty: false,
+    syncError: '',
+    syncedAt: timestamp,
+    updatedAt: record.updatedAt || timestamp
+  };
+}
+
 function giftAccountingKey(item = {}) {
   const candidate = promoGroupCandidate(item);
   const manual = Number(item.participatesInGiftAllocation || 0) || String(item.promoGroupRule || '').includes('manual');
@@ -767,55 +817,45 @@ export const localDb = {
   async markSynced(table, result) {
     if (result.status === 'conflict') {
       const records = await all(table);
-      const local = records.find((record) => record.localId === result.localId || record.id === result.localId || record.serverId === result.serverId);
-      if (local) await put(table, {
-        ...local,
-        serverId: result.serverId || local.serverId || local.id,
-        syncStatus: 'synced',
+      const local = findSyncedLocalRecord(records, result);
+      if (local) await put(table, syncedFields(local, result, {
         syncNote: result.reason || 'conflict',
         conflictRecord: JSON.stringify(result.record || result)
-      });
+      }));
       return Boolean(local);
     }
     if (result.status === 'duplicate' || result.duplicate === true || result.already_exists === true || result.alreadyExists === true || result.status === 'already_exists' || result.status === 'alreadyExists') {
       const records = await all(table);
-      const local = records.find((record) => record.localId === result.localId || record.id === result.localId || record.serverId === result.serverId);
-      if (local) await put(table, {
-        ...local,
+      const local = findSyncedLocalRecord(records, result);
+      if (local) await put(table, syncedFields(local, result, {
         serverId: result.serverId || result.duplicateCheck?.duplicateInvoiceId || result.duplicate?.id || local.serverId || local.id,
-        syncStatus: 'synced',
         duplicateStatus: result.duplicateStatus || 'duplicate',
         duplicateOfInvoiceId: result.serverId || result.duplicateCheck?.duplicateInvoiceId || result.duplicate?.id || '',
         syncNote: result.reason || result.status || 'duplicate',
         conflictRecord: JSON.stringify(result)
-      });
+      }));
       return Boolean(local);
     }
     if (result.status === 'skipped_duplicate_invoice' || result.status === 'skipped_integrity_generated') {
       const records = await all(table);
-      const local = records.find((record) => record.localId === result.localId || record.id === result.localId || record.serverId === result.serverId);
-      if (local) await put(table, {
-        ...local,
-        serverId: result.serverId || local.serverId || local.id,
-        syncStatus: 'synced',
+      const local = findSyncedLocalRecord(records, result);
+      if (local) await put(table, syncedFields(local, result, {
         syncNote: result.status
-      });
+      }));
       return Boolean(local);
     }
     const records = await all(table);
-    const local = records.find((record) => record.localId === result.localId || record.id === result.localId || record.serverId === result.serverId);
+    const local = findSyncedLocalRecord(records, result);
     if (!local) return false;
     const serverRecord = result.record || {};
-    await put(table, {
+    await put(table, syncedFields({
       ...serverRecord,
       id: local.id,
       localId: local.localId || result.localId || local.id,
-      serverId: result.serverId || serverRecord.serverId || serverRecord.id,
-      syncStatus: 'synced',
       status: result.status === 'needs_review' ? 'PENDING_REVIEW' : (serverRecord.status || local.status),
       syncNote: result.reason || result.status || '',
       version: Number(serverRecord.version || local.version || 1)
-    });
+    }, result));
     return true;
   },
 

@@ -181,12 +181,33 @@ function countByStatus(results = []) {
 }
 
 function resultKey(result = {}) {
-  return [result.localId, result.serverId].filter(Boolean).map(String);
+  const record = result.record || {};
+  return [
+    result.localId,
+    result.serverId,
+    result.id,
+    result.clientId,
+    result.recordId,
+    result.uuid,
+    record.localId,
+    record.serverId,
+    record.id,
+    record.clientId,
+    record.recordId,
+    record.uuid
+  ].filter(Boolean).map(String);
 }
 
 function recordKey(entry = {}) {
   const record = entry.record || {};
-  return [record.localId, record.id, record.serverId].filter(Boolean).map(String);
+  return [
+    record.localId,
+    record.id,
+    record.serverId,
+    record.clientId,
+    record.recordId,
+    record.uuid
+  ].filter(Boolean).map(String);
 }
 
 function inferResultTable(result = {}, batch = []) {
@@ -200,13 +221,43 @@ async function applyPushResults(batch = [], results = []) {
   let appliedCount = 0;
   let notFoundCount = 0;
   let missingResultCount = 0;
+  const appliedByTable = {};
+  const notFoundByTable = {};
+  const lastSyncedResults = [];
   const resultKeys = new Set();
-  for (const result of results) {
-    const table = inferResultTable(result, batch);
+  for (let index = 0; index < results.length; index += 1) {
+    const result = results[index];
+    const positionalEntry = batch[index];
+    let table = inferResultTable(result, batch);
+    if (!table) {
+      table = positionalEntry?.table || '';
+    }
+    if (!table) {
+      notFoundCount += 1;
+      notFoundByTable.unknown = (notFoundByTable.unknown || 0) + 1;
+      console.warn('[SYNC FRONTEND] push result missing table and local match', result);
+      continue;
+    }
     for (const key of resultKey(result)) resultKeys.add(`${table}:${key}`);
-    const applied = await localDb.markSynced(table, { ...result, table });
-    if (applied) appliedCount += 1;
-    else notFoundCount += 1;
+    let applied = await localDb.markSynced(table, { ...result, table });
+    if (!applied && positionalEntry?.table === table) {
+      const fallbackLocalId = positionalEntry.record?.localId || positionalEntry.record?.id || positionalEntry.record?.serverId || '';
+      applied = await localDb.markSynced(table, { ...result, table, localId: result.localId || fallbackLocalId });
+      if (fallbackLocalId) resultKeys.add(`${table}:${fallbackLocalId}`);
+      console.warn('[SYNC FRONTEND] markSynced used positional fallback', {
+        table,
+        fallbackLocalId,
+        resultKeys: resultKey(result)
+      });
+    }
+    if (applied) {
+      appliedCount += 1;
+      appliedByTable[table] = (appliedByTable[table] || 0) + 1;
+      if (result?.status === 'synced') lastSyncedResults.push({ ...result, table, localId: result.localId || positionalEntry?.record?.localId || positionalEntry?.record?.id });
+    } else {
+      notFoundCount += 1;
+      notFoundByTable[table] = (notFoundByTable[table] || 0) + 1;
+    }
   }
   for (const entry of batch) {
     const keys = recordKey(entry).map((key) => `${entry.table}:${key}`);
@@ -218,6 +269,9 @@ async function applyPushResults(batch = [], results = []) {
     appliedCount,
     notFoundCount,
     missingResultCount,
+    appliedByTable,
+    notFoundByTable,
+    lastSyncedResults,
     failedCount: notFoundCount + missingResultCount,
     resultCount: results.length
   };
@@ -302,6 +356,35 @@ async function setSyncDiagnostic(companyId, patch = {}) {
   if (companyId) await localDb.setMeta(syncDiagnosticKey(companyId), serialized);
   localStorage.setItem(syncDiagnosticKey(companyId), serialized);
   return next;
+}
+
+export async function clearLastSyncedPendingRecords() {
+  const companyId = getCompanyId();
+  const diagnostic = await getSyncDiagnostic(companyId);
+  const results = Array.isArray(diagnostic?.lastPushSyncedResults) ? diagnostic.lastPushSyncedResults : [];
+  let applied = 0;
+  const appliedByTable = {};
+  for (const result of results) {
+    if (!result?.table) continue;
+    const ok = await localDb.markSynced(result.table, result);
+    if (!ok) continue;
+    applied += 1;
+    appliedByTable[result.table] = (appliedByTable[result.table] || 0) + 1;
+  }
+  const pendingCount = await localDb.getPendingCount();
+  await setSyncDiagnostic(companyId, {
+    manualPendingClearAt: nowIso(),
+    manualPendingClearApplied: applied,
+    pendingCount
+  });
+  console.log('[SYNC FRONTEND] manual clear last synced pending', {
+    totalResults: results.length,
+    applied,
+    appliedByTable,
+    pendingCount
+  });
+  emitSyncStateChange();
+  return { total: results.length, applied, appliedByTable, pendingCount };
 }
 
 function totalSyncRecords(changes = {}) {
@@ -424,6 +507,7 @@ export async function syncNow({ force = false, reason = 'manual' } = {}) {
   let syncCompanyId = '';
   let pushedTotal = 0;
   let pulledTotal = 0;
+  const syncedResultsForDiagnostic = [];
   try {
     const preferences = await getSyncPreferences();
     const lastSync = await lastSyncAt();
@@ -475,6 +559,10 @@ export async function syncNow({ force = false, reason = 'manual' } = {}) {
       pendingCounts: Object.fromEntries(Object.entries(pending).map(([table, records]) => [table, records.length])),
       pendingDetails
     });
+    console.log('[SYNC FRONTEND] pending before push', {
+      total: pendingRecords.length,
+      byTable: Object.fromEntries(Object.entries(pending).map(([table, records]) => [table, records.length]))
+    });
 
     if (pendingRecords.length) {
       syncProgress = { done: 0, total: pendingRecords.length, failed: 0 };
@@ -484,6 +572,7 @@ export async function syncNow({ force = false, reason = 'manual' } = {}) {
         const batch = pendingRecords.slice(index, index + SYNC_BATCH_SIZE);
         try {
           const batchChanges = buildBatchChanges(batch);
+          console.log('[SYNC FRONTEND] pushed table price_history count', (batchChanges.price_history || []).length);
           const pushed = await api.syncPush({ deviceId, companyId, changes: batchChanges });
           const results = Array.isArray(pushed.results) ? pushed.results : [];
           pushedTotal += results.length;
@@ -497,18 +586,22 @@ export async function syncNow({ force = false, reason = 'manual' } = {}) {
             backend: pushed.backend || '',
             responseOk: Boolean(pushed.ok)
           });
-          const { appliedCount, notFoundCount, missingResultCount } = await applyPushResults(batch, results);
+          const { appliedCount, notFoundCount, missingResultCount, appliedByTable, lastSyncedResults } = await applyPushResults(batch, results);
+          syncedResultsForDiagnostic.push(...lastSyncedResults);
+          console.log('[SYNC FRONTEND] markSynced table price_history success count', appliedByTable.price_history || 0);
           if (missingResultCount > 0) {
             syncProgress.failed += missingResultCount;
             lastError = `${missingResultCount} sync records did not receive server results`;
           }
           const remainingAfterBatch = await localDb.getPendingCount();
+          console.log('[SYNC FRONTEND] pending after markSynced', remainingAfterBatch);
           console.log('[SYNC] local apply finish', {
             companyId,
             batchStart: index,
             appliedCount,
             notFoundCount,
             missingResultCount,
+            appliedByTable,
             successCount: results.length - notFoundCount,
             failedCount: notFoundCount + missingResultCount,
             remainingPending: remainingAfterBatch
@@ -524,6 +617,7 @@ export async function syncNow({ force = false, reason = 'manual' } = {}) {
               const singleResults = Array.isArray(pushed.results) ? pushed.results : [];
               pushedTotal += singleResults.length;
               const applied = await applyPushResults([entry], singleResults);
+              syncedResultsForDiagnostic.push(...(applied.lastSyncedResults || []));
               if (applied.failedCount > 0) {
                 syncProgress.failed += applied.failedCount;
                 lastError = `\u540c\u6b65\u5931\u8d25\uff1a${entry.table} ${entry.record?.id || entry.record?.localId || ''}`;
@@ -608,7 +702,8 @@ export async function syncNow({ force = false, reason = 'manual' } = {}) {
         pushCount: pushedTotal,
         pullCount: pulledTotal,
         pendingCount: await localDb.getPendingCount(),
-        failedCount: 0
+        failedCount: 0,
+        lastPushSyncedResults: syncedResultsForDiagnostic.slice(-500)
       });
       lastError = '';
       console.log('[SYNC] finish', { companyId, serverTime: pulled.serverTime || '', pendingCount: await localDb.getPendingCount() });
@@ -621,7 +716,8 @@ export async function syncNow({ force = false, reason = 'manual' } = {}) {
         pushCount: pushedTotal,
         pullCount: pulledTotal,
         pendingCount: await localDb.getPendingCount(),
-        failedCount: syncProgress.failed
+        failedCount: syncProgress.failed,
+        lastPushSyncedResults: syncedResultsForDiagnostic.slice(-500)
       });
       console.warn('[SYNC] finish with failures', {
         companyId,
@@ -640,7 +736,8 @@ export async function syncNow({ force = false, reason = 'manual' } = {}) {
         pushCount: pushedTotal,
         pullCount: pulledTotal,
         pendingCount: await localDb.getPendingCount().catch(() => null),
-        failedCount: syncProgress.failed
+        failedCount: syncProgress.failed,
+        lastPushSyncedResults: syncedResultsForDiagnostic.slice(-500)
       }).catch(() => {});
     }
     console.error('[SYNC] error', error);

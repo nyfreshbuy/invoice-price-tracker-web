@@ -29,6 +29,7 @@ import { api, getAuthSession, getLastApiDebug, setAuthSession } from './api.js';
 import { generateId, localDb, today } from './localDb.js';
 import { repairTextEncoding } from './encoding.js';
 import {
+  clearLastSyncedPendingRecords,
   getSyncPreferences,
   getSyncSnapshot,
   markSyncPending,
@@ -2511,21 +2512,21 @@ function ProductSearchPage() {
     ? '\u6ca1\u6709\u627e\u5230\u76f8\u5173\u5546\u54c1'
     : (noLocalData ? '\u672c\u5730\u6682\u65e0\u6570\u636e\uff0c\u8bf7\u5148\u540c\u6b65' : '\u6682\u65e0\u5546\u54c1\u8bb0\u5f55');
   return (
-    <Page title="\u5546\u54c1\u4ef7\u683c\u67e5\u8be2" subtitle="\u4f18\u5148\u67e5\u8be2\u672c\u5730 IndexedDB\uff1b\u5f02\u5e38\u5546\u54c1\u4e0d\u4f1a\u8fdb\u5165\u6b63\u5f0f\u4ef7\u683c\u7edf\u8ba1\u3002">
-      <Section title="\u641c\u7d22">
-        <label className="field"><span>\u5546\u54c1\u540d\u79f0</span><input value={q} onChange={(event) => setQ(event.target.value)} placeholder="\u5343\u9875\u8c46\u8150 / Rice Chips / ITOEN" /></label>
-        {!hasKeyword && <p className="hint">\u672a\u8f93\u5165\u5173\u952e\u8bcd\u65f6\u663e\u793a\u6700\u8fd1 20 \u4e2a\u8d2d\u4e70\u5546\u54c1\u3002</p>}
+    <Page title={'\u5546\u54c1\u4ef7\u683c\u67e5\u8be2'} subtitle={'\u4f18\u5148\u67e5\u8be2\u672c\u5730 IndexedDB\uff1b\u5f02\u5e38\u5546\u54c1\u4e0d\u4f1a\u8fdb\u5165\u6b63\u5f0f\u4ef7\u683c\u7edf\u8ba1\u3002'}>
+      <Section title={'\u641c\u7d22'}>
+        <label className="field"><span>{'\u5546\u54c1\u540d\u79f0'}</span><input value={q} onChange={(event) => setQ(event.target.value)} placeholder={'\u5343\u9875\u8c46\u8150 / Rice Chips / ITOEN'} /></label>
+        {!hasKeyword && <p className="hint">{'\u672a\u8f93\u5165\u5173\u952e\u8bcd\u65f6\u663e\u793a\u6700\u8fd1 20 \u4e2a\u8d2d\u4e70\u5546\u54c1\u3002'}</p>}
       </Section>
       {productResults.length === 0 && (
         <EmptyState text={emptyText} />
       )}
       {productResults.length === 0 && (
-        <Section title="\u672c\u5730\u6570\u636e\u8bca\u65ad">
+        <Section title={'\u672c\u5730\u6570\u636e\u8bca\u65ad'}>
           <Info label="products" value={counts.products ?? '-'} />
           <Info label="invoice_items" value={counts.invoice_items ?? '-'} />
           <Info label="price_history" value={counts.price_history ?? '-'} />
-          <Info label="\u540c\u6b65\u72b6\u6001" value={syncSnapshot?.label || '-'} />
-          <Info label="\u540c\u6b65\u9519\u8bef" value={syncSnapshot?.lastError || syncSnapshot?.diagnostic?.error || '\u65e0'} />
+          <Info label={'\u540c\u6b65\u72b6\u6001'} value={syncSnapshot?.label || '-'} />
+          <Info label={'\u540c\u6b65\u9519\u8bef'} value={syncSnapshot?.lastError || syncSnapshot?.diagnostic?.error || '\u65e0'} />
         </Section>
       )}
       <div className="card-list">
@@ -2536,9 +2537,9 @@ function ProductSearchPage() {
           <Link className="row-card" to={`/products/${encodeURIComponent(routeName || '')}`} key={routeName || item?.productId || index}>
             <div>
               <h3>{displayName}</h3>
-              <p>\u6700\u8fd1\u4ef7\u683c {money(item?.recentPrice)} / \u6700\u4f4e\u4ef7 {money(item?.minPrice)} / \u6700\u9ad8\u4ef7 {money(item?.maxPrice)}</p>
-              <p>\u5747\u4ef7 {money(item?.averagePrice)} / \u6700\u8fd1\u4f9b\u5e94\u5546 {item?.recentSupplierName || '-'} / \u6700\u8fd1\u91c7\u8d2d {item?.recentPurchaseDate || '-'} / {item?.recordCount || 0} \u6761</p>
-              {Number(item?.pendingCount || 0) > 0 && <p className="warning-text">{item.pendingCount} \u6761\u4ef7\u683c\u6765\u81ea\u5f85\u786e\u8ba4/\u5f02\u5e38\u53d1\u7968</p>}
+              <p>{'\u6700\u8fd1\u4ef7\u683c'} {money(item?.recentPrice)} / {'\u6700\u4f4e\u4ef7'} {money(item?.minPrice)} / {'\u6700\u9ad8\u4ef7'} {money(item?.maxPrice)}</p>
+              <p>{'\u5747\u4ef7'} {money(item?.averagePrice)} / {'\u6700\u8fd1\u4f9b\u5e94\u5546'} {item?.recentSupplierName || '-'} / {'\u6700\u8fd1\u91c7\u8d2d'} {item?.recentPurchaseDate || '-'} / {item?.recordCount || 0} {'\u6761'}</p>
+              {Number(item?.pendingCount || 0) > 0 && <p className="warning-text">{item.pendingCount} {'\u6761\u4ef7\u683c\u6765\u81ea\u5f85\u786e\u8ba4/\u5f02\u5e38\u53d1\u7968'}</p>}
             </div>
             <ChevronRight />
           </Link>
@@ -3130,6 +3131,19 @@ function SettingsPage() {
     await localDb.clearAllLocalData();
     await restoreCloud();
   }
+  async function clearSyncedPendingStatus() {
+    setSyncing(true);
+    setMessage('\u6b63\u5728\u6e05\u9664\u5df2\u6210\u529f\u540c\u6b65\u7684 pending \u72b6\u6001...');
+    try {
+      const result = await clearLastSyncedPendingRecords();
+      await load();
+      setMessage(`\u5df2\u5904\u7406 ${result.applied}/${result.total} \u6761\uff0c\u5269\u4f59\u5f85\u540c\u6b65 ${result.pendingCount} \u6761`);
+    } catch (error) {
+      setMessage(error.message || '\u6e05\u9664 pending \u72b6\u6001\u5931\u8d25');
+    } finally {
+      setSyncing(false);
+    }
+  }
   async function clearData() {
     if (!confirm('\u786e\u8ba4\u6e05\u7a7a\u672c\u5730\u6d4b\u8bd5\u6570\u636e\u5e76\u540c\u6b65\u5220\u9664\u5230\u4e91\u7aef\uff1f')) return;
     await localDb.softDeleteAll();
@@ -3153,24 +3167,25 @@ function SettingsPage() {
   const diagnosticCounts = diagnostics?.counts || {};
   const syncDiagnostic = syncSnapshot.diagnostic || {};
   return (
-    <Page title="\u8bbe\u7f6e/\u540c\u6b65">
-      <Section title="\u540c\u6b65\u4e2d\u5fc3">
-        <Info label="\u540c\u6b65\u72b6\u6001" value={syncSnapshot.label} />
-        <Info label="\u5f85\u540c\u6b65\u603b\u6570" value={syncSnapshot.pendingCount || 0} />
-        <Info label="\u5f85\u540c\u6b65\u53d1\u7968" value={syncSnapshot.pendingByTable?.invoices || 0} />
-        <Info label="\u5f85\u540c\u6b65\u5546\u54c1\u660e\u7ec6" value={syncSnapshot.pendingByTable?.invoice_items || 0} />
-        <Info label="\u5f85\u540c\u6b65\u5546\u54c1" value={syncSnapshot.pendingByTable?.products || 0} />
-        <Info label="\u5f85\u540c\u6b65\u4ef7\u683c\u5386\u53f2" value={syncSnapshot.pendingByTable?.price_history || 0} />
-        <Info label="\u6700\u540e\u540c\u6b65\u65f6\u95f4" value={syncSnapshot.lastSyncAt || '-'} />
-        <Info label="\u6700\u8fd1\u9519\u8bef" value={syncSnapshot.lastError || syncDiagnostic.error || '\u65e0'} />
+    <Page title={'\u8bbe\u7f6e/\u540c\u6b65'}>
+      <Section title={'\u540c\u6b65\u4e2d\u5fc3'}>
+        <Info label={'\u540c\u6b65\u72b6\u6001'} value={syncSnapshot.label} />
+        <Info label={'\u5f85\u540c\u6b65\u603b\u6570'} value={syncSnapshot.pendingCount || 0} />
+        <Info label={'\u5f85\u540c\u6b65\u53d1\u7968'} value={syncSnapshot.pendingByTable?.invoices || 0} />
+        <Info label={'\u5f85\u540c\u6b65\u5546\u54c1\u660e\u7ec6'} value={syncSnapshot.pendingByTable?.invoice_items || 0} />
+        <Info label={'\u5f85\u540c\u6b65\u5546\u54c1'} value={syncSnapshot.pendingByTable?.products || 0} />
+        <Info label={'\u5f85\u540c\u6b65\u4ef7\u683c\u5386\u53f2'} value={syncSnapshot.pendingByTable?.price_history || 0} />
+        <Info label={'\u6700\u540e\u540c\u6b65\u65f6\u95f4'} value={syncSnapshot.lastSyncAt || '-'} />
+        <Info label={'\u6700\u8fd1\u9519\u8bef'} value={syncSnapshot.lastError || syncDiagnostic.error || '\u65e0'} />
         <div className="row-actions">
           <button className="primary-button" disabled={syncing || syncSnapshot.syncing} onClick={handleSettingsSyncNow}><RefreshCw size={16} />{syncing || syncSnapshot.syncing ? '\u540c\u6b65\u4e2d...' : '\u7acb\u5373\u540c\u6b65'}</button>
-          <button type="button" disabled={syncing} onClick={restoreCloud}>\u4ece\u4e91\u7aef\u6062\u590d</button>
-          <button type="button" disabled={syncing} onClick={clearLocalAndRestore}>\u6e05\u7a7a\u672c\u5730\u7f13\u5b58\u540e\u91cd\u65b0\u62c9\u53d6</button>
+          <button type="button" disabled={syncing} onClick={restoreCloud}>{'\u4ece\u4e91\u7aef\u6062\u590d'}</button>
+          <button type="button" disabled={syncing} onClick={clearLocalAndRestore}>{'\u6e05\u7a7a\u672c\u5730\u7f13\u5b58\u540e\u91cd\u65b0\u62c9\u53d6'}</button>
+          <button type="button" disabled={syncing} onClick={clearSyncedPendingStatus}>{'\u6e05\u9664\u5df2\u6210\u529f\u540c\u6b65\u7684 pending \u72b6\u6001'}</button>
         </div>
         <p className={(message || syncSnapshot.lastError || syncSnapshot.diagnostic?.error || '').includes('\u5931\u8d25') || syncSnapshot.lastError || syncSnapshot.diagnostic?.error ? 'error' : 'success-text'}>{message || syncSnapshot.lastError || syncSnapshot.diagnostic?.error || syncSnapshot.label || '\u2601 \u5df2\u540c\u6b65'}</p>
       </Section>
-      <Section title="\u540c\u6b65\u8bca\u65ad">
+      <Section title={'\u540c\u6b65\u8bca\u65ad'}>
         <Info label="userId" value={session?.user?.id || '-'} />
         <Info label="companyId" value={session?.company?.id || session?.user?.companyId || '-'} />
         <Info label="companyName" value={displayCompanyName(session)} />
@@ -3189,13 +3204,13 @@ function SettingsPage() {
         <p className="long-text">last API error: {apiDebug?.error || '-'}</p>
       </Section>
       <MemberManagementPanel />
-      <Section title="\u6570\u636e\u5e93\u7edf\u8ba1">
+      <Section title={'\u6570\u636e\u5e93\u7edf\u8ba1'}>
         {Object.entries(safeObject(stats)).map(([key, value]) => <Info key={key} label={key} value={value} />)}
       </Section>
-      <Section title="\u5bfc\u51fa/\u7ef4\u62a4">
+      <Section title={'\u5bfc\u51fa/\u7ef4\u62a4'}>
         <div className="row-actions">
-          <button onClick={exportCloudExcel}>\u5bfc\u51fa\u4e91\u7aef Excel</button>
-          <button className="danger-button" onClick={clearData}>\u6e05\u7a7a\u6d4b\u8bd5\u6570\u636e</button>
+          <button onClick={exportCloudExcel}>{'\u5bfc\u51fa\u4e91\u7aef Excel'}</button>
+          <button className="danger-button" onClick={clearData}>{'\u6e05\u7a7a\u6d4b\u8bd5\u6570\u636e'}</button>
         </div>
       </Section>
     </Page>
@@ -3437,12 +3452,12 @@ function InvoiceImageViewer({ invoice, onUpdated }) {
         <button type="button" onClick={() => setShowDebug((value) => !value)}>{showDebug ? '\u9690\u85cf\u8bca\u65ad\u4fe1\u606f' : '\u663e\u793a\u8bca\u65ad\u4fe1\u606f'}</button>
       </div>
       <input ref={fileRef} className="hidden-file-input" type="file" accept="image/*" onChange={(event) => { rebindImage(event.target.files?.[0]); event.target.value = ''; }} />
-      <p className="hint image-diagnostics">\u56fe\u7247\u6765\u6e90\uff1a{diagnostic.source || '-'} / \u56fe\u7247\u5927\u5c0f\uff1a{formatBytes(diagnostic.fileSize)} / \u56fe\u7247\u72b6\u6001\uff1a{statusLabel}</p>
+      <p className="hint image-diagnostics">{'\u56fe\u7247\u6765\u6e90\uff1a'}{diagnostic.source || '-'} / {'\u56fe\u7247\u5927\u5c0f\uff1a'}{formatBytes(diagnostic.fileSize)} / {'\u56fe\u7247\u72b6\u6001\uff1a'}{statusLabel}</p>
       {imageUrl && imageStatus !== 'missing' && imageStatus !== 'error' && (
         <img
           className="invoice-full-image"
           src={imageUrl}
-          alt="\u53d1\u7968\u539f\u56fe"
+          alt={'\u53d1\u7968\u539f\u56fe'}
           onLoad={() => {
             setImageStatus('loaded');
             setDiagnostic((current) => ({ ...current, imageStatus: current.imageStatus === 'uploaded' ? 'uploaded' : 'local', localExists: current.source !== 'Server' || current.localExists }));
@@ -3460,7 +3475,7 @@ function InvoiceImageViewer({ invoice, onUpdated }) {
           }}
         />
       )}
-      {imageStatus === 'missing' && <p className="warning-text">\u672c\u5730\u56fe\u7247\u5df2\u4e22\u5931\uff0c\u8bf7\u91cd\u65b0\u7ed1\u5b9a\u56fe\u7247\u3002\u53d1\u7968\u6570\u636e\u3001AI \u8bc6\u522b\u7ed3\u679c\u548c\u5546\u54c1\u660e\u7ec6\u4ecd\u53ef\u67e5\u770b\u3002</p>}
+      {imageStatus === 'missing' && <p className="warning-text">{'\u672c\u5730\u56fe\u7247\u5df2\u4e22\u5931\uff0c\u8bf7\u91cd\u65b0\u7ed1\u5b9a\u56fe\u7247\u3002\u53d1\u7968\u6570\u636e\u3001AI \u8bc6\u522b\u7ed3\u679c\u548c\u5546\u54c1\u660e\u7ec6\u4ecd\u53ef\u67e5\u770b\u3002'}</p>}
       {imageStatus === 'error' && <p className="error">{diagnostic.errorReason || '\u56fe\u7247\u52a0\u8f7d\u5931\u8d25\uff0c\u8bf7\u91cd\u65b0\u7ed1\u5b9a\u56fe\u7247\u3002'}</p>}
       {showDebug && (
         <div className="debug-box">
@@ -3468,9 +3483,9 @@ function InvoiceImageViewer({ invoice, onUpdated }) {
           <Info label="imageStatus" value={diagnostic.imageStatus || imageStatus || '-'} />
           <Info label="localImageKey" value={diagnostic.localImageKey || '-'} />
           <Info label="cloudImageUrl" value={diagnostic.hasCloudImageUrl ? '\u5b58\u5728' : '\u65e0'} />
-          <Info label="\u672c\u5730\u56fe\u7247" value={diagnostic.localExists ? '\u5b58\u5728' : '\u4e0d\u5b58\u5728'} />
-          <Info label="\u6587\u4ef6\u5927\u5c0f" value={formatBytes(diagnostic.fileSize)} />
-          <p className="long-text">\u9519\u8bef\u539f\u56e0\uff1a{diagnostic.errorReason || '-'}</p>
+          <Info label={'\u672c\u5730\u56fe\u7247'} value={diagnostic.localExists ? '\u5b58\u5728' : '\u4e0d\u5b58\u5728'} />
+          <Info label={'\u6587\u4ef6\u5927\u5c0f'} value={formatBytes(diagnostic.fileSize)} />
+          <p className="long-text">{'\u9519\u8bef\u539f\u56e0\uff1a'}{diagnostic.errorReason || '-'}</p>
           <p className="long-text">imagePath: {invoice?.imagePath || '-'}</p>
         </div>
       )}
