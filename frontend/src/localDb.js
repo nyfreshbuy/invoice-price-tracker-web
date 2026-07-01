@@ -480,7 +480,10 @@ export function getCurrentCompanyId() {
 
 function belongsToCurrentCompany(record) {
   const companyId = getCurrentCompanyId();
-  return Boolean(companyId) && record.companyId === companyId;
+  const current = String(companyId || '').trim();
+  const recordCompanyId = String(record?.companyId || record?.company_id || record?.company?.id || '').trim();
+  if (!current) return !recordCompanyId;
+  return !recordCompanyId || recordCompanyId === current;
 }
 
 function active(record) {
@@ -1702,10 +1705,16 @@ export const localDb = {
   async searchProducts(query) {
     await localDb.repairPriceHistoryProductNames();
     const q = normalizeProductName(query);
-    const allActiveInvoices = (await all('invoices')).filter(active);
+    const allInvoices = await all('invoices');
+    const invoiceAnyById = new Map(allInvoices.flatMap((invoice) => idsFor(invoice).map((idValue) => [idValue, invoice])));
+    const invoiceRecordUsable = (invoiceId) => {
+      if (!invoiceId) return true;
+      const invoice = invoiceAnyById.get(invoiceId);
+      return invoice ? active(invoice) : true;
+    };
+    const allActiveInvoices = allInvoices.filter(active);
     const invoiceById = new Map(allActiveInvoices.flatMap((invoice) => idsFor(invoice).map((idValue) => [idValue, invoice])));
     const approvedInvoiceIds = invoiceIdSet(allActiveInvoices.filter(approvedForStats));
-    const activeInvoiceIds = invoiceIdSet(allActiveInvoices);
     const suppliers = await all('suppliers');
     const products = (await all('products')).filter(active);
     const productById = new Map(products.flatMap((product) => idsFor(product).map((idValue) => [idValue, product])));
@@ -1716,7 +1725,7 @@ export const localDb = {
       .filter(Boolean));
     const allItems = (await all('invoice_items')).filter((item) => {
       if (!active(item) || Number(item.isDiscountLine || 0) || Number(item.candidateOnly || 0) || !trustedItemName(item)) return false;
-      if (!activeInvoiceIds.has(item.invoiceId)) return false;
+      if (!invoiceRecordUsable(item.invoiceId)) return false;
       return true;
     });
     const itemById = new Map(allItems.flatMap((item) => idsFor(item).map((idValue) => [idValue, item])));
@@ -1737,7 +1746,7 @@ export const localDb = {
     const priceRecordsFromHistory = (await all('price_history')).filter((row) => {
       if (!active(row) || ['deleted', 'inactive'].includes(String(row.status || '').toLowerCase())) return false;
       const invoice = invoiceById.get(row.invoiceId);
-      if (row.invoiceId && !invoice) return false;
+      if (!invoiceRecordUsable(row.invoiceId)) return false;
       const item = itemById.get(row.invoiceItemId) || {};
       const product = productById.get(row.productId) || {};
       if (Number(item.isDiscountLine || 0) || Number(item.candidateOnly || 0) || Number(item.isFreeItem || 0)) return false;
@@ -1765,6 +1774,17 @@ export const localDb = {
       if (!recordsByKey.has(key) || record.sourceType === 'price_history') recordsByKey.set(key, record);
     }
     const items = [...recordsByKey.values()].filter((record) => productDisplayName(record, record, productById.get(record.productId) || {}) !== '未命名商品');
+    console.info('[ProductSearch] local index', {
+      companyId: getCurrentCompanyId(),
+      keyword: query,
+      normalizedKeyword: q,
+      invoices: allInvoices.length,
+      activeInvoices: allActiveInvoices.length,
+      invoiceItems: allItems.length,
+      products: products.length,
+      priceHistory: (await all('price_history')).filter((row) => belongsToCurrentCompany(row) && active(row)).length,
+      generatedPriceIndex: items.length
+    });
     const groups = new Map();
     for (const item of items) {
       const key = item.productId || normalizeProductName(item.standardName || item.productNameNormalized || item.productNameOriginal || item.displayName);
@@ -1772,7 +1792,7 @@ export const localDb = {
       group.push(item);
       groups.set(key, group);
     }
-    return [...groups.entries()].map(([groupKey, records]) => {
+    const results = [...groups.entries()].map(([groupKey, records]) => {
       const sorted = [...records].sort((a, b) => `${b.invoiceDate}${b.createdAt}`.localeCompare(`${a.invoiceDate}${a.createdAt}`));
       const confirmedRecords = records.filter((record) => approvedInvoiceIds.has(record.invoiceId));
       const groupedPriceRecords = confirmedRecords.length ? confirmedRecords : records;
@@ -1800,13 +1820,25 @@ export const localDb = {
         pendingCount: records.length - confirmedRecords.length
       };
     }).sort((a, b) => (b.recentPurchaseDate || '').localeCompare(a.recentPurchaseDate || '')).slice(0, q ? 100 : 20);
+    console.info('[ProductSearch] final result count', {
+      keyword: query,
+      normalizedKeyword: q,
+      finalResultCount: results.length
+    });
+    return results;
   },
 
   async getProduct(name) {
     await localDb.repairPriceHistoryProductNames();
     const suppliers = await all('suppliers');
-    const invoices = (await all('invoices')).filter(active);
-    const activeInvoiceIds = invoiceIdSet(invoices);
+    const allInvoices = await all('invoices');
+    const invoiceAnyById = new Map(allInvoices.flatMap((invoice) => idsFor(invoice).map((idValue) => [idValue, invoice])));
+    const invoiceRecordUsable = (invoiceId) => {
+      if (!invoiceId) return true;
+      const invoice = invoiceAnyById.get(invoiceId);
+      return invoice ? active(invoice) : true;
+    };
+    const invoices = allInvoices.filter(active);
     const q = normalizeProductName(name);
     const products = (await all('products')).filter(active);
     const productById = new Map(products.flatMap((product) => idsFor(product).map((idValue) => [idValue, product])));
@@ -1817,7 +1849,7 @@ export const localDb = {
       .filter(Boolean));
     const allItems = (await all('invoice_items')).filter((item) => {
       if (!active(item) || Number(item.isDiscountLine || 0) || Number(item.candidateOnly || 0) || !trustedItemName(item)) return false;
-      if (!activeInvoiceIds.has(item.invoiceId)) return false;
+      if (!invoiceRecordUsable(item.invoiceId)) return false;
       const haystack = productSearchText(item, item, productById.get(item.productId) || {});
       return haystack.includes(q) || item.productId === name || aliasProductIds.has(item.productId);
     });
@@ -1825,7 +1857,7 @@ export const localDb = {
     const priceRows = (await all('price_history')).filter((row) => {
       if (!active(row) || ['deleted', 'inactive'].includes(String(row.status || '').toLowerCase())) return false;
       const invoice = resolveByAnyId(invoices, row.invoiceId);
-      if (row.invoiceId && !invoice) return false;
+      if (!invoiceRecordUsable(row.invoiceId)) return false;
       const item = itemById.get(row.invoiceItemId) || {};
       const product = productById.get(row.productId) || {};
       const haystack = productSearchText(row, item, product);

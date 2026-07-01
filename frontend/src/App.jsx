@@ -2450,16 +2450,40 @@ function PromoAllocationDialog({ items, onClose, onSave }) {
 function ProductSearchPage() {
   const [q, setQ] = useState('');
   const [results, setResults] = useState([]);
-  const load = () => localDb.searchProducts(q).then((data) => setResults(safeArray(data)));
-  useLocalReload(load, [q]);
+  const searchSeq = useRef(0);
+  useEffect(() => {
+    let cancelled = false;
+    const run = async () => {
+      const seq = searchSeq.current + 1;
+      searchSeq.current = seq;
+      const keyword = q;
+      try {
+        const data = await localDb.searchProducts(keyword);
+        if (!cancelled && searchSeq.current === seq) setResults(safeArray(data));
+      } catch (error) {
+        recordPageError(error, { componentStack: 'ProductSearchPage' }, 'searchProducts');
+        if (!cancelled && searchSeq.current === seq) setResults([]);
+      }
+    };
+    const handler = () => run();
+    run();
+    window.addEventListener('local-db-change', handler);
+    window.addEventListener('sync-state-change', handler);
+    return () => {
+      cancelled = true;
+      window.removeEventListener('local-db-change', handler);
+      window.removeEventListener('sync-state-change', handler);
+    };
+  }, [q]);
   const productResults = safeArray(results);
+  const hasKeyword = q.trim().length > 0;
   return (
     <Page title="商品价格查询" subtitle="优先查询本地 IndexedDB；异常商品不会进入正式价格统计。">
       <Section title="搜索">
         <label className="field"><span>商品名称</span><input value={q} onChange={(event) => setQ(event.target.value)} placeholder="千页豆腐 / Rice Chips / ITOEN" /></label>
-        {!q && <p className="hint">未输入关键词时显示最近 20 个购买商品。</p>}
+        {!hasKeyword && <p className="hint">未输入关键词时显示最近 20 个购买商品。</p>}
       </Section>
-      {productResults.length === 0 && <EmptyState text="暂无商品记录" />}
+      {productResults.length === 0 && <EmptyState text={hasKeyword ? '没有找到相关商品' : '暂无商品记录'} />}
       <div className="card-list">
         {productResults.map((item, index) => {
           const displayName = item?.productName || item?.productNameOriginal || item?.name || item?.standardName || item?.productNameNormalized || '未命名商品';
@@ -4013,7 +4037,6 @@ function summarizePromoGroups(items = []) {
       effectiveUnitCost: group.actualQty > 0 ? group.invoiceAmount / group.actualQty : 0
     }));
 }
-
 
 
 
