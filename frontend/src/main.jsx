@@ -6,10 +6,11 @@ import './styles.css';
 import { sanitizeAuthStorage } from './api.js';
 
 sanitizeAuthStorage();
+const ACTIVE_CACHE_NAME = 'invoice-price-tracker-runtime-guard-v10';
 if ('caches' in window) {
   caches.keys()
     .then((keys) => Promise.all(keys
-      .filter((key) => key.startsWith('invoice-price-tracker-') && key !== 'invoice-price-tracker-auth-required-v8')
+      .filter((key) => key.startsWith('invoice-price-tracker-') && key !== ACTIVE_CACHE_NAME)
       .map((key) => caches.delete(key))))
     .catch(() => {});
 }
@@ -30,7 +31,7 @@ if ('serviceWorker' in navigator) {
         if ('caches' in window) {
           caches.keys()
             .then((keys) => Promise.all(keys
-              .filter((key) => key.startsWith('invoice-price-tracker-') && key !== 'invoice-price-tracker-auth-required-v8')
+              .filter((key) => key.startsWith('invoice-price-tracker-') && key !== ACTIVE_CACHE_NAME)
               .map((key) => caches.delete(key))))
             .catch(() => {});
         }

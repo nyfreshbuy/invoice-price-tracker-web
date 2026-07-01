@@ -1,22 +1,29 @@
 import { Component, useEffect, useMemo, useRef, useState } from 'react';
 import { Link, NavLink, Route, Routes, useLocation, useNavigate, useParams } from 'react-router-dom';
 import {
+  ArrowLeft,
   Building2,
   BarChart3,
   Camera,
+  ChevronLeft,
   ChevronRight,
   FileText,
+  Folder,
   Home,
+  Image as ImageIcon,
+  MoreVertical,
   PackageSearch,
   Plus,
   RefreshCw,
   Save,
   Search,
   Settings,
+  Share2,
   ShoppingCart,
   Trash2,
   Upload,
-  UserPlus
+  UserPlus,
+  Wand2
 } from 'lucide-react';
 import { api, getAuthSession, getLastApiDebug, setAuthSession } from './api.js';
 import { generateId, localDb, today } from './localDb.js';
@@ -1263,50 +1270,562 @@ function RecognitionTaskListPage() {
   );
 }
 function InvoiceArchivePage() {
+  const navigate = useNavigate();
   const [q, setQ] = useState('');
   const [tree, setTree] = useState([]);
   const [message, setMessage] = useState('');
-  const load = () => localDb.getArchiveTree(q).then((data) => setTree(safeArray(data))).catch((error) => setMessage(error.message || 'Archive load failed'));
-  useLocalReload(load, [q]);
-  const archiveTree = safeArray(tree);
-  const totalInvoices = archiveTree.reduce((sum, supplier) => sum + Number(supplier?.invoiceCount || 0), 0);
+  const [sortMode, setSortMode] = useState('name');
+  const [currentKey, setCurrentKey] = useState('root');
+  const [menuOpen, setMenuOpen] = useState(false);
+  const [viewer, setViewer] = useState(null);
+  const session = getAuthSession();
+  const companyName = session?.company?.name || session?.user?.companyName || '我的公司';
+
+  const load = () => localDb.getArchiveTree('')
+    .then((data) => {
+      setTree(safeArray(data));
+      setMessage('');
+    })
+    .catch((error) => setMessage(error.message || '文档库加载失败'));
+  useLocalReload(load, []);
+
+  const archive = useMemo(() => buildArchiveFileSystem(safeArray(tree), companyName, sortMode), [tree, companyName, sortMode]);
+  const currentNode = archive.nodeIndex.get(currentKey) || archive.root;
+  const breadcrumbs = archiveBreadcrumbs(archive.nodeIndex, currentNode.key);
+  const searchResults = useMemo(() => archiveSearchResults(archive, q), [archive, q]);
+
+  useEffect(() => {
+    if (!archive.nodeIndex.has(currentKey)) setCurrentKey('root');
+  }, [archive, currentKey]);
+
+  function openFolder(nodeKey) {
+    if (archive.nodeIndex.has(nodeKey)) setCurrentKey(nodeKey);
+  }
+
+  function goBack() {
+    const parentKey = currentNode?.parentKey;
+    if (parentKey && archive.nodeIndex.has(parentKey)) setCurrentKey(parentKey);
+  }
+
+  async function deleteArchiveFile(file) {
+    if (!file?.invoiceId) return;
+    if (!window.confirm(`确定删除 ${file.fileName} 对应的发票记录和本地图片吗？`)) return;
+    try {
+      await localDb.deleteInvoice(file.invoiceId);
+      markSyncPending();
+      setViewer(null);
+      await load();
+      setMessage('已删除发票、本地图片索引和文档库记录。');
+    } catch (error) {
+      setMessage(error.message || '删除失败');
+    }
+  }
+
+  function openFile(file) {
+    const files = currentNode?.files?.length ? currentNode.files : archive.allFiles;
+    const index = Math.max(0, files.findIndex((item) => item.key === file.key));
+    setViewer({ files, index });
+  }
+
+  function openSearchResult(result) {
+    if (result.kind === 'file') {
+      openFolder(result.parentKey);
+      setViewer({ files: archive.nodeIndex.get(result.parentKey)?.files || [result.file], index: Math.max(0, (archive.nodeIndex.get(result.parentKey)?.files || []).findIndex((file) => file.key === result.file.key)) });
+    } else {
+      openFolder(result.node.key);
+    }
+    setQ('');
+  }
+
+  const folderNodes = safeArray(currentNode?.children);
+  const files = safeArray(currentNode?.files);
 
   return (
-    <Page title="发票文档库" subtitle="按供应商和月份浏览 App 内置归档索引">
-      <Section title="搜索">
-        <label className="field">
-          <span>供应商 / 发票号 / 日期</span>
-          <input value={q} onChange={(event) => setQ(event.target.value)} placeholder="May Flower / INV00125 / 2026-06" />
-        </label>
-        <Info label="供应商" value={archiveTree.length} />
-        <Info label="发票" value={totalInvoices} />
-        {message && <p className="error">{message}</p>}
-      </Section>
-      {archiveTree.length === 0 && <EmptyState text="暂无归档发票。确认入库后的发票会出现在这里。" />}
-      {archiveTree.map((supplier) => (
-        <Section key={supplier?.supplierName || supplier?.id || 'unknown'} title={`${supplier?.supplierName || '-'} (${supplier?.invoiceCount || 0})`}>
-          {safeArray(supplier?.months).map((month) => (
-            <CollapsibleSection key={`${supplier?.supplierName || 'unknown'}-${month?.month || ''}`} title={`${month?.month || '-'} · ${month?.invoiceCount || 0} 张`}>
-              <div className="card-list">
-                {safeArray(month?.invoices).map((invoice, invoiceIndex) => (
-                  <div className="row-card" key={invoice?.id || invoice?.invoiceNo || `${month?.month || 'month'}-${invoiceIndex}`}>
-                    <div>
-                      <h3>{invoice?.invoiceDate || '-'} · {invoice?.invoiceNo || 'No Invoice #'}</h3>
-                      <p>{money(invoice?.totalAmount)} · {invoice?.status || '-'}</p>
-                      <p className="long-text">{invoice?.archiveFilePath || invoice?.imagePath || 'No archive path'}</p>
-                      {safeArray(invoice?.pages).length > 0 && <p>Pages: {safeArray(invoice?.pages).length}</p>}
-                    </div>
-                    <div className="row-actions">
-                      <Link className="icon-button" to={`/invoices/${encodeURIComponent(invoice?.id || '')}`}>查看</Link>
-                    </div>
-                  </div>
-                ))}
+    <Page title="发票文档库" subtitle="文件管理器模式，按公司、供应商、年份、月份自动归档">
+      <div className="archive-manager">
+        <div className="archive-topbar">
+          <button type="button" className="icon-button" onClick={goBack} disabled={currentNode.key === 'root'} aria-label="返回上一级">
+            <ArrowLeft size={18} />
+          </button>
+          <div className="archive-breadcrumb" aria-label="当前路径">
+            {breadcrumbs.map((crumb, index) => (
+              <button type="button" key={crumb.key} onClick={() => openFolder(crumb.key)}>
+                {index > 0 && <span>/</span>}
+                <strong>{crumb.label}</strong>
+              </button>
+            ))}
+          </div>
+          <div className="archive-menu-wrap">
+            <button type="button" className="icon-button" onClick={() => setMenuOpen((value) => !value)} aria-label="文档库菜单">
+              <MoreVertical size={18} />
+            </button>
+            {menuOpen && (
+              <div className="archive-menu">
+                <button type="button" onClick={() => { setMessage('文档库目录由 AI 识别和确认入库自动创建。'); setMenuOpen(false); }}>新建文件夹（管理员）</button>
+                <button type="button" onClick={() => { setSortMode('date'); setMenuOpen(false); }}>排序：按日期</button>
+                <button type="button" onClick={() => { setSortMode('supplier'); setMenuOpen(false); }}>排序：按供应商</button>
+                <button type="button" onClick={() => { setSortMode('name'); setMenuOpen(false); }}>排序：按名称</button>
+                <button type="button" onClick={() => { load(); setMenuOpen(false); }}>刷新</button>
+                <button type="button" onClick={() => { setMessage('已重新扫描本地归档索引。'); load(); setMenuOpen(false); }}>重新扫描文档</button>
               </div>
-            </CollapsibleSection>
-          ))}
-        </Section>
-      ))}
+            )}
+          </div>
+        </div>
+
+        <div className="archive-stats">
+          <span>供应商：<strong>{archive.stats.supplierCount}</strong></span>
+          <span>发票：<strong>{archive.stats.invoiceCount}张</strong></span>
+          <span>存储空间：<strong>{formatArchiveBytes(archive.stats.storageBytes)}</strong></span>
+        </div>
+
+        <div className="archive-search">
+          <Search size={18} />
+          <input
+            value={q}
+            onChange={(event) => setQ(event.target.value)}
+            placeholder="搜索公司、供应商、年份、月份、发票号、日期"
+          />
+        </div>
+
+        {message && <p className={message.includes('失败') ? 'error' : 'success'}>{message}</p>}
+
+        {q.trim() && (
+          <div className="archive-search-results">
+            {searchResults.length === 0 && <p className="hint">没有找到匹配的文件夹或发票。</p>}
+            {searchResults.slice(0, 12).map((result) => (
+              <button type="button" key={result.key} onClick={() => openSearchResult(result)}>
+                {result.kind === 'file' ? <ImageIcon size={18} /> : <Folder size={18} />}
+                <span>{result.label}</span>
+                <small>{result.path}</small>
+              </button>
+            ))}
+          </div>
+        )}
+
+        {folderNodes.length === 0 && files.length === 0 && <EmptyState text="暂无归档发票。确认入库后的发票会按公司、供应商、年份和月份自动出现在这里。" />}
+
+        {folderNodes.length > 0 && (
+          <div className="archive-grid" aria-label="文件夹">
+            {folderNodes.map((node) => (
+              <button type="button" className="archive-tile archive-folder-tile" key={node.key} onClick={() => openFolder(node.key)}>
+                <span className="folder-icon"><Folder size={44} fill="currentColor" /></span>
+                <span className="archive-tile-name">{node.label}</span>
+                <small>{node.meta}</small>
+              </button>
+            ))}
+          </div>
+        )}
+
+        {files.length > 0 && (
+          <div className="archive-grid archive-file-grid" aria-label="发票图片">
+            {files.map((file) => (
+              <button type="button" className="archive-tile archive-file-tile" key={file.key} onClick={() => openFile(file)}>
+                <ArchiveImageThumb file={file} />
+                <span className="archive-tile-name">{file.fileName}</span>
+                <small>{file.invoiceNo || file.invoiceDate || '发票图片'}</small>
+              </button>
+            ))}
+          </div>
+        )}
+      </div>
+
+      {viewer && (
+        <ArchiveImageViewer
+          files={viewer.files}
+          index={viewer.index}
+          onIndexChange={(index) => setViewer((current) => ({ ...current, index }))}
+          onClose={() => setViewer(null)}
+          onDelete={deleteArchiveFile}
+          onDetail={(invoiceId) => navigate(`/invoices/${encodeURIComponent(invoiceId)}`)}
+          onReprocessed={load}
+        />
+      )}
     </Page>
+  );
+}
+
+function buildArchiveFileSystem(tree, companyName, sortMode = 'name') {
+  const nodeIndex = new Map();
+  const allFiles = [];
+  let supplierCount = 0;
+  let invoiceCount = 0;
+  let storageBytes = 0;
+  const root = createArchiveNode('root', 'Home', 'root', '');
+  const companyNode = createArchiveNode('company', companyName || '我的公司', 'company', root.key);
+  root.children.push(companyNode);
+
+  const suppliers = safeArray(tree).map((supplier) => ({
+    ...supplier,
+    supplierName: normalizeArchiveLabel(supplier?.supplierName || '未分类')
+  }));
+  supplierCount = suppliers.length;
+  sortArchiveEntries(suppliers, sortMode, (supplier) => supplier.supplierName);
+
+  for (const supplier of suppliers) {
+    const supplierNode = createArchiveNode(`supplier:${supplier.supplierName}`, supplier.supplierName || '未分类', 'supplier', companyNode.key);
+    supplierNode.meta = `${Number(supplier.invoiceCount || 0)} 张`;
+    companyNode.children.push(supplierNode);
+    const yearMap = new Map();
+    for (const month of safeArray(supplier.months)) {
+      const monthKey = month?.month || '未分类月份';
+      const year = monthKey.slice(0, 4) || '未分类';
+      const yearLabel = /^\d{4}$/.test(year) ? `${year}年` : year;
+      if (!yearMap.has(yearLabel)) {
+        const yearNode = createArchiveNode(`year:${supplier.supplierName}:${yearLabel}`, yearLabel, 'year', supplierNode.key);
+        yearMap.set(yearLabel, yearNode);
+        supplierNode.children.push(yearNode);
+      }
+      const yearNode = yearMap.get(yearLabel);
+      const monthLabel = formatArchiveMonth(monthKey);
+      const monthNode = createArchiveNode(`month:${supplier.supplierName}:${monthKey}`, monthLabel, 'month', yearNode.key);
+      monthNode.meta = `${Number(month?.invoiceCount || 0)} 张`;
+      const monthInvoices = safeArray(month?.invoices);
+      sortArchiveEntries(monthInvoices, sortMode, (invoice) => `${invoice?.invoiceDate || ''} ${invoice?.invoiceNo || ''}`);
+      let sequence = 1;
+      for (const invoice of monthInvoices) {
+        invoiceCount += 1;
+        const files = archiveFilesForInvoice(invoice, sequence);
+        sequence += files.length || 1;
+        for (const file of files) {
+          storageBytes += Number(file.size || 0);
+          file.parentKey = monthNode.key;
+          monthNode.files.push(file);
+          allFiles.push(file);
+        }
+      }
+      yearNode.children.push(monthNode);
+    }
+    for (const yearNode of supplierNode.children) {
+      sortArchiveEntries(yearNode.children, sortMode, (node) => node.label);
+      yearNode.meta = `${yearNode.children.reduce((sum, monthNode) => sum + safeArray(monthNode.files).length, 0)} 张`;
+    }
+  }
+
+  const visit = (node) => {
+    nodeIndex.set(node.key, node);
+    for (const child of safeArray(node.children)) visit(child);
+  };
+  visit(root);
+  return { root, nodeIndex, allFiles, stats: { supplierCount, invoiceCount, storageBytes } };
+}
+
+function createArchiveNode(key, label, type, parentKey) {
+  return {
+    key,
+    label,
+    type,
+    parentKey,
+    children: [],
+    files: [],
+    meta: ''
+  };
+}
+
+function normalizeArchiveLabel(value) {
+  const text = String(value || '').trim();
+  if (!text || /^unknown supplier$/i.test(text) || text === '未命名供应商') return '未分类';
+  return text.replace(/\s+/g, ' ');
+}
+
+function sortArchiveEntries(entries, sortMode, labelGetter) {
+  entries.sort((a, b) => {
+    if (sortMode === 'date') {
+      return `${b?.invoiceDate || b?.month || b?.label || ''}${b?.createdAt || ''}`.localeCompare(`${a?.invoiceDate || a?.month || a?.label || ''}${a?.createdAt || ''}`);
+    }
+    if (sortMode === 'supplier') {
+      return String(a?.supplierName || a?.label || '').localeCompare(String(b?.supplierName || b?.label || ''));
+    }
+    return String(labelGetter(a) || '').localeCompare(String(labelGetter(b) || ''));
+  });
+  return entries;
+}
+
+function formatArchiveMonth(monthKey) {
+  const match = String(monthKey || '').match(/^(\d{4})-(\d{1,2})/);
+  if (!match) return monthKey || '未分类月份';
+  return `${match[1]}年${Number(match[2])}月份`;
+}
+
+function archiveFilesForInvoice(invoice, startSequence = 1) {
+  const pages = safeArray(invoice?.pages);
+  const sourcePages = pages.length > 0 ? pages : [{
+    id: `${invoice?.id || 'invoice'}-page-1`,
+    invoiceId: invoice?.id || invoice?.serverId || '',
+    imageId: invoice?.imageId || '',
+    imagePath: invoice?.imagePath || invoice?.imageUrl || invoice?.originalImageUrl || '',
+    archiveFilePath: invoice?.archiveFilePath || '',
+    originalFileName: invoice?.originalFilePath || '',
+    fileSize: invoice?.fileSize || invoice?.imageSize || 0,
+    pageIndex: 1
+  }];
+  return sourcePages.map((page, index) => {
+    const sequence = startSequence + index;
+    const date = invoice?.invoiceDate || 'undated';
+    const ext = archiveFileExtension(page?.originalFileName || page?.archiveFilePath || invoice?.archiveFilePath || invoice?.imagePath || '');
+    const fileName = `${date}-${String(sequence).padStart(3, '0')}${ext}`;
+    return {
+      key: `${invoice?.id || invoice?.serverId || 'invoice'}:${page?.id || index}`,
+      fileName,
+      invoiceId: invoice?.id || invoice?.serverId || '',
+      invoiceNo: invoice?.invoiceNo || '',
+      invoiceDate: invoice?.invoiceDate || '',
+      supplierName: normalizeArchiveLabel(invoice?.supplierDisplayName || invoice?.supplierName || ''),
+      totalAmount: Number(invoice?.totalAmount || 0),
+      imageId: page?.imageId || invoice?.imageId || '',
+      imagePath: page?.imagePath || page?.archiveFilePath || invoice?.imagePath || invoice?.imageUrl || invoice?.originalImageUrl || '',
+      archiveFilePath: page?.archiveFilePath || invoice?.archiveFilePath || '',
+      size: Number(page?.fileSize || invoice?.fileSize || invoice?.imageSize || 0),
+      pageIndex: Number(page?.pageIndex || page?.pageNumber || index + 1),
+      pageCount: Number(page?.pageCount || sourcePages.length || 1),
+      invoice
+    };
+  });
+}
+
+function archiveFileExtension(value) {
+  const match = String(value || '').match(/\.(jpe?g|png|heic|webp)$/i);
+  return match ? `.${match[1].toLowerCase().replace('jpeg', 'jpg')}` : '.jpg';
+}
+
+function archiveBreadcrumbs(nodeIndex, key) {
+  const crumbs = [];
+  let node = nodeIndex.get(key);
+  while (node) {
+    crumbs.unshift({ key: node.key, label: node.label });
+    node = node.parentKey ? nodeIndex.get(node.parentKey) : null;
+  }
+  return crumbs;
+}
+
+function archiveSearchResults(archive, query) {
+  const q = String(query || '').trim().toLowerCase();
+  if (!q) return [];
+  const results = [];
+  for (const node of archive.nodeIndex.values()) {
+    if (node.type === 'root') continue;
+    const path = archiveBreadcrumbs(archive.nodeIndex, node.key).map((crumb) => crumb.label).join(' / ');
+    if (`${node.label} ${path}`.toLowerCase().includes(q)) {
+      results.push({ key: `node:${node.key}`, kind: 'folder', label: node.label, path, node });
+    }
+  }
+  for (const file of archive.allFiles) {
+    const path = archiveBreadcrumbs(archive.nodeIndex, file.parentKey).map((crumb) => crumb.label).join(' / ');
+    const haystack = `${file.fileName} ${file.invoiceNo} ${file.invoiceDate} ${file.supplierName} ${path}`.toLowerCase();
+    if (haystack.includes(q)) results.push({ key: `file:${file.key}`, kind: 'file', label: file.fileName, path, file });
+  }
+  return results;
+}
+
+function formatArchiveBytes(value) {
+  const bytes = Number(value || 0);
+  if (!bytes) return '0 MB';
+  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
+  return `${(bytes / 1024 / 1024).toFixed(1)} MB`;
+}
+
+function ArchiveImageThumb({ file }) {
+  const [src, setSrc] = useState('');
+  const [status, setStatus] = useState('loading');
+  const imageKey = `${file?.imageId || ''}|${file?.imagePath || ''}|${file?.archiveFilePath || ''}`;
+
+  useEffect(() => {
+    let cancelled = false;
+    let objectUrl = '';
+    async function loadImage() {
+      setStatus('loading');
+      setSrc('');
+      try {
+        const record = await localDb.getInvoiceImage({ id: file?.invoiceId, imageId: file?.imageId, imagePath: file?.imagePath });
+        const blob = record?.imageBlob || record?.blob;
+        if (blob) {
+          objectUrl = URL.createObjectURL(blob);
+          if (!cancelled) {
+            setSrc(objectUrl);
+            setStatus('loaded');
+          }
+          return;
+        }
+        const serverPath = file?.imagePath || file?.archiveFilePath || '';
+        if (serverPath && !String(serverPath).startsWith('indexeddb:') && !String(serverPath).startsWith('blob:')) {
+          if (!cancelled) {
+            setSrc(api.fileUrl(serverPath));
+            setStatus('loading');
+          }
+          return;
+        }
+        if (!cancelled) setStatus('error');
+      } catch {
+        if (!cancelled) setStatus('error');
+      }
+    }
+    loadImage();
+    return () => {
+      cancelled = true;
+      if (objectUrl) URL.revokeObjectURL(objectUrl);
+    };
+  }, [imageKey, file?.invoiceId]);
+
+  if (src) {
+    return <img className="archive-thumb" src={src} alt={file?.fileName || '发票图片'} onLoad={() => setStatus('loaded')} onError={() => { setSrc(''); setStatus('error'); }} />;
+  }
+  return (
+    <span className={`archive-thumb-placeholder ${status === 'error' ? 'is-error' : ''}`}>
+      <ImageIcon size={30} />
+      <small>{status === 'error' ? '图片缺失' : '加载中'}</small>
+    </span>
+  );
+}
+
+function ArchiveImageViewer({ files, index, onIndexChange, onClose, onDelete, onDetail, onReprocessed }) {
+  const fileList = safeArray(files);
+  const activeIndex = Math.min(Math.max(index || 0, 0), Math.max(fileList.length - 1, 0));
+  const file = fileList[activeIndex];
+  const [src, setSrc] = useState('');
+  const [status, setStatus] = useState('loading');
+  const [message, setMessage] = useState('');
+  const [zoomed, setZoomed] = useState(false);
+  const [showAi, setShowAi] = useState(false);
+  const [busy, setBusy] = useState('');
+  const touchStartX = useRef(null);
+  const lastTapAt = useRef(0);
+  const imageKey = `${file?.key || ''}|${file?.imageId || ''}|${file?.imagePath || ''}`;
+
+  useEffect(() => {
+    let cancelled = false;
+    let objectUrl = '';
+    async function loadImage() {
+      setStatus('loading');
+      setSrc('');
+      setMessage('');
+      try {
+        const record = await localDb.getInvoiceImage({ id: file?.invoiceId, imageId: file?.imageId, imagePath: file?.imagePath });
+        const blob = record?.imageBlob || record?.blob;
+        if (blob) {
+          objectUrl = URL.createObjectURL(blob);
+          if (!cancelled) {
+            setSrc(objectUrl);
+            setStatus('loaded');
+          }
+          return;
+        }
+        const serverPath = file?.imagePath || file?.archiveFilePath || '';
+        if (serverPath && !String(serverPath).startsWith('indexeddb:') && !String(serverPath).startsWith('blob:')) {
+          if (!cancelled) {
+            setSrc(api.fileUrl(serverPath));
+            setStatus('loading');
+          }
+          return;
+        }
+        if (!cancelled) {
+          setStatus('error');
+          setMessage('图片加载失败，请重新上传图片。');
+        }
+      } catch (error) {
+        if (!cancelled) {
+          setStatus('error');
+          setMessage(error.message || '图片读取失败');
+        }
+      }
+    }
+    loadImage();
+    return () => {
+      cancelled = true;
+      if (objectUrl) URL.revokeObjectURL(objectUrl);
+    };
+  }, [imageKey, file?.invoiceId]);
+
+  function move(delta) {
+    const next = activeIndex + delta;
+    if (next >= 0 && next < fileList.length) {
+      setShowAi(false);
+      setZoomed(false);
+      onIndexChange(next);
+    }
+  }
+
+  async function shareFile() {
+    try {
+      if (navigator.share) {
+        await navigator.share({ title: file?.fileName || '发票图片', text: `${file?.supplierName || ''} ${file?.invoiceNo || ''}`.trim(), url: src || window.location.href });
+      } else if (navigator.clipboard) {
+        await navigator.clipboard.writeText(src || file?.fileName || '');
+        setMessage('图片链接已复制。');
+      }
+    } catch (error) {
+      setMessage(error.message || '分享失败');
+    }
+  }
+
+  async function reprocess() {
+    if (!file?.invoiceId) return;
+    setBusy('reprocess');
+    try {
+      await api.reprocessInvoiceWithAI(file.invoiceId);
+      await onReprocessed?.();
+      setMessage('已提交 AI 重新识别。');
+    } catch (error) {
+      setMessage(error.message || '重新识别失败');
+    } finally {
+      setBusy('');
+    }
+  }
+
+  const aiJson = file?.invoice?.aiResult || file?.invoice?.aiJson || file?.invoice?.recognitionJson || file?.invoice?.recognitionResult || '';
+
+  return (
+    <div className="archive-viewer" role="dialog" aria-modal="true">
+      <div className="archive-viewer-toolbar">
+        <button type="button" onClick={onClose}>关闭</button>
+        <div>
+          <strong>{file?.fileName || '发票图片'}</strong>
+          <small>{activeIndex + 1} / {fileList.length}</small>
+        </div>
+        <button type="button" onClick={shareFile}><Share2 size={16} /> 分享</button>
+      </div>
+      <div
+        className="archive-viewer-canvas"
+        onTouchStart={(event) => { touchStartX.current = event.touches?.[0]?.clientX ?? null; }}
+        onTouchEnd={(event) => {
+          const start = touchStartX.current;
+          const end = event.changedTouches?.[0]?.clientX ?? null;
+          if (start !== null && end !== null && Math.abs(start - end) > 50) move(start > end ? 1 : -1);
+          if (start !== null && end !== null && Math.abs(start - end) <= 10) {
+            const now = Date.now();
+            if (now - lastTapAt.current < 320) setZoomed((value) => !value);
+            lastTapAt.current = now;
+          }
+          touchStartX.current = null;
+        }}
+      >
+        <button type="button" className="archive-viewer-nav left" onClick={() => move(-1)} disabled={activeIndex === 0}><ChevronLeft /></button>
+        {src && status !== 'error' ? (
+          <img
+            className={zoomed ? 'is-zoomed' : ''}
+            src={src}
+            alt={file?.fileName || '发票图片'}
+            onDoubleClick={() => setZoomed((value) => !value)}
+            onLoad={() => setStatus('loaded')}
+            onError={() => { setSrc(''); setStatus('error'); setMessage('图片加载失败，请重新上传图片。'); }}
+          />
+        ) : (
+          <div className="archive-viewer-error">
+            <ImageIcon size={42} />
+            <strong>{status === 'loading' ? '图片加载中' : '图片加载失败，请重新上传图片'}</strong>
+          </div>
+        )}
+        <button type="button" className="archive-viewer-nav right" onClick={() => move(1)} disabled={activeIndex >= fileList.length - 1}><ChevronRight /></button>
+      </div>
+      <div className="archive-viewer-actions">
+        <button type="button" onClick={() => setShowAi((value) => !value)}>查看 AI 识别结果</button>
+        <button type="button" onClick={reprocess} disabled={busy === 'reprocess'}><Wand2 size={16} /> {busy === 'reprocess' ? '处理中…' : '重新 AI 识别'}</button>
+        <button type="button" onClick={() => onDetail?.(file?.invoiceId)} disabled={!file?.invoiceId}>查看发票详情</button>
+        <button type="button" className="danger" onClick={() => onDelete?.(file)}><Trash2 size={16} /> 删除</button>
+      </div>
+      {message && <p className={message.includes('失败') ? 'error' : 'success'}>{message}</p>}
+      {showAi && (
+        <pre className="archive-ai-json">{typeof aiJson === 'string' ? (aiJson || '暂无 AI 识别结果') : JSON.stringify(aiJson || {}, null, 2)}</pre>
+      )}
+    </div>
   );
 }
 function InvoiceFormPage() {

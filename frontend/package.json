@@ -7,11 +7,16 @@
     "dev": "vite --host 0.0.0.0",
     "build": "vite build",
     "preview": "vite preview --host 0.0.0.0",
+    "ios:init": "npm run build && npx cap add ios",
+    "ios:sync": "npm run build && npx cap sync ios",
+    "ios:open": "npx cap open ios",
     "test:ui": "node scripts/run-ui-tests.mjs",
     "test:ui:headed": "node scripts/run-ui-tests.mjs --headed",
     "test:ui:install": "playwright install chromium"
   },
   "dependencies": {
+    "@capacitor/core": "^7.0.0",
+    "@capacitor/ios": "^7.0.0",
     "@vitejs/plugin-react": "^4.3.4",
     "lucide-react": "^0.468.0",
     "react": "^18.3.1",
@@ -20,6 +25,7 @@
     "vite": "^6.0.7"
   },
   "devDependencies": {
+    "@capacitor/cli": "^7.0.0",
     "@playwright/test": "^1.61.0"
   }
 }

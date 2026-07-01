@@ -1,0 +1,21 @@
+{
+  "appId": "com.nyfreshbuy.invoicepricetracker",
+  "appName": "InvoicePriceTracker",
+  "webDir": "dist",
+  "bundledWebRuntime": false,
+  "ios": {
+    "contentInset": "automatic",
+    "scheme": "InvoicePriceTracker",
+    "limitsNavigationsToAppBoundDomains": false
+  },
+  "plugins": {
+    "SplashScreen": {
+      "launchShowDuration": 1200,
+      "backgroundColor": "#f5f7f7",
+      "showSpinner": false
+    }
+  },
+  "server": {
+    "cleartext": false
+  }
+}

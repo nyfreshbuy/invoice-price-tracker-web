@@ -1417,6 +1417,19 @@ export const localDb = {
     await put('invoices', syncFields({ ...detail.invoice, deletedAt }, 'deleted'));
     await putMany('invoice_items', detail.items.map((item) => syncFields({ ...item, deletedAt }, 'deleted')));
     await putMany('invoice_discounts', (detail.discounts || []).map((discount) => syncFields({ ...discount, deletedAt }, 'deleted')));
+    const invoiceIds = idsFor(detail.invoice);
+    const pageRows = (await all('invoice_pages')).filter((page) => active(page) && invoiceIds.includes(page.invoiceId));
+    if (pageRows.length) {
+      await putMany('invoice_pages', pageRows.map((page) => syncFields({ ...page, deletedAt }, 'deleted')));
+    }
+    const imageIds = new Set([detail.invoice.imageId, ...pageRows.map((page) => page.imageId)].filter(Boolean));
+    const imageRows = (await all('invoice_images')).filter((image) => {
+      if (!belongsToCurrentCompany(image)) return false;
+      return imageIds.has(image.id) || invoiceIds.includes(image.invoiceId) || pageRows.some((page) => page.id === image.invoiceId);
+    });
+    for (const image of imageRows) {
+      await remove('invoice_images', image.id);
+    }
     const itemIds = detail.items.flatMap(idsFor);
     const priceRows = (await all('price_history')).filter((row) => itemIds.includes(row.invoiceItemId) || (detail.invoice.invoiceNo && row.invoiceNo === detail.invoice.invoiceNo && row.supplierId === detail.invoice.supplierId));
     if (priceRows.length) {

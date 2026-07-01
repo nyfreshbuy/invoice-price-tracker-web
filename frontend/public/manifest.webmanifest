@@ -1,7 +1,7 @@
 {
   "name": "InvoicePriceTracker",
   "short_name": "InvoiceTracker",
-  "description": "个人发票录入与进货价格查询 PWA",
+  "description": "Invoice recognition, purchase price tracking, supplier management, and offline-first sync.",
   "start_url": "/",
   "scope": "/",
   "display": "standalone",

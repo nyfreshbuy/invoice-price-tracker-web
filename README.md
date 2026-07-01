@@ -197,6 +197,44 @@ Mongo authentication is enabled by default when `MONGODB_URI` is present. To for
 
 OpenAI keys must only be configured in backend environment variables. Never put `OPENAI_API_KEY` in the frontend.
 
+## iOS App Packaging
+
+The current iOS packaging strategy is to wrap the existing PWA with Capacitor. This keeps the React/Vite PWA codebase and does not rewrite the app in Swift.
+
+Frontend files added for App Store/TestFlight readiness:
+
+- `frontend/capacitor.config.json`
+- `frontend/IOS_PACKAGING.md`
+- `frontend/public/support.html`
+- `frontend/public/privacy.html`
+- `frontend/public/terms.html`
+- `frontend/public/download.html`
+
+The repository root also contains an older `InvoicePriceTracker.xcodeproj`. That project is not the current PWA wrapper. For the PWA-based iOS app, generate the Capacitor project from `web-pwa/frontend`:
+
+```bash
+cd frontend
+npm install
+npm run ios:init
+```
+
+After the first generation:
+
+```bash
+npm run ios:sync
+npm run ios:open
+```
+
+Before building for TestFlight/App Store, set:
+
+```text
+VITE_API_BASE_URL=https://invoice-backend-8stb.onrender.com
+```
+
+Then run `npm run ios:sync`, open `frontend/ios/App/App.xcworkspace`, configure signing, verify camera/photo privacy strings, Archive, and upload through Xcode.
+
+Invoice images remain local by default. Cloud sync uploads structured invoice/product/supplier data, not original invoice images. A future paid migration feature can temporarily upload local images so a new phone can download them and then delete the temporary cloud copies.
+
 Account connection APIs require a real JWT login token. Registration is always available on the login page.
 
 ```text
