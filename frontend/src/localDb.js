@@ -723,6 +723,22 @@ export const localDb = {
     return Object.fromEntries(entries);
   },
 
+  async retryFailedSyncRecords() {
+    const retriedByTable = {};
+    for (const table of syncTables) {
+      const failed = (await all(table)).filter((record) => belongsToCurrentCompany(record) && record.syncStatus === 'failed');
+      if (!failed.length) continue;
+      await putMany(table, failed.map((record) => ({
+        ...record,
+        syncStatus: record.deletedAt ? 'deleted' : 'pending',
+        syncNote: record.syncNote || 'retry failed sync',
+        syncError: ''
+      })));
+      retriedByTable[table] = failed.length;
+    }
+    return retriedByTable;
+  },
+
   async getPendingDebugDetails() {
     const pending = await this.getPendingChanges();
     return syncTables.flatMap((table) => (pending[table] || []).map((record) => ({

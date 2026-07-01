@@ -13,6 +13,7 @@ let syncProgress = { done: 0, total: 0, failed: 0 };
 let autoSyncTimer = null;
 let activeSyncRunId = 0;
 let syncWatchdogTimer = null;
+let syncStartedAt = 0;
 
 function lastSyncStorageKey(companyId) {
   return `invoicePriceTrackerLastSyncAt:${companyId || 'default'}`;
@@ -256,7 +257,17 @@ export function markSyncPending() {
 }
 
 export async function syncNow({ force = false, reason = 'manual' } = {}) {
-  if (syncing) return getSyncSnapshot();
+  if (syncing) {
+    const stale = syncStartedAt && Date.now() - syncStartedAt > SYNC_TIMEOUT_MS + 5000;
+    if (!force || !stale) return getSyncSnapshot();
+    console.warn('[SYNC] stale sync lock reset before force sync', {
+      reason,
+      startedAt: syncStartedAt,
+      progress: { ...syncProgress }
+    });
+    syncing = false;
+    clearSyncWatchdog();
+  }
   if (!getAuthSession()) {
     lastError = '';
     waitingForWifi = false;
@@ -269,6 +280,7 @@ export async function syncNow({ force = false, reason = 'manual' } = {}) {
   }
 
   syncing = true;
+  syncStartedAt = Date.now();
   waitingForWifi = false;
   syncProgress = { done: 0, total: 0, failed: 0 };
   lastError = '';
@@ -298,6 +310,14 @@ export async function syncNow({ force = false, reason = 'manual' } = {}) {
     if (!companyId) {
       lastError = '请先登录';
       return getSyncSnapshot();
+    }
+
+    if (force) {
+      const retried = await localDb.retryFailedSyncRecords();
+      const retriedCount = Object.values(retried).reduce((sum, count) => sum + Number(count || 0), 0);
+      if (retriedCount) {
+        console.warn('[SYNC] retrying failed local records', { companyId, retried });
+      }
     }
 
     const pending = await localDb.getPendingChanges();
@@ -493,6 +513,7 @@ export async function syncNow({ force = false, reason = 'manual' } = {}) {
         pendingCount: await localDb.getPendingCount().catch(() => null),
         lastSyncTime: await lastSyncAt().catch(() => '')
       });
+      syncStartedAt = 0;
       scheduleNextAutoSync();
       emitSyncStateChange();
     }
@@ -512,6 +533,7 @@ export async function pullFromCloud({ full = false } = {}) {
     return getSyncSnapshot();
   }
   syncing = true;
+  syncStartedAt = Date.now();
   waitingForWifi = false;
   syncProgress = { done: 0, total: 0, failed: 0 };
   lastError = '';
@@ -594,6 +616,7 @@ export async function pullFromCloud({ full = false } = {}) {
     if (activeSyncRunId === runId) {
       clearSyncWatchdog();
       syncing = false;
+      syncStartedAt = 0;
       console.log('[SYNC] finally reset', { runId, syncInProgress: syncing, lastError });
       emitSyncStateChange();
     }
@@ -612,6 +635,7 @@ export async function resetLocalCacheAndPull() {
     return getSyncSnapshot();
   }
   syncing = true;
+  syncStartedAt = Date.now();
   waitingForWifi = false;
   syncProgress = { done: 0, total: 0, failed: 0 };
   lastError = '';
@@ -630,6 +654,7 @@ export async function resetLocalCacheAndPull() {
     if (activeSyncRunId === runId) {
       clearSyncWatchdog();
       syncing = false;
+      syncStartedAt = 0;
       console.log('[SYNC] finally reset', { runId, syncInProgress: syncing, lastError });
       emitSyncStateChange();
     }
