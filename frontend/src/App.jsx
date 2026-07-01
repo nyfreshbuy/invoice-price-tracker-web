@@ -3198,65 +3198,112 @@ function ActionLink({ to, icon, title, subtitle }) {
   );
 }
 
-const failedInvoiceImageUrls = new Set();
-const invoiceImageRetryCounts = new Map();
-
 function InvoiceImageViewer({ invoice, onUpdated }) {
   const [imageUrl, setImageUrl] = useState('');
   const [imageStatus, setImageStatus] = useState('idle');
-  const [diagnostic, setDiagnostic] = useState({ source: 'Unknown', size: 0, status: '待加载', message: '' });
+  const [diagnostic, setDiagnostic] = useState({
+    invoiceId: '',
+    imageStatus: 'idle',
+    localImageKey: '',
+    hasCloudImageUrl: false,
+    localExists: false,
+    fileSize: 0,
+    source: '-',
+    errorReason: ''
+  });
   const [showDebug, setShowDebug] = useState(false);
   const [reuploading, setReuploading] = useState(false);
   const fileRef = useRef(null);
 
-  const imageKey = `${invoice?.imageId || ''}|${invoice?.imagePath || ''}|${invoice?.imageUrl || ''}|${invoice?.originalImageUrl || ''}`;
+  const imageKey = [
+    invoice?.id,
+    invoice?.serverId,
+    invoice?.localId,
+    invoice?.imageId,
+    invoice?.localImageKey,
+    invoice?.imagePath,
+    invoice?.cloudImageUrl,
+    invoice?.imageUrl,
+    invoice?.originalImageUrl
+  ].filter(Boolean).join('|');
 
   useEffect(() => {
     let cancelled = false;
     let objectUrl = '';
+
     async function loadImage() {
       setImageStatus('loading');
-      setDiagnostic({ source: 'Unknown', size: 0, status: '加载中', message: '' });
-      const imageId = invoice?.imageId || (String(invoice?.imagePath || '').startsWith('indexeddb:') ? String(invoice.imagePath).replace('indexeddb:', '') : '');
-      const serverPath = invoice?.imageUrl || invoice?.originalImageUrl || invoice?.imagePath || '';
+      setImageUrl('');
+      setDiagnostic({
+        invoiceId: invoice?.id || invoice?.serverId || invoice?.localId || '',
+        imageStatus: 'loading',
+        localImageKey: invoice?.localImageKey || invoice?.imageId || String(invoice?.imagePath || '').replace(/^indexeddb:/, ''),
+        hasCloudImageUrl: Boolean(invoice?.cloudImageUrl),
+        localExists: false,
+        fileSize: Number(invoice?.fileSize || 0),
+        source: '-',
+        errorReason: ''
+      });
+
       try {
-        if (imageId) {
-          const record = await localDb.getInvoiceImage(imageId);
-          if (!record?.blob) {
-            if (!cancelled) {
-              setImageUrl('');
-              setImageStatus('error');
-              setDiagnostic({ source: 'IndexedDB', size: 0, status: '缺失', message: '图片不存在' });
-            }
-            return;
-          }
-          objectUrl = URL.createObjectURL(record.blob);
-          if (!cancelled) {
-            setImageUrl(objectUrl);
-            setDiagnostic({ source: 'IndexedDB', size: record.size || record.blob.size || 0, status: '加载中', message: '' });
-          }
+        const check = await localDb.verifyInvoiceImage(invoice);
+        if (cancelled) return;
+        const resource = check.resource || {};
+        const baseDiagnostic = {
+          invoiceId: invoice?.id || invoice?.serverId || invoice?.localId || resource.invoiceId || '',
+          imageStatus: check.status || resource.imageStatus || 'missing',
+          localImageKey: resource.localImageKey || invoice?.localImageKey || invoice?.imageId || String(invoice?.imagePath || '').replace(/^indexeddb:/, ''),
+          hasCloudImageUrl: Boolean(resource.cloudImageUrl || invoice?.cloudImageUrl),
+          localExists: Boolean(check.image?.imageBlob),
+          fileSize: Number(resource.fileSize || check.image?.fileSize || check.image?.size || invoice?.fileSize || 0),
+          source: resource.storageType === 'indexeddb' || check.image?.imageBlob ? 'Local / IndexedDB' : (resource.cloudImageUrl ? 'Cloud' : 'Server'),
+          errorReason: check.message || resource.errorReason || ''
+        };
+
+        if (check.image?.imageBlob) {
+          objectUrl = URL.createObjectURL(check.image.imageBlob);
+          setImageUrl(objectUrl);
+          setImageStatus('loading');
+          setDiagnostic({ ...baseDiagnostic, imageStatus: check.status || 'local', localExists: true });
           return;
         }
-        if (serverPath && !String(serverPath).startsWith('blob:')) {
-          if (!cancelled) {
-            setImageUrl(api.fileUrl(serverPath));
-            setDiagnostic({ source: 'Server', size: 0, status: '加载中', message: '' });
-          }
+
+        const cloudUrl = resource.cloudImageUrl || invoice?.cloudImageUrl || '';
+        const serverPath = String(invoice?.imageUrl || invoice?.originalImageUrl || invoice?.imagePath || '');
+        if (cloudUrl) {
+          setImageUrl(cloudUrl);
+          setImageStatus('loading');
+          setDiagnostic({ ...baseDiagnostic, source: 'Cloud', imageStatus: 'uploaded' });
           return;
         }
-        if (!cancelled) {
-          setImageUrl('');
-          setImageStatus('error');
-          setDiagnostic({ source: 'Unknown', size: 0, status: '缺失', message: '图片不存在' });
+        if (serverPath && !serverPath.startsWith('indexeddb:') && !serverPath.startsWith('blob:') && !serverPath.startsWith('data:image')) {
+          setImageUrl(api.fileUrl(serverPath));
+          setImageStatus('loading');
+          setDiagnostic({ ...baseDiagnostic, source: 'Server', imageStatus: 'loading' });
+          return;
         }
+
+        setImageUrl('');
+        setImageStatus('missing');
+        setDiagnostic({
+          ...baseDiagnostic,
+          imageStatus: 'missing',
+          source: baseDiagnostic.source || 'Local / IndexedDB',
+          errorReason: check.message || '\u672c\u5730\u56fe\u7247\u5df2\u4e22\u5931\uff0c\u8bf7\u91cd\u65b0\u7ed1\u5b9a\u56fe\u7247\u3002'
+        });
       } catch (error) {
         if (!cancelled) {
           setImageUrl('');
           setImageStatus('error');
-          setDiagnostic({ source: 'Unknown', size: 0, status: '加载失败', message: error.message || '图片读取失败' });
+          setDiagnostic((current) => ({
+            ...current,
+            imageStatus: 'failed',
+            errorReason: error.message || '\u56fe\u7247\u8bfb\u53d6\u5931\u8d25'
+          }));
         }
       }
     }
+
     loadImage();
     return () => {
       cancelled = true;
@@ -3264,42 +3311,94 @@ function InvoiceImageViewer({ invoice, onUpdated }) {
     };
   }, [imageKey]);
 
-  async function reupload(file) {
-    if (!file) return;
+  async function rebindImage(file) {
+    if (!file || !invoice?.id) return;
     setReuploading(true);
     try {
-      const image = await localDb.saveInvoiceImage(file, { invoiceId: invoice.id, source: 'invoice-reupload' });
-      await localDb.updateInvoiceFields(invoice.id, { imageId: image.id, imagePath: `indexeddb:${image.id}` });
+      const image = await localDb.saveInvoiceImage(file, { invoiceId: invoice.id, source: 'invoice-rebind' });
+      await localDb.updateInvoiceImageFields(invoice.id, {
+        imageId: image.id,
+        imagePath: `indexeddb:${image.localImageKey || image.id}`,
+        localImageKey: image.localImageKey || image.id,
+        imageStatus: 'local',
+        storageType: 'indexeddb',
+        originalFileName: image.originalFileName || file.name || '',
+        fileSize: image.fileSize || file.size || 0
+      });
       markSyncPending();
-      onUpdated?.();
+      await onUpdated?.();
     } catch (error) {
-      setDiagnostic({ source: 'Local', size: 0, status: '上传失败', message: error.message || '重新上传失败' });
+      setImageUrl('');
       setImageStatus('error');
+      setDiagnostic((current) => ({
+        ...current,
+        imageStatus: 'failed',
+        errorReason: error.message || '\u91cd\u65b0\u7ed1\u5b9a\u56fe\u7247\u5931\u8d25'
+      }));
     } finally {
       setReuploading(false);
     }
   }
 
+  const statusLabel = {
+    idle: '\u7b49\u5f85\u52a0\u8f7d',
+    loading: '\u52a0\u8f7d\u4e2d',
+    loaded: '\u5df2\u52a0\u8f7d',
+    local: '\u672c\u5730\u53ef\u7528',
+    uploaded: '\u4e91\u7aef\u53ef\u7528',
+    missing: '\u672c\u5730\u56fe\u7247\u5df2\u4e22\u5931',
+    error: '\u52a0\u8f7d\u5931\u8d25',
+    failed: '\u8bfb\u53d6\u5931\u8d25'
+  }[imageStatus] || diagnostic.imageStatus || imageStatus;
+
   return (
     <div className="invoice-image-viewer">
       <div className="row-actions">
-        <button type="button" onClick={() => fileRef.current?.click()}>{reuploading ? '上传中...' : '重新上传图片'}</button>
-        <button type="button" onClick={() => setShowDebug((value) => !value)}>{showDebug ? '隐藏调试信息' : '显示调试信息'}</button>
+        <button type="button" onClick={() => fileRef.current?.click()} disabled={reuploading}>{reuploading ? '\u7ed1\u5b9a\u4e2d...' : '\u91cd\u65b0\u7ed1\u5b9a\u56fe\u7247'}</button>
+        <button type="button" onClick={() => setShowDebug((value) => !value)}>{showDebug ? '\u9690\u85cf\u8bca\u65ad\u4fe1\u606f' : '\u663e\u793a\u8bca\u65ad\u4fe1\u606f'}</button>
       </div>
-      <input ref={fileRef} className="hidden-file-input" type="file" accept="image/*" onChange={(event) => { reupload(event.target.files?.[0]); event.target.value = ''; }} />
-      <p className="hint image-diagnostics">图片来源：{diagnostic.source} · 图片大小：{diagnostic.size ? `${diagnostic.size} bytes` : '-'} · 图片状态：{imageStatus === 'loaded' ? '已加载' : imageStatus === 'error' ? '加载失败' : diagnostic.status}</p>
-      {imageUrl && imageStatus !== 'error' && <img className="invoice-full-image" src={imageUrl} alt="发票原图" onLoad={() => { setImageStatus('loaded'); setDiagnostic((current) => ({ ...current, status: '正常' })); }} onError={() => { setImageStatus('error'); setDiagnostic((current) => ({ ...current, status: '加载失败', message: '图片加载失败，请重新上传图片' })); }} />}
-      {imageStatus === 'error' && <p className="error">{diagnostic.message || '图片加载失败，请重新上传图片'}</p>}
+      <input ref={fileRef} className="hidden-file-input" type="file" accept="image/*" onChange={(event) => { rebindImage(event.target.files?.[0]); event.target.value = ''; }} />
+      <p className="hint image-diagnostics">\u56fe\u7247\u6765\u6e90\uff1a{diagnostic.source || '-'} / \u56fe\u7247\u5927\u5c0f\uff1a{formatBytes(diagnostic.fileSize)} / \u56fe\u7247\u72b6\u6001\uff1a{statusLabel}</p>
+      {imageUrl && imageStatus !== 'missing' && imageStatus !== 'error' && (
+        <img
+          className="invoice-full-image"
+          src={imageUrl}
+          alt="\u53d1\u7968\u539f\u56fe"
+          onLoad={() => {
+            setImageStatus('loaded');
+            setDiagnostic((current) => ({ ...current, imageStatus: current.imageStatus === 'uploaded' ? 'uploaded' : 'local', localExists: current.source !== 'Server' || current.localExists }));
+          }}
+          onError={() => {
+            setImageUrl('');
+            setImageStatus('error');
+            setDiagnostic((current) => ({
+              ...current,
+              imageStatus: 'failed',
+              errorReason: current.source === 'Server' || current.source === 'Cloud'
+                ? '\u670d\u52a1\u5668\u56fe\u7247\u4e0d\u53ef\u7528\uff0c\u8bf7\u91cd\u65b0\u7ed1\u5b9a\u672c\u5730\u56fe\u7247\u3002'
+                : '\u56fe\u7247\u52a0\u8f7d\u5931\u8d25\uff0c\u8bf7\u91cd\u65b0\u7ed1\u5b9a\u56fe\u7247\u3002'
+            }));
+          }}
+        />
+      )}
+      {imageStatus === 'missing' && <p className="warning-text">\u672c\u5730\u56fe\u7247\u5df2\u4e22\u5931\uff0c\u8bf7\u91cd\u65b0\u7ed1\u5b9a\u56fe\u7247\u3002\u53d1\u7968\u6570\u636e\u3001AI \u8bc6\u522b\u7ed3\u679c\u548c\u5546\u54c1\u660e\u7ec6\u4ecd\u53ef\u67e5\u770b\u3002</p>}
+      {imageStatus === 'error' && <p className="error">{diagnostic.errorReason || '\u56fe\u7247\u52a0\u8f7d\u5931\u8d25\uff0c\u8bf7\u91cd\u65b0\u7ed1\u5b9a\u56fe\u7247\u3002'}</p>}
       {showDebug && (
         <div className="debug-box">
-          <p className="long-text">imageUrl: {invoice?.imageUrl || '-'}</p>
+          <Info label="invoiceId" value={diagnostic.invoiceId || '-'} />
+          <Info label="imageStatus" value={diagnostic.imageStatus || imageStatus || '-'} />
+          <Info label="localImageKey" value={diagnostic.localImageKey || '-'} />
+          <Info label="cloudImageUrl" value={diagnostic.hasCloudImageUrl ? '\u5b58\u5728' : '\u65e0'} />
+          <Info label="\u672c\u5730\u56fe\u7247" value={diagnostic.localExists ? '\u5b58\u5728' : '\u4e0d\u5b58\u5728'} />
+          <Info label="\u6587\u4ef6\u5927\u5c0f" value={formatBytes(diagnostic.fileSize)} />
+          <p className="long-text">\u9519\u8bef\u539f\u56e0\uff1a{diagnostic.errorReason || '-'}</p>
           <p className="long-text">imagePath: {invoice?.imagePath || '-'}</p>
-          <p className="long-text">imageId: {invoice?.imageId || '-'}</p>
         </div>
       )}
     </div>
   );
 }
+
 function Info({ label, value }) {
   return <div className="info-row"><span>{label}</span><strong>{value}</strong></div>;
 }

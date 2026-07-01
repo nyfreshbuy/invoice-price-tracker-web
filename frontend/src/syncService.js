@@ -66,9 +66,110 @@ function flattenPendingChanges(changes) {
 function buildBatchChanges(records) {
   const changes = Object.fromEntries(syncTables.map((table) => [table, []]));
   for (const entry of records) {
-    changes[entry.table].push(entry.record);
+    const { record, droppedFields } = sanitizeSyncRecord(entry.table, entry.record);
+    if (droppedFields.length) {
+      console.warn('[SYNC] stripped non-sync image payload fields', {
+        table: entry.table,
+        id: entry.record?.id || entry.record?.localId || '',
+        droppedFields
+      });
+    }
+    changes[entry.table].push(record);
   }
   return changes;
+}
+
+const BINARY_FIELD_NAMES = new Set([
+  'blob',
+  'imageBlob',
+  'file',
+  'rawFile',
+  'imageFile',
+  'imageBinary',
+  'imageData',
+  'base64',
+  'dataUrl',
+  'dataURL',
+  'objectUrl',
+  'objectURL',
+  'arrayBuffer',
+  'buffer'
+]);
+
+function isBinaryLike(value) {
+  return Boolean(
+    value
+    && ((typeof Blob !== 'undefined' && value instanceof Blob)
+      || (typeof File !== 'undefined' && value instanceof File)
+      || (typeof ArrayBuffer !== 'undefined' && value instanceof ArrayBuffer)
+      || (typeof Uint8Array !== 'undefined' && value instanceof Uint8Array))
+  );
+}
+
+function sanitizeSyncValue(value, path = '', droppedFields = []) {
+  const key = path.split('.').pop() || '';
+  if (BINARY_FIELD_NAMES.has(key) || isBinaryLike(value)) {
+    droppedFields.push(path || key || 'binary');
+    return undefined;
+  }
+  if (typeof value === 'string') {
+    const trimmed = value.trim();
+    if (/^data:image\//i.test(trimmed) || /^blob:/i.test(trimmed)) {
+      droppedFields.push(path || key || 'imageUrl');
+      return '';
+    }
+    return value;
+  }
+  if (Array.isArray(value)) {
+    const nextArray = [];
+    value.forEach((item, index) => {
+      const sanitized = sanitizeSyncValue(item, `${path}[${index}]`, droppedFields);
+      if (sanitized !== undefined) nextArray.push(sanitized);
+    });
+    return nextArray;
+  }
+  if (value && typeof value === 'object') {
+    const nextObject = {};
+    for (const [childKey, childValue] of Object.entries(value)) {
+      const childPath = path ? `${path}.${childKey}` : childKey;
+      const sanitized = sanitizeSyncValue(childValue, childPath, droppedFields);
+      if (sanitized !== undefined) nextObject[childKey] = sanitized;
+    }
+    return nextObject;
+  }
+  return value;
+}
+
+function sanitizeSyncRecord(table, record = {}) {
+  const droppedFields = [];
+  const sanitized = sanitizeSyncValue(record, '', droppedFields) || {};
+  if (table === 'invoice_image_resources') {
+    return {
+      droppedFields,
+      record: {
+        id: sanitized.id || sanitized.localImageKey || sanitized.localId || '',
+        companyId: sanitized.companyId || '',
+        localId: sanitized.localId || sanitized.id || sanitized.localImageKey || '',
+        serverId: sanitized.serverId || '',
+        syncStatus: sanitized.syncStatus || 'pending',
+        version: sanitized.version || 1,
+        invoiceId: sanitized.invoiceId || '',
+        originalFileName: sanitized.originalFileName || sanitized.fileName || '',
+        localImageKey: sanitized.localImageKey || sanitized.id || '',
+        cloudImageUrl: sanitized.cloudImageUrl || '',
+        storageType: sanitized.storageType || 'indexeddb',
+        imageStatus: ['local', 'missing', 'failed', 'uploaded'].includes(sanitized.imageStatus) ? sanitized.imageStatus : 'local',
+        fileSize: Number(sanitized.fileSize || sanitized.size || 0),
+        mimeType: sanitized.mimeType || '',
+        errorReason: sanitized.errorReason || sanitized.syncError || '',
+        createdAt: sanitized.createdAt || '',
+        updatedAt: sanitized.updatedAt || '',
+        deletedAt: sanitized.deletedAt || '',
+        deviceId: sanitized.deviceId || ''
+      }
+    };
+  }
+  return { record: sanitized, droppedFields };
 }
 
 function countByStatus(results = []) {
@@ -93,6 +194,33 @@ function inferResultTable(result = {}, batch = []) {
   const keys = new Set(resultKey(result));
   const match = batch.find((entry) => recordKey(entry).some((key) => keys.has(key)));
   return match?.table || '';
+}
+
+async function applyPushResults(batch = [], results = []) {
+  let appliedCount = 0;
+  let notFoundCount = 0;
+  let missingResultCount = 0;
+  const resultKeys = new Set();
+  for (const result of results) {
+    const table = inferResultTable(result, batch);
+    for (const key of resultKey(result)) resultKeys.add(`${table}:${key}`);
+    const applied = await localDb.markSynced(table, { ...result, table });
+    if (applied) appliedCount += 1;
+    else notFoundCount += 1;
+  }
+  for (const entry of batch) {
+    const keys = recordKey(entry).map((key) => `${entry.table}:${key}`);
+    if (keys.some((key) => resultKeys.has(key))) continue;
+    const marked = await localDb.markSyncFailed(entry.table, entry.record.localId || entry.record.id || entry.record.serverId, 'Sync push returned no result for this record');
+    if (marked) missingResultCount += 1;
+  }
+  return {
+    appliedCount,
+    notFoundCount,
+    missingResultCount,
+    failedCount: notFoundCount + missingResultCount,
+    resultCount: results.length
+  };
 }
 
 function connectionType() {
@@ -189,16 +317,17 @@ function errorDetails(error) {
 }
 
 function syncLabel({ session, pendingCount, conflictCount }) {
-  if (!session) return '请先登录';
-  if (!navigator.onLine) return '☁ 离线模式';
-  if (waitingForWifi) return '☁ 等待 WiFi';
-  if (syncing && syncProgress.total > 0) return `☁ 正在同步 ${syncProgress.done}/${syncProgress.total}`;
-  if (syncing) return '☁ 正在同步...';
-  if (lastError) return syncProgress.failed > 0 ? `☁ 同步失败 ${syncProgress.failed} 条` : '☁ 同步失败';
-  if (conflictCount > 0) return `☁ 需要人工确认 ${conflictCount} 条`;
-  if (pendingCount > 0) return `☁ 待同步 ${pendingCount}`;
-  return '☁ 已同步';
+  if (!session) return '????';
+  if (!navigator.onLine) return '? ????';
+  if (waitingForWifi) return '? ?? WiFi';
+  if (syncing && syncProgress.total > 0) return `? ???? ${syncProgress.done}/${syncProgress.total}`;
+  if (syncing) return '? ????...';
+  if (lastError) return syncProgress.failed > 0 ? `? ???? ${syncProgress.failed} ?` : '? ????';
+  if (conflictCount > 0) return `? ?????? ${conflictCount} ?`;
+  if (pendingCount > 0) return `? ??? ${pendingCount}`;
+  return '? ???';
 }
+
 
 export async function getSyncSnapshot() {
   const session = getAuthSession();
@@ -233,16 +362,17 @@ export async function getSyncSnapshot() {
 
 function shouldSkipAutoSync({ force, reason, preferences, lastSync }) {
   if (force) return '';
-  if (!preferences.autoSync) return '自动同步已关闭';
-  if (preferences.wifiOnly && !preferences.allowCellular && looksCellularConnection()) return '等待 WiFi';
+  if (!preferences.autoSync) return '???????';
+  if (preferences.wifiOnly && !preferences.allowCellular && looksCellularConnection()) return '?? WiFi';
   const last = Date.parse(lastSync || '');
   if (['startup', 'online'].includes(reason)) {
-    if (Number.isFinite(last) && Date.now() - last < 60 * 1000) return '刚刚同步过';
+    if (Number.isFinite(last) && Date.now() - last < 60 * 1000) return '?????';
     return '';
   }
-  if (Number.isFinite(last) && Date.now() - last < AUTO_SYNC_INTERVAL_MS) return '距离上次同步未超过 30 分钟';
+  if (Number.isFinite(last) && Date.now() - last < AUTO_SYNC_INTERVAL_MS) return '????????? 30 ??';
   return '';
 }
+
 
 function scheduleNextAutoSync() {
   if (autoSyncTimer) window.clearTimeout(autoSyncTimer);
@@ -366,23 +496,7 @@ export async function syncNow({ force = false, reason = 'manual' } = {}) {
             backend: pushed.backend || '',
             responseOk: Boolean(pushed.ok)
           });
-          let appliedCount = 0;
-          let notFoundCount = 0;
-          const resultKeys = new Set();
-          for (const result of results) {
-            const table = inferResultTable(result, batch);
-            for (const key of resultKey(result)) resultKeys.add(`${table}:${key}`);
-            const applied = await localDb.markSynced(table, { ...result, table });
-            if (applied) appliedCount += 1;
-            else notFoundCount += 1;
-          }
-          let missingResultCount = 0;
-          for (const entry of batch) {
-            const keys = recordKey(entry).map((key) => `${entry.table}:${key}`);
-            if (keys.some((key) => resultKeys.has(key))) continue;
-            const marked = await localDb.markSyncFailed(entry.table, entry.record.localId || entry.record.id || entry.record.serverId, 'Sync push returned no result for this record');
-            if (marked) missingResultCount += 1;
-          }
+          const { appliedCount, notFoundCount, missingResultCount } = await applyPushResults(batch, results);
           if (missingResultCount > 0) {
             syncProgress.failed += missingResultCount;
             lastError = `${missingResultCount} sync records did not receive server results`;
@@ -399,9 +513,38 @@ export async function syncNow({ force = false, reason = 'manual' } = {}) {
             remainingPending: remainingAfterBatch
           });
         } catch (error) {
-          syncProgress.failed += batch.length;
-          lastError = error.message || '同步失败';
+          lastError = error.message || '????';
           console.error('[SYNC] push error', { batchStart: index, batchSize: batch.length, error });
+          console.warn('[SYNC] retrying failed batch item-by-item', { batchStart: index, batchSize: batch.length });
+          for (const entry of batch) {
+            try {
+              const singleChanges = buildBatchChanges([entry]);
+              const pushed = await api.syncPush({ deviceId, companyId, changes: singleChanges });
+              const singleResults = Array.isArray(pushed.results) ? pushed.results : [];
+              pushedTotal += singleResults.length;
+              const applied = await applyPushResults([entry], singleResults);
+              if (applied.failedCount > 0) {
+                syncProgress.failed += applied.failedCount;
+                lastError = `?????${entry.table} ${entry.record?.id || entry.record?.localId || ''}`;
+              }
+              console.log('[SYNC] single push finish', {
+                table: entry.table,
+                id: entry.record?.id || entry.record?.localId || '',
+                resultStatuses: countByStatus(singleResults),
+                applied
+              });
+            } catch (singleError) {
+              syncProgress.failed += 1;
+              const message = singleError.message || '????';
+              lastError = message;
+              await localDb.markSyncFailed(entry.table, entry.record.localId || entry.record.id || entry.record.serverId, message);
+              console.error('[SYNC] single push failed', {
+                table: entry.table,
+                id: entry.record?.id || entry.record?.localId || '',
+                error: errorDetails(singleError)
+              });
+            }
+          }
         } finally {
           syncProgress.done = Math.min(syncProgress.total, syncProgress.done + batch.length);
           emitSyncStateChange();

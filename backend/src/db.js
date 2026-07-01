@@ -43,6 +43,7 @@ export const syncTables = [
   'import_sessions',
   'invoice_groups',
   'invoice_pages',
+  'invoice_image_resources',
   'suppliers',
   'invoices',
   'invoice_items',
@@ -62,6 +63,7 @@ export const tableColumns = {
   import_sessions: ['id', 'companyId', 'localId', 'serverId', 'syncStatus', 'version', 'sessionName', 'sourceType', 'fileCount', 'groupCount', 'status', 'createdAt', 'updatedAt', 'deletedAt', 'deviceId'],
   invoice_groups: ['id', 'companyId', 'localId', 'serverId', 'syncStatus', 'version', 'importSessionId', 'supplierId', 'supplierName', 'invoiceNo', 'invoiceDate', 'confidence', 'reason', 'status', 'pageIds', 'pageCount', 'totalAmount', 'aiSupplierNameCandidate', 'createdAt', 'updatedAt', 'deletedAt', 'deviceId'],
   invoice_pages: ['id', 'companyId', 'localId', 'serverId', 'syncStatus', 'version', 'importSessionId', 'invoiceGroupId', 'invoiceId', 'pageIndex', 'pageNumber', 'pageCount', 'originalFileName', 'originalFilePath', 'archiveFilePath', 'archiveFolder', 'fileHash', 'fileSize', 'imageId', 'imagePath', 'mimeType', 'lightOcrText', 'lightOcrJson', 'status', 'createdAt', 'updatedAt', 'deletedAt', 'deviceId'],
+  invoice_image_resources: ['id', 'companyId', 'localId', 'serverId', 'syncStatus', 'version', 'invoiceId', 'originalFileName', 'localImageKey', 'cloudImageUrl', 'storageType', 'imageStatus', 'fileSize', 'mimeType', 'errorReason', 'createdAt', 'updatedAt', 'deletedAt', 'deviceId'],
   suppliers: ['id', 'companyId', 'localId', 'serverId', 'syncStatus', 'version', 'name', 'displayName', 'supplierNameChinese', 'supplierNameEnglish', 'supplierDisplayName', 'normalizedName', 'aliases', 'contactName', 'phone', 'email', 'address', 'notes', 'templateIds', 'suspectedDuplicateOf', 'status', 'createdAt', 'updatedAt', 'deletedAt', 'deviceId'],
   invoices: ['id', 'companyId', 'localId', 'serverId', 'syncStatus', 'version', 'batchId', 'scanBatchId', 'importSessionId', 'invoiceGroupId', 'supplierId', 'invoiceNo', 'invoiceDate', 'pageNumber', 'pageCount', 'invoiceGroupKey', 'isMergedInvoice', 'isMultiPage', 'mergedInvoiceIds', 'invoiceLayoutType', 'imagePath', 'imageHash', 'originalFilePath', 'archiveFilePath', 'fileHash', 'archiveStatus', 'archiveFolder', 'invoiceMonth', 'ocrText', 'ocrTextHash', 'subtotal', 'tax', 'totalAmount', 'calculatedTotal', 'totalDifference', 'duplicateStatus', 'duplicateOfInvoiceId', 'recognitionSource', 'recognitionWarnings', 'status', 'createdAt', 'updatedAt', 'deletedAt', 'deviceId'],
   invoice_items: ['id', 'companyId', 'localId', 'serverId', 'syncStatus', 'version', 'invoiceId', 'supplierId', 'productId', 'rawName', 'nameCn', 'nameEn', 'spec', 'productNameOriginal', 'productNameNormalized', 'normalizedName', 'nameConfidence', 'nameQualityStatus', 'nameQualityReason', 'rawOcrLine', 'itemRecognitionSource', 'category', 'quantity', 'unit', 'unitPrice', 'totalPrice', 'chargedQty', 'freeQty', 'totalQty', 'actualQty', 'originalUnitCost', 'effectiveUnitCost', 'discountAmount', 'discountedEffectiveUnitCost', 'promoGroupId', 'promoGroupName', 'promoGroupRule', 'participatesInGiftAllocation', 'isFreeItem', 'isDiscountLine', 'candidateOnly', 'correctedByUser', 'isHandwrittenQuantity', 'isHandwrittenPrice', 'isHandwrittenAmount', 'isCircled', 'isChecked', 'freeReason', 'invoiceDate', 'notes', 'createdAt', 'updatedAt', 'deletedAt', 'deviceId'],
@@ -315,6 +317,7 @@ export async function migrate() {
   await execute(`CREATE INDEX IF NOT EXISTS ${quoteIdentifier('idx_invoice_groups_session')} ON ${quoteTable('invoice_groups')} (${quoteIdentifier('companyId')}, ${quoteIdentifier('importSessionId')});`);
   await execute(`CREATE INDEX IF NOT EXISTS ${quoteIdentifier('idx_invoice_pages_session')} ON ${quoteTable('invoice_pages')} (${quoteIdentifier('companyId')}, ${quoteIdentifier('importSessionId')});`);
   await execute(`CREATE INDEX IF NOT EXISTS ${quoteIdentifier('idx_invoice_pages_hash')} ON ${quoteTable('invoice_pages')} (${quoteIdentifier('companyId')}, ${quoteIdentifier('fileHash')});`);
+  await execute(`CREATE INDEX IF NOT EXISTS ${quoteIdentifier('idx_invoice_image_resources_invoice')} ON ${quoteTable('invoice_image_resources')} (${quoteIdentifier('companyId')}, ${quoteIdentifier('invoiceId')});`);
   await execute(`CREATE INDEX IF NOT EXISTS ${quoteIdentifier('idx_invoices_company_date')} ON ${quoteTable('invoices')} (${quoteIdentifier('companyId')}, ${quoteIdentifier('invoiceDate')});`);
   await execute(`CREATE INDEX IF NOT EXISTS ${quoteIdentifier('idx_invoices_batch')} ON ${quoteTable('invoices')} (${quoteIdentifier('batchId')});`);
   await execute(`CREATE INDEX IF NOT EXISTS ${quoteIdentifier('idx_invoices_import_session')} ON ${quoteTable('invoices')} (${quoteIdentifier('companyId')}, ${quoteIdentifier('importSessionId')});`);

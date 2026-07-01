@@ -2,9 +2,9 @@ import { getCompanyId as getAuthCompanyId } from './api.js';
 import { hasEncodingDamage, repairRecordEncoding, repairTextEncoding } from './encoding.js';
 
 const DB_NAME = 'InvoicePriceTrackerLocal';
-const DB_VERSION = 12;
+const DB_VERSION = 14;
 
-export const syncTables = ['purchase_batches', 'import_sessions', 'invoice_groups', 'invoice_pages', 'suppliers', 'invoices', 'invoice_items', 'products', 'price_history', 'invoice_discounts', 'gift_allocation_rules', 'supplier_templates', 'product_aliases', 'product_learning_rules', 'recognition_corrections', 'price_anomalies'];
+export const syncTables = ['purchase_batches', 'import_sessions', 'invoice_groups', 'invoice_pages', 'invoice_image_resources', 'suppliers', 'invoices', 'invoice_items', 'products', 'price_history', 'invoice_discounts', 'gift_allocation_rules', 'supplier_templates', 'product_aliases', 'product_learning_rules', 'recognition_corrections', 'price_anomalies'];
 const localOnlyTables = ['invoice_images', 'meta'];
 
 let dbPromise;
@@ -488,6 +488,14 @@ function belongsToCurrentCompany(record) {
 
 function active(record) {
   return !record.deletedAt && belongsToCurrentCompany(record);
+}
+
+function isBlobLike(value) {
+  return Boolean(
+    value
+    && ((typeof Blob !== 'undefined' && value instanceof Blob)
+      || (typeof File !== 'undefined' && value instanceof File))
+  );
 }
 
 function pendingReviewInvoice(invoice = {}) {
@@ -1111,31 +1119,54 @@ export const localDb = {
     return updated;
   },
 
-  async saveInvoiceImage({ id: imageId, invoiceId, file, source = 'IndexedDB' }) {
-    if (!file) throw new Error('图片保存失败，请重新上传。');
+  async saveInvoiceImage(...args) {
+    const options = isBlobLike(args[0])
+      ? { ...(args[1] || {}), file: args[0] }
+      : (args[0] || {});
+    const { id: imageId, invoiceId, file, source = 'IndexedDB' } = options;
+    if (!file) throw new Error('未选择图片文件');
     const companyId = getCurrentCompanyId();
     if (!companyId) throw new Error('请先登录');
     const idValue = imageId || generateId();
-    const record = {
+    const timestamp = nowIso();
+    const fileSize = file.size || file.byteLength || 0;
+    const resource = syncFields({
       id: idValue,
       companyId,
       invoiceId,
-      imageBlob: file,
+      originalFileName: file.name || '',
+      localId: idValue,
+      localImageKey: idValue,
+      cloudImageUrl: '',
+      storageType: 'indexeddb',
+      imageStatus: 'local',
+      fileSize,
       mimeType: file.type || 'image/jpeg',
+      createdAt: timestamp,
+      updatedAt: timestamp
+    });
+    const record = {
+      ...resource,
+      imageBlob: file,
       fileName: file.name || '',
-      size: file.size || file.byteLength || 0,
+      size: fileSize,
       source,
-      createdAt: nowIso(),
-      updatedAt: nowIso()
+      createdAt: timestamp,
+      updatedAt: timestamp
     };
     await put('invoice_images', record);
+    await put('invoice_image_resources', resource);
     const saved = await get('invoice_images', idValue);
-    if (!saved?.imageBlob) throw new Error('图片保存失败，请重新上传。');
-    return record;
+    if (!saved?.imageBlob) {
+      await put('invoice_image_resources', syncFields({ ...resource, imageStatus: 'failed', updatedAt: nowIso(), errorReason: 'IndexedDB blob missing after save' }));
+      throw new Error('图片保存失败，请重新选择图片');
+    }
+    return { ...record, ...resource };
   },
 
   async getInvoiceImage(invoice) {
-    const imageId = invoice?.imageId || String(invoice?.imagePath || '').replace(/^indexeddb:/, '');
+    if (typeof invoice === 'string') invoice = { imageId: invoice };
+    const imageId = invoice?.imageId || invoice?.localImageKey || String(invoice?.imagePath || '').replace(/^indexeddb:/, '');
     const imageIds = [imageId].filter(Boolean);
     if (invoice?.id) {
       const images = await all('invoice_images');
@@ -1152,19 +1183,62 @@ export const localDb = {
     return null;
   },
 
+  async getInvoiceImageResource(invoice) {
+    if (typeof invoice === 'string') invoice = { imageId: invoice };
+    const imageId = invoice?.imageId || invoice?.localImageKey || String(invoice?.imagePath || '').replace(/^indexeddb:/, '');
+    const resources = (await all('invoice_image_resources')).filter((resource) => belongsToCurrentCompany(resource));
+    const invoiceIds = idsFor(invoice);
+    const byInvoice = invoice?.id
+      ? resources.filter((resource) => invoiceIds.includes(resource.invoiceId)).sort((a, b) => (b.updatedAt || '').localeCompare(a.updatedAt || ''))[0]
+      : null;
+    const direct = imageId ? await get('invoice_image_resources', imageId) : null;
+    if (byInvoice) return byInvoice;
+    if (direct && belongsToCurrentCompany(direct)) return direct;
+    return {
+      id: imageId || '',
+      companyId: getCurrentCompanyId(),
+      invoiceId: invoice?.id || '',
+      originalFileName: invoice?.originalFileName || '',
+      localImageKey: imageId || '',
+      cloudImageUrl: invoice?.cloudImageUrl || '',
+      storageType: String(invoice?.imagePath || '').startsWith('indexeddb:') || imageId ? 'indexeddb' : (invoice?.imagePath ? 'server' : ''),
+      imageStatus: 'missing',
+      fileSize: 0,
+      createdAt: '',
+      updatedAt: ''
+    };
+  },
+
   async verifyInvoiceImage(invoice) {
+    const resource = await localDb.getInvoiceImageResource(invoice);
+    const persistResourceStatus = async (status, errorReason = '') => {
+      const next = { ...resource, imageStatus: status, errorReason };
+      const changed = resource?.imageStatus !== status || String(resource?.errorReason || '') !== String(errorReason || '');
+      if (resource?.id && changed) {
+        const updated = syncFields({ ...next, updatedAt: nowIso() }, resource.syncStatus || 'pending');
+        await put('invoice_image_resources', updated);
+        return updated;
+      }
+      return next;
+    };
     const imagePath = String(invoice?.imagePath || '');
-    if (!imagePath && !invoice?.imageId) return { ok: false, status: 'missing', message: '图片不存在' };
-    if (imagePath.startsWith('indexeddb:') || invoice?.imageId) {
+    if (!imagePath && !invoice?.imageId && !resource?.localImageKey && !resource?.cloudImageUrl) {
+      return { ok: false, status: 'missing', resource: { ...resource, imageStatus: 'missing' }, message: '本地图片已丢失，请重新绑定图片。' };
+    }
+    if (imagePath.startsWith('indexeddb:') || invoice?.imageId || resource?.localImageKey) {
       const image = await localDb.getInvoiceImage(invoice);
-      return image?.imageBlob
-        ? { ok: true, status: 'normal', image }
-        : { ok: false, status: 'missing', message: '图片不存在' };
+      if (image?.imageBlob) {
+        const okResource = await persistResourceStatus(resource?.cloudImageUrl ? 'uploaded' : 'local', '');
+        return { ok: true, status: okResource.imageStatus, image, resource: okResource };
+      }
+      const missingResource = await persistResourceStatus('missing', 'IndexedDB image blob missing');
+      return { ok: false, status: 'missing', resource: missingResource, message: '本地图片已丢失，请重新绑定图片。' };
     }
     if (imagePath.startsWith('blob:')) {
-      return { ok: false, status: 'missing', message: 'Blob URL 已失效，请重新上传图片。' };
+      const missingResource = await persistResourceStatus('missing', 'Saved blob URL is not durable');
+      return { ok: false, status: 'missing', resource: missingResource, message: '本地图片已丢失，请重新绑定图片。' };
     }
-    return { ok: true, status: 'server' };
+    return { ok: true, status: resource?.cloudImageUrl ? 'uploaded' : 'server', resource };
   },
 
   async updateInvoiceImageFields(invoiceId, fields) {
