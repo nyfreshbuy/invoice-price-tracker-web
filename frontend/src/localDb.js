@@ -246,8 +246,9 @@ function productDisplayName(record = {}, item = {}, product = {}) {
   if (cn && en) return `${cn} / ${en}`;
   return productRawName(record, item, product)
     || productStandardName(record, item, product)
-    || '未命名商品';
+    || '\u672a\u547d\u540d\u5546\u54c1';
 }
+
 
 function productSearchText(record = {}, item = {}, product = {}) {
   return [
@@ -535,8 +536,9 @@ function priceHistoryEligibleItem(item = {}, invoice = {}) {
 }
 
 function trustedItemName(item = {}) {
-  return String(item.nameQualityStatus || 'trusted') !== 'needs_review';
+  return String(item.nameQualityStatus || '').toLowerCase() !== 'bad';
 }
+
 
 function invoiceIdSet(invoices = []) {
   return new Set(invoices.flatMap((invoice) => idsFor(invoice)));
@@ -1814,7 +1816,7 @@ export const localDb = {
       .map((alias) => alias.productId)
       .filter(Boolean));
     const allItems = (await all('invoice_items')).filter((item) => {
-      if (!active(item) || Number(item.isDiscountLine || 0) || Number(item.candidateOnly || 0) || !trustedItemName(item)) return false;
+      if (!active(item) || Number(item.isDiscountLine || 0) || Number(item.candidateOnly || 0)) return false;
       if (!invoiceRecordUsable(item.invoiceId)) return false;
       return true;
     });
@@ -1863,7 +1865,7 @@ export const localDb = {
       const key = record.invoiceItemId || record.id || `${record.productId || record.standardName}-${record.invoiceId}-${record.invoiceDate}`;
       if (!recordsByKey.has(key) || record.sourceType === 'price_history') recordsByKey.set(key, record);
     }
-    const items = [...recordsByKey.values()].filter((record) => productDisplayName(record, record, productById.get(record.productId) || {}) !== '未命名商品');
+    const items = [...recordsByKey.values()].filter((record) => productDisplayName(record, record, productById.get(record.productId) || {}).trim());
     console.info('[ProductSearch] local index', {
       companyId: getCurrentCompanyId(),
       keyword: query,
@@ -1938,7 +1940,7 @@ export const localDb = {
       .map((alias) => alias.productId)
       .filter(Boolean));
     const allItems = (await all('invoice_items')).filter((item) => {
-      if (!active(item) || Number(item.isDiscountLine || 0) || Number(item.candidateOnly || 0) || !trustedItemName(item)) return false;
+      if (!active(item) || Number(item.isDiscountLine || 0) || Number(item.candidateOnly || 0)) return false;
       if (!invoiceRecordUsable(item.invoiceId)) return false;
       const haystack = productSearchText(item, item, productById.get(item.productId) || {});
       return haystack.includes(q) || item.productId === name || aliasProductIds.has(item.productId);
@@ -2364,6 +2366,26 @@ export const localDb = {
   async getStats() {
     const entries = await Promise.all(syncTables.map(async (table) => [table, (await all(table)).filter(active).length]));
     return Object.fromEntries(entries);
+  },
+
+  async getLocalDiagnostics() {
+    const counts = {};
+    for (const table of [...syncTables, 'invoice_images']) {
+      try {
+        const records = await all(table);
+        counts[table] = records.filter((record) => (table === 'invoice_images' ? belongsToCurrentCompany(record) : active(record))).length;
+      } catch (error) {
+        counts[table] = `error: ${error.message || error}`;
+      }
+    }
+    return {
+      companyId: getCurrentCompanyId(),
+      counts,
+      pendingCount: await localDb.getPendingCount(),
+      failedCount: await localDb.getFailedCount(),
+      conflictCount: await localDb.getConflictCount(),
+      pendingByTable: Object.fromEntries(Object.entries(await localDb.getPendingChanges()).map(([table, rows]) => [table, rows.length]))
+    };
   },
 
   async softDeleteAll() {

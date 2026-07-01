@@ -27,6 +27,7 @@ import {
 } from 'lucide-react';
 import { api, getAuthSession, getLastApiDebug, setAuthSession } from './api.js';
 import { generateId, localDb, today } from './localDb.js';
+import { repairTextEncoding } from './encoding.js';
 import {
   getSyncPreferences,
   getSyncSnapshot,
@@ -259,6 +260,19 @@ function safeObject(value) {
   return value && typeof value === 'object' && !Array.isArray(value) ? value : {};
 }
 
+function cleanDisplayText(value = '', fallback = '') {
+  const repaired = repairTextEncoding(String(value || '').trim());
+  if (!repaired || /^\?+$/.test(repaired)) return fallback;
+  return repaired;
+}
+
+function displayCompanyName(session = {}) {
+  return cleanDisplayText(
+    session?.company?.name || session?.user?.companyName || '',
+    '\u672a\u547d\u540d\u516c\u53f8'
+  );
+}
+
 export default function App() {
   const [authSession, setAuthState] = useState(() => getAuthSession());
   const [authStatus, setAuthStatus] = useState(() => {
@@ -267,7 +281,7 @@ export default function App() {
     return navigator.onLine ? 'checkingAuth' : 'offlineMode';
   });
   const [authNotice, setAuthNotice] = useState('');
-  const [syncState, setSyncState] = useState({ label: '已同步', pendingCount: 0, online: navigator.onLine, syncing: false });
+  const [syncState, setSyncState] = useState({ label: '\u2601 \u5df2\u540c\u6b65', pendingCount: 0, online: navigator.onLine, syncing: false });
   const [syncingNow, setSyncingNow] = useState(false);
 
   useEffect(() => {
@@ -624,15 +638,16 @@ function SyncBar({ state, session, syncingNow, onSyncNow, onLogout }) {
   const busy = Boolean(state.syncing || syncingNow);
   return (
     <div className={`sync-bar ${state.online ? '' : 'offline'}`}>
-      <span>{session?.company?.name || 'InvoicePriceTracker'} · {state.label}</span>
+      <span>{displayCompanyName(session)} / {state.label || '\u2601 \u5df2\u540c\u6b65'}</span>
       <button onClick={onSyncNow} disabled={busy || !state.online}>
         <RefreshCw size={15} className={busy ? 'spin' : ''} />
-        {busy ? '同步中...' : '立即同步'}
+        {busy ? '\u540c\u6b65\u4e2d...' : '\u7acb\u5373\u540c\u6b65'}
       </button>
-      <button type="button" onClick={onLogout}>退出</button>
+      <button type="button" onClick={onLogout}>{'\u9000\u51fa'}</button>
     </div>
   );
 }
+
 
 function HomePage({ embedded = false }) {
   const content = (
@@ -2450,6 +2465,8 @@ function PromoAllocationDialog({ items, onClose, onSave }) {
 function ProductSearchPage() {
   const [q, setQ] = useState('');
   const [results, setResults] = useState([]);
+  const [diagnostics, setDiagnostics] = useState(null);
+  const [syncSnapshot, setSyncSnapshot] = useState(null);
   const searchSeq = useRef(0);
   useEffect(() => {
     let cancelled = false;
@@ -2458,11 +2475,22 @@ function ProductSearchPage() {
       searchSeq.current = seq;
       const keyword = q;
       try {
-        const data = await localDb.searchProducts(keyword);
-        if (!cancelled && searchSeq.current === seq) setResults(safeArray(data));
+        const [data, localDiagnostics, snapshot] = await Promise.all([
+          localDb.searchProducts(keyword),
+          localDb.getLocalDiagnostics(),
+          getSyncSnapshot()
+        ]);
+        if (!cancelled && searchSeq.current === seq) {
+          setResults(safeArray(data));
+          setDiagnostics(localDiagnostics);
+          setSyncSnapshot(snapshot);
+        }
       } catch (error) {
         recordPageError(error, { componentStack: 'ProductSearchPage' }, 'searchProducts');
-        if (!cancelled && searchSeq.current === seq) setResults([]);
+        if (!cancelled && searchSeq.current === seq) {
+          setResults([]);
+          setSyncSnapshot(await getSyncSnapshot().catch(() => null));
+        }
       }
     };
     const handler = () => run();
@@ -2477,24 +2505,40 @@ function ProductSearchPage() {
   }, [q]);
   const productResults = safeArray(results);
   const hasKeyword = q.trim().length > 0;
+  const counts = diagnostics?.counts || {};
+  const noLocalData = Number(counts.invoice_items || 0) === 0 && Number(counts.price_history || 0) === 0 && Number(counts.products || 0) === 0;
+  const emptyText = hasKeyword
+    ? '\u6ca1\u6709\u627e\u5230\u76f8\u5173\u5546\u54c1'
+    : (noLocalData ? '\u672c\u5730\u6682\u65e0\u6570\u636e\uff0c\u8bf7\u5148\u540c\u6b65' : '\u6682\u65e0\u5546\u54c1\u8bb0\u5f55');
   return (
-    <Page title="商品价格查询" subtitle="优先查询本地 IndexedDB；异常商品不会进入正式价格统计。">
-      <Section title="搜索">
-        <label className="field"><span>商品名称</span><input value={q} onChange={(event) => setQ(event.target.value)} placeholder="千页豆腐 / Rice Chips / ITOEN" /></label>
-        {!hasKeyword && <p className="hint">未输入关键词时显示最近 20 个购买商品。</p>}
+    <Page title="\u5546\u54c1\u4ef7\u683c\u67e5\u8be2" subtitle="\u4f18\u5148\u67e5\u8be2\u672c\u5730 IndexedDB\uff1b\u5f02\u5e38\u5546\u54c1\u4e0d\u4f1a\u8fdb\u5165\u6b63\u5f0f\u4ef7\u683c\u7edf\u8ba1\u3002">
+      <Section title="\u641c\u7d22">
+        <label className="field"><span>\u5546\u54c1\u540d\u79f0</span><input value={q} onChange={(event) => setQ(event.target.value)} placeholder="\u5343\u9875\u8c46\u8150 / Rice Chips / ITOEN" /></label>
+        {!hasKeyword && <p className="hint">\u672a\u8f93\u5165\u5173\u952e\u8bcd\u65f6\u663e\u793a\u6700\u8fd1 20 \u4e2a\u8d2d\u4e70\u5546\u54c1\u3002</p>}
       </Section>
-      {productResults.length === 0 && <EmptyState text={hasKeyword ? '没有找到相关商品' : '暂无商品记录'} />}
+      {productResults.length === 0 && (
+        <EmptyState text={emptyText} />
+      )}
+      {productResults.length === 0 && (
+        <Section title="\u672c\u5730\u6570\u636e\u8bca\u65ad">
+          <Info label="products" value={counts.products ?? '-'} />
+          <Info label="invoice_items" value={counts.invoice_items ?? '-'} />
+          <Info label="price_history" value={counts.price_history ?? '-'} />
+          <Info label="\u540c\u6b65\u72b6\u6001" value={syncSnapshot?.label || '-'} />
+          <Info label="\u540c\u6b65\u9519\u8bef" value={syncSnapshot?.lastError || syncSnapshot?.diagnostic?.error || '\u65e0'} />
+        </Section>
+      )}
       <div className="card-list">
         {productResults.map((item, index) => {
-          const displayName = item?.productName || item?.productNameOriginal || item?.name || item?.standardName || item?.productNameNormalized || '未命名商品';
+          const displayName = item?.productName || item?.productNameOriginal || item?.name || item?.standardName || item?.productNameNormalized || '\u672a\u547d\u540d\u5546\u54c1';
           const routeName = item?.productNameNormalized || item?.normalizedName || item?.standardName || displayName;
           return (
           <Link className="row-card" to={`/products/${encodeURIComponent(routeName || '')}`} key={routeName || item?.productId || index}>
             <div>
               <h3>{displayName}</h3>
-              <p>最近价格 {money(item?.recentPrice)} · 最低价 {money(item?.minPrice)} · 最高价 {money(item?.maxPrice)}</p>
-              <p>均价 {money(item?.averagePrice)} · 最近供应商 {item?.recentSupplierName || '-'} · 最近采购 {item?.recentPurchaseDate || '-'} · {item?.recordCount || 0} 条</p>
-              {Number(item?.pendingCount || 0) > 0 && <p className="warning-text">{item.pendingCount} 条价格来自待确认/异常发票</p>}
+              <p>\u6700\u8fd1\u4ef7\u683c {money(item?.recentPrice)} / \u6700\u4f4e\u4ef7 {money(item?.minPrice)} / \u6700\u9ad8\u4ef7 {money(item?.maxPrice)}</p>
+              <p>\u5747\u4ef7 {money(item?.averagePrice)} / \u6700\u8fd1\u4f9b\u5e94\u5546 {item?.recentSupplierName || '-'} / \u6700\u8fd1\u91c7\u8d2d {item?.recentPurchaseDate || '-'} / {item?.recordCount || 0} \u6761</p>
+              {Number(item?.pendingCount || 0) > 0 && <p className="warning-text">{item.pendingCount} \u6761\u4ef7\u683c\u6765\u81ea\u5f85\u786e\u8ba4/\u5f02\u5e38\u53d1\u7968</p>}
             </div>
             <ChevronRight />
           </Link>
@@ -2504,6 +2548,7 @@ function ProductSearchPage() {
     </Page>
   );
 }
+
 function ProductDetailPage() {
   const { name } = useParams();
   const decoded = decodeURIComponent(name || '');
@@ -3029,52 +3074,64 @@ function memberStatusLabel(status) {
   return status === 'disabled' ? '禁用' : '启用';
 }
 function SettingsPage() {
+  const session = getAuthSession();
   const [stats, setStats] = useState({});
-  const [syncSnapshot, setSyncSnapshot] = useState(getSyncSnapshot());
+  const [diagnostics, setDiagnostics] = useState(null);
+  const [syncSnapshot, setSyncSnapshot] = useState({ label: '\u2601 \u5df2\u540c\u6b65', pendingCount: 0, pendingByTable: {}, lastSyncAt: '', lastError: '', syncing: false });
   const [message, setMessage] = useState('');
   const [syncing, setSyncing] = useState(false);
   const load = async () => {
-    setStats(await localDb.getStats());
-    setSyncSnapshot(getSyncSnapshot());
+    const [nextStats, nextSnapshot, nextDiagnostics] = await Promise.all([
+      localDb.getStats(),
+      getSyncSnapshot(),
+      localDb.getLocalDiagnostics()
+    ]);
+    setStats(nextStats);
+    setSyncSnapshot(nextSnapshot);
+    setDiagnostics(nextDiagnostics);
   };
   useLocalReload(load);
   useEffect(() => {
-    const handler = () => setSyncSnapshot(getSyncSnapshot());
+    const handler = () => getSyncSnapshot().then(setSyncSnapshot);
     window.addEventListener('sync-state-change', handler);
     return () => window.removeEventListener('sync-state-change', handler);
   }, []);
   async function handleSettingsSyncNow() {
     setSyncing(true);
-    setMessage('同步中...');
+    setMessage('\u540c\u6b65\u4e2d...');
     try {
       const result = await syncNow({ force: true, reason: 'settings' });
-      setMessage(result?.ok === false ? '同步失败，请查看同步状态' : '同步完成');
+      const latest = await getSyncSnapshot();
+      setSyncSnapshot(latest);
+      setMessage(latest.lastError ? `\u540c\u6b65\u5931\u8d25\uff1a${latest.lastError}` : '\u540c\u6b65\u5b8c\u6210');
       await load();
+      return result;
     } catch (error) {
-      setMessage(error.message || '同步失败');
+      setMessage(error.message || '\u540c\u6b65\u5931\u8d25');
     } finally {
       setSyncing(false);
     }
   }
   async function restoreCloud() {
     setSyncing(true);
+    setMessage('\u6b63\u5728\u4ece\u4e91\u7aef\u6062\u590d...');
     try {
       await pullFromCloud({ full: true });
-      setMessage('已从云端恢复资料');
+      setMessage('\u5df2\u4ece\u4e91\u7aef\u6062\u590d\u8d44\u6599');
       await load();
     } catch (error) {
-      setMessage(error.message || '从云端恢复失败');
+      setMessage(error.message || '\u4ece\u4e91\u7aef\u6062\u590d\u5931\u8d25');
     } finally {
       setSyncing(false);
     }
   }
   async function clearLocalAndRestore() {
-    if (!confirm('确认清空本地缓存后重新拉取云端数据？')) return;
+    if (!confirm('\u786e\u8ba4\u6e05\u7a7a\u672c\u5730\u7f13\u5b58\u540e\u91cd\u65b0\u62c9\u53d6\u4e91\u7aef\u6570\u636e\uff1f')) return;
     await localDb.clearAllLocalData();
     await restoreCloud();
   }
   async function clearData() {
-    if (!confirm('确认清空本地测试数据并同步删除到云端？')) return;
+    if (!confirm('\u786e\u8ba4\u6e05\u7a7a\u672c\u5730\u6d4b\u8bd5\u6570\u636e\u5e76\u540c\u6b65\u5220\u9664\u5230\u4e91\u7aef\uff1f')) return;
     await localDb.softDeleteAll();
     markSyncPending();
     load();
@@ -3089,40 +3146,62 @@ function SettingsPage() {
       link.click();
       URL.revokeObjectURL(url);
     } catch (error) {
-      setMessage(error.message || '导出云端 Excel 失败');
+      setMessage(error.message || '\u5bfc\u51fa\u4e91\u7aef Excel \u5931\u8d25');
     }
   }
+  const apiDebug = getLastApiDebug();
+  const diagnosticCounts = diagnostics?.counts || {};
+  const syncDiagnostic = syncSnapshot.diagnostic || {};
   return (
-    <Page title="设置/同步">
-      <Section title="同步中心">
-        <Info label="同步状态" value={syncSnapshot.label} />
-        <Info label="待同步总数" value={syncSnapshot.pendingCount || 0} />
-        <Info label="待同步发票" value={syncSnapshot.pendingByTable?.invoices || 0} />
-        <Info label="待同步商品明细" value={syncSnapshot.pendingByTable?.invoice_items || 0} />
-        <Info label="待同步商品" value={syncSnapshot.pendingByTable?.products || 0} />
-        <Info label="待同步价格历史" value={syncSnapshot.pendingByTable?.price_history || 0} />
-        <Info label="最后同步时间" value={syncSnapshot.lastSyncTime || '-'} />
-        <Info label="最近错误" value={syncSnapshot.lastError || '无'} />
+    <Page title="\u8bbe\u7f6e/\u540c\u6b65">
+      <Section title="\u540c\u6b65\u4e2d\u5fc3">
+        <Info label="\u540c\u6b65\u72b6\u6001" value={syncSnapshot.label} />
+        <Info label="\u5f85\u540c\u6b65\u603b\u6570" value={syncSnapshot.pendingCount || 0} />
+        <Info label="\u5f85\u540c\u6b65\u53d1\u7968" value={syncSnapshot.pendingByTable?.invoices || 0} />
+        <Info label="\u5f85\u540c\u6b65\u5546\u54c1\u660e\u7ec6" value={syncSnapshot.pendingByTable?.invoice_items || 0} />
+        <Info label="\u5f85\u540c\u6b65\u5546\u54c1" value={syncSnapshot.pendingByTable?.products || 0} />
+        <Info label="\u5f85\u540c\u6b65\u4ef7\u683c\u5386\u53f2" value={syncSnapshot.pendingByTable?.price_history || 0} />
+        <Info label="\u6700\u540e\u540c\u6b65\u65f6\u95f4" value={syncSnapshot.lastSyncAt || '-'} />
+        <Info label="\u6700\u8fd1\u9519\u8bef" value={syncSnapshot.lastError || syncDiagnostic.error || '\u65e0'} />
         <div className="row-actions">
-          <button className="primary-button" disabled={syncing || syncSnapshot.syncing} onClick={handleSettingsSyncNow}><RefreshCw size={16} />{syncing || syncSnapshot.syncing ? '同步中...' : '立即同步'}</button>
-          <button type="button" disabled={syncing} onClick={restoreCloud}>从云端恢复</button>
-          <button type="button" disabled={syncing} onClick={clearLocalAndRestore}>清空本地缓存后重新拉取</button>
+          <button className="primary-button" disabled={syncing || syncSnapshot.syncing} onClick={handleSettingsSyncNow}><RefreshCw size={16} />{syncing || syncSnapshot.syncing ? '\u540c\u6b65\u4e2d...' : '\u7acb\u5373\u540c\u6b65'}</button>
+          <button type="button" disabled={syncing} onClick={restoreCloud}>\u4ece\u4e91\u7aef\u6062\u590d</button>
+          <button type="button" disabled={syncing} onClick={clearLocalAndRestore}>\u6e05\u7a7a\u672c\u5730\u7f13\u5b58\u540e\u91cd\u65b0\u62c9\u53d6</button>
         </div>
-        {(message || syncing || syncSnapshot.syncing) && <p className={(message || '').includes('失败') ? 'error' : 'success-text'}>{message || '同步中...'}</p>}
+        <p className={(message || syncSnapshot.lastError || syncSnapshot.diagnostic?.error || '').includes('\u5931\u8d25') || syncSnapshot.lastError || syncSnapshot.diagnostic?.error ? 'error' : 'success-text'}>{message || syncSnapshot.lastError || syncSnapshot.diagnostic?.error || syncSnapshot.label || '\u2601 \u5df2\u540c\u6b65'}</p>
+      </Section>
+      <Section title="\u540c\u6b65\u8bca\u65ad">
+        <Info label="userId" value={session?.user?.id || '-'} />
+        <Info label="companyId" value={session?.company?.id || session?.user?.companyId || '-'} />
+        <Info label="companyName" value={displayCompanyName(session)} />
+        <Info label="token" value={session?.token ? '\u5b58\u5728' : '\u65e0'} />
+        <Info label="syncState" value={syncSnapshot.syncing ? 'syncing' : (syncSnapshot.lastError || syncDiagnostic.error ? 'failed' : 'idle')} />
+        <Info label="lastSyncAt" value={syncSnapshot.lastSyncAt || '-'} />
+        <Info label="lastError" value={syncSnapshot.lastError || syncDiagnostic.error || '-'} />
+        <Info label="IndexedDB products" value={diagnosticCounts.products ?? '-'} />
+        <Info label="IndexedDB invoice_items" value={diagnosticCounts.invoice_items ?? '-'} />
+        <Info label="IndexedDB price_history" value={diagnosticCounts.price_history ?? '-'} />
+        <Info label="pendingPush" value={diagnostics?.pendingCount ?? syncSnapshot.pendingCount ?? 0} />
+        <Info label="failedItems" value={diagnostics?.failedCount ?? syncSnapshot.failedCount ?? 0} />
+        <Info label="last pull count" value={syncDiagnostic.pullCount ?? '-'} />
+        <Info label="last push count" value={syncDiagnostic.pushCount ?? '-'} />
+        <Info label="last API status" value={apiDebug?.status ?? '-'} />
+        <p className="long-text">last API error: {apiDebug?.error || '-'}</p>
       </Section>
       <MemberManagementPanel />
-      <Section title="数据库统计">
+      <Section title="\u6570\u636e\u5e93\u7edf\u8ba1">
         {Object.entries(safeObject(stats)).map(([key, value]) => <Info key={key} label={key} value={value} />)}
       </Section>
-      <Section title="导出/维护">
+      <Section title="\u5bfc\u51fa/\u7ef4\u62a4">
         <div className="row-actions">
-          <button onClick={exportCloudExcel}>导出云端 Excel</button>
-          <button className="danger-button" onClick={clearData}>清空测试数据</button>
+          <button onClick={exportCloudExcel}>\u5bfc\u51fa\u4e91\u7aef Excel</button>
+          <button className="danger-button" onClick={clearData}>\u6e05\u7a7a\u6d4b\u8bd5\u6570\u636e</button>
         </div>
       </Section>
     </Page>
   );
 }
+
 function SupplierDialog({ supplier, onClose, onSave }) {
   const [form, setForm] = useState(supplier);
   return (

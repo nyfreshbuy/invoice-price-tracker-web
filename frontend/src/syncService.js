@@ -316,16 +316,16 @@ function errorDetails(error) {
   };
 }
 
-function syncLabel({ session, pendingCount, conflictCount }) {
-  if (!session) return '????';
-  if (!navigator.onLine) return '? ????';
-  if (waitingForWifi) return '? ?? WiFi';
-  if (syncing && syncProgress.total > 0) return `? ???? ${syncProgress.done}/${syncProgress.total}`;
-  if (syncing) return '? ????...';
-  if (lastError) return syncProgress.failed > 0 ? `? ???? ${syncProgress.failed} ?` : '? ????';
-  if (conflictCount > 0) return `? ?????? ${conflictCount} ?`;
-  if (pendingCount > 0) return `? ??? ${pendingCount}`;
-  return '? ???';
+function syncLabel({ session, pendingCount, conflictCount, error }) {
+  if (!session) return '\u8bf7\u5148\u767b\u5f55';
+  if (!navigator.onLine) return '\u2601 \u79bb\u7ebf\u6a21\u5f0f';
+  if (waitingForWifi) return '\u2601 \u7b49\u5f85 WiFi';
+  if (syncing && syncProgress.total > 0) return `\u2601 \u6b63\u5728\u540c\u6b65 ${syncProgress.done}/${syncProgress.total}`;
+  if (syncing) return '\u2601 \u6b63\u5728\u540c\u6b65...';
+  if (error) return syncProgress.failed > 0 ? `\u2601 \u540c\u6b65\u5931\u8d25 ${syncProgress.failed} \u6761` : '\u2601 \u540c\u6b65\u5931\u8d25';
+  if (conflictCount > 0) return `\u2601 \u9700\u8981\u4eba\u5de5\u786e\u8ba4 ${conflictCount} \u6761`;
+  if (pendingCount > 0) return `\u2601 \u5f85\u540c\u6b65 ${pendingCount} \u6761`;
+  return '\u2601 \u5df2\u540c\u6b65';
 }
 
 
@@ -341,6 +341,7 @@ export async function getSyncSnapshot() {
     lastSyncAt(),
     getSyncDiagnostic(companyId)
   ]);
+  const effectiveLastError = lastError || (diagnostic?.status === 'failed' ? diagnostic.error || '' : '');
   return {
     online: navigator.onLine,
     authenticated: Boolean(session),
@@ -349,27 +350,27 @@ export async function getSyncSnapshot() {
     failedCount,
     pendingByTable: Object.fromEntries(Object.entries(pendingChanges).map(([table, records]) => [table, records.length])),
     syncing,
-    lastError,
+    lastError: effectiveLastError,
     waitingForWifi,
     syncProgress: { ...syncProgress },
     diagnostic,
     preferences,
     lastSyncAt: lastSync,
     connection: connectionType(),
-    label: syncLabel({ session, pendingCount, conflictCount })
+    label: syncLabel({ session, pendingCount, conflictCount, error: effectiveLastError })
   };
 }
 
 function shouldSkipAutoSync({ force, reason, preferences, lastSync }) {
   if (force) return '';
-  if (!preferences.autoSync) return '???????';
-  if (preferences.wifiOnly && !preferences.allowCellular && looksCellularConnection()) return '?? WiFi';
+  if (!preferences.autoSync) return '\u81ea\u52a8\u540c\u6b65\u5df2\u5173\u95ed';
+  if (preferences.wifiOnly && !preferences.allowCellular && looksCellularConnection()) return '\u7b49\u5f85 WiFi';
   const last = Date.parse(lastSync || '');
   if (['startup', 'online'].includes(reason)) {
-    if (Number.isFinite(last) && Date.now() - last < 60 * 1000) return '?????';
+    if (Number.isFinite(last) && Date.now() - last < 60 * 1000) return '\u521a\u521a\u540c\u6b65\u8fc7';
     return '';
   }
-  if (Number.isFinite(last) && Date.now() - last < AUTO_SYNC_INTERVAL_MS) return '????????? 30 ??';
+  if (Number.isFinite(last) && Date.now() - last < AUTO_SYNC_INTERVAL_MS) return '\u8ddd\u79bb\u4e0a\u6b21\u540c\u6b65\u672a\u8d85\u8fc7 30 \u5206\u949f';
   return '';
 }
 
@@ -513,7 +514,7 @@ export async function syncNow({ force = false, reason = 'manual' } = {}) {
             remainingPending: remainingAfterBatch
           });
         } catch (error) {
-          lastError = error.message || '????';
+          lastError = error.message || '\u540c\u6b65\u5931\u8d25';
           console.error('[SYNC] push error', { batchStart: index, batchSize: batch.length, error });
           console.warn('[SYNC] retrying failed batch item-by-item', { batchStart: index, batchSize: batch.length });
           for (const entry of batch) {
@@ -525,7 +526,7 @@ export async function syncNow({ force = false, reason = 'manual' } = {}) {
               const applied = await applyPushResults([entry], singleResults);
               if (applied.failedCount > 0) {
                 syncProgress.failed += applied.failedCount;
-                lastError = `?????${entry.table} ${entry.record?.id || entry.record?.localId || ''}`;
+                lastError = `\u540c\u6b65\u5931\u8d25\uff1a${entry.table} ${entry.record?.id || entry.record?.localId || ''}`;
               }
               console.log('[SYNC] single push finish', {
                 table: entry.table,
@@ -535,7 +536,7 @@ export async function syncNow({ force = false, reason = 'manual' } = {}) {
               });
             } catch (singleError) {
               syncProgress.failed += 1;
-              const message = singleError.message || '????';
+              const message = singleError.message || '\u540c\u6b65\u5931\u8d25';
               lastError = message;
               await localDb.markSyncFailed(entry.table, entry.record.localId || entry.record.id || entry.record.serverId, message);
               console.error('[SYNC] single push failed', {
