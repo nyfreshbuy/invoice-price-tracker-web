@@ -18,7 +18,7 @@ import {
   Upload,
   UserPlus
 } from 'lucide-react';
-import { api, getAuthSession, setAuthSession } from './api.js';
+import { api, getAuthSession, getLastApiDebug, setAuthSession } from './api.js';
 import { generateId, localDb, today } from './localDb.js';
 import {
   getSyncPreferences,
@@ -109,12 +109,19 @@ const ERROR_UI_TEXT = {
 
 function recordPageError(error, info = {}, pageName = 'unknown') {
   const session = getAuthSession?.() || {};
+  const locationInfo = extractErrorLocation(error);
   const entry = {
     pageName,
+    route: typeof window !== 'undefined' ? window.location.pathname : '',
     url: typeof window !== 'undefined' ? window.location.href : '',
     message: error?.message || String(error || 'Unknown error'),
     stack: error?.stack || '',
     componentStack: info?.componentStack || '',
+    fileName: locationInfo.fileName,
+    lineNumber: locationInfo.lineNumber,
+    columnNumber: locationInfo.columnNumber,
+    functionName: locationInfo.functionName,
+    lastApi: getLastApiDebug?.() || null,
     user: session?.user?.email || session?.user?.username || '',
     companyId: session?.company?.id || session?.user?.companyId || '',
     appVersion: APP_VERSION,
@@ -128,6 +135,30 @@ function recordPageError(error, info = {}, pageName = 'unknown') {
   } catch (storageError) {
     console.warn('[PAGE_RUNTIME_ERROR_LOG_FAILED]', storageError);
   }
+}
+
+function extractErrorLocation(error) {
+  const stack = String(error?.stack || '');
+  const lines = stack.split('\n').map((line) => line.trim()).filter(Boolean);
+  for (const line of lines) {
+    const match = line.match(/^at\s+(.*?)\s+\((.*?):(\d+):(\d+)\)$/) || line.match(/^at\s+(.*?):(\d+):(\d+)$/);
+    if (!match) continue;
+    if (match.length === 5) {
+      return {
+        functionName: match[1],
+        fileName: match[2],
+        lineNumber: Number(match[3]),
+        columnNumber: Number(match[4])
+      };
+    }
+    return {
+      functionName: '',
+      fileName: match[1],
+      lineNumber: Number(match[2]),
+      columnNumber: Number(match[3])
+    };
+  }
+  return { functionName: '', fileName: '', lineNumber: null, columnNumber: null };
 }
 
 class PageErrorBoundary extends Component {
@@ -158,23 +189,37 @@ class PageErrorBoundary extends Component {
 }
 
 function PageErrorFallback({ error, info, pageName }) {
+  const locationInfo = extractErrorLocation(error);
   const log = {
     pageName,
+    route: typeof window !== 'undefined' ? window.location.pathname : '',
     url: typeof window !== 'undefined' ? window.location.href : '',
     message: error?.message || String(error || ''),
     stack: error?.stack || '',
     componentStack: info?.componentStack || '',
+    fileName: locationInfo.fileName,
+    lineNumber: locationInfo.lineNumber,
+    columnNumber: locationInfo.columnNumber,
+    functionName: locationInfo.functionName,
+    lastApi: getLastApiDebug?.() || null,
     appVersion: APP_VERSION
   };
   return (
     <div className="page-error">
       <h1>{ERROR_UI_TEXT.title}</h1>
       <p>{ERROR_UI_TEXT.body}</p>
+      <div className="error-summary">
+        <strong>{log.message || 'Unknown runtime error'}</strong>
+        <span>Route: {log.route || '-'}</span>
+        <span>Component: {pageName || '-'}</span>
+        <span>File: {log.fileName || '-'}{log.lineNumber ? `:${log.lineNumber}` : ''}</span>
+        <span>Function: {log.functionName || '-'}</span>
+      </div>
       <div className="row-actions">
         <button type="button" onClick={() => window.location.reload()}>{ERROR_UI_TEXT.reload}</button>
         <a className="icon-button" href="/">{ERROR_UI_TEXT.home}</a>
       </div>
-      <details>
+      <details open>
         <summary>{ERROR_UI_TEXT.log}</summary>
         <pre className="ocr-text">{JSON.stringify(log, null, 2)}</pre>
       </details>
@@ -197,6 +242,14 @@ function ProtectedPage({ pageName, session, children }) {
       <RequireAuth session={session}>{children}</RequireAuth>
     </PageBoundary>
   );
+}
+
+function safeArray(value) {
+  return Array.isArray(value) ? value : [];
+}
+
+function safeObject(value) {
+  return value && typeof value === 'object' && !Array.isArray(value) ? value : {};
 }
 
 export default function App() {
@@ -593,10 +646,11 @@ function InvoiceListPage() {
   const [items, setItems] = useState([]);
   const [mergeInvoice, setMergeInvoice] = useState(null);
   const [message, setMessage] = useState('');
-  const load = () => localDb.getInvoices().then(setItems);
+  const load = () => localDb.getInvoices().then((data) => setItems(safeArray(data)));
   useLocalReload(load);
   const filter = new URLSearchParams(location.search).get('filter') || '';
-  const filteredItems = items.filter((invoice) => {
+  const invoiceItems = safeArray(items);
+  const filteredItems = invoiceItems.filter((invoice) => {
     if (filter === 'pending') return isPendingInvoice(invoice);
     if (filter === 'abnormal') return isAbnormalInvoice(invoice);
     if (filter === 'duplicate') return isDuplicateInvoice(invoice);
@@ -605,10 +659,10 @@ function InvoiceListPage() {
     return true;
   });
   const counts = {
-    pending: items.filter(isPendingInvoice).length,
-    abnormal: items.filter(isAbnormalInvoice).length,
-    duplicate: items.filter(isDuplicateInvoice).length,
-    conflict: items.filter(isConflictInvoice).length
+    pending: invoiceItems.filter(isPendingInvoice).length,
+    abnormal: invoiceItems.filter(isAbnormalInvoice).length,
+    duplicate: invoiceItems.filter(isDuplicateInvoice).length,
+    conflict: invoiceItems.filter(isConflictInvoice).length
   };
 
   return (
@@ -1060,8 +1114,9 @@ function RecognitionTaskListPage() {
   async function load() {
     try {
       const data = await api.getRecognitionTasks();
-      setTasks(data);
-      const completedWithInvoice = data.filter((task) => task.status === 'completed' && task.invoiceId);
+      const taskRows = safeArray(data);
+      setTasks(taskRows);
+      const completedWithInvoice = taskRows.filter((task) => task?.status === 'completed' && task?.invoiceId);
       if (completedWithInvoice.some((task) => !pulledCompletedTaskIds.current.has(task.id))) {
         completedWithInvoice.forEach((task) => pulledCompletedTaskIds.current.add(task.id));
         await pullFromCloud({ full: true });
@@ -1211,9 +1266,10 @@ function InvoiceArchivePage() {
   const [q, setQ] = useState('');
   const [tree, setTree] = useState([]);
   const [message, setMessage] = useState('');
-  const load = () => localDb.getArchiveTree(q).then(setTree).catch((error) => setMessage(error.message || 'Archive load failed'));
+  const load = () => localDb.getArchiveTree(q).then((data) => setTree(safeArray(data))).catch((error) => setMessage(error.message || 'Archive load failed'));
   useLocalReload(load, [q]);
-  const totalInvoices = tree.reduce((sum, supplier) => sum + Number(supplier.invoiceCount || 0), 0);
+  const archiveTree = safeArray(tree);
+  const totalInvoices = archiveTree.reduce((sum, supplier) => sum + Number(supplier?.invoiceCount || 0), 0);
 
   return (
     <Page title="发票文档库" subtitle="按供应商和月份浏览 App 内置归档索引">
@@ -1222,26 +1278,26 @@ function InvoiceArchivePage() {
           <span>供应商 / 发票号 / 日期</span>
           <input value={q} onChange={(event) => setQ(event.target.value)} placeholder="May Flower / INV00125 / 2026-06" />
         </label>
-        <Info label="供应商" value={tree.length} />
+        <Info label="供应商" value={archiveTree.length} />
         <Info label="发票" value={totalInvoices} />
         {message && <p className="error">{message}</p>}
       </Section>
-      {tree.length === 0 && <EmptyState text="暂无归档发票。确认入库后的发票会出现在这里。" />}
-      {tree.map((supplier) => (
-        <Section key={supplier.supplierName} title={`${supplier.supplierName} (${supplier.invoiceCount})`}>
-          {supplier.months.map((month) => (
-            <CollapsibleSection key={`${supplier.supplierName}-${month.month}`} title={`${month.month} · ${month.invoiceCount} 张`}>
+      {archiveTree.length === 0 && <EmptyState text="暂无归档发票。确认入库后的发票会出现在这里。" />}
+      {archiveTree.map((supplier) => (
+        <Section key={supplier?.supplierName || supplier?.id || 'unknown'} title={`${supplier?.supplierName || '-'} (${supplier?.invoiceCount || 0})`}>
+          {safeArray(supplier?.months).map((month) => (
+            <CollapsibleSection key={`${supplier?.supplierName || 'unknown'}-${month?.month || ''}`} title={`${month?.month || '-'} · ${month?.invoiceCount || 0} 张`}>
               <div className="card-list">
-                {month.invoices.map((invoice) => (
-                  <div className="row-card" key={invoice.id}>
+                {safeArray(month?.invoices).map((invoice, invoiceIndex) => (
+                  <div className="row-card" key={invoice?.id || invoice?.invoiceNo || `${month?.month || 'month'}-${invoiceIndex}`}>
                     <div>
-                      <h3>{invoice.invoiceDate || '-'} · {invoice.invoiceNo || 'No Invoice #'}</h3>
-                      <p>{money(invoice.totalAmount)} · {invoice.status || '-'}</p>
-                      <p className="long-text">{invoice.archiveFilePath || invoice.imagePath || 'No archive path'}</p>
-                      {invoice.pages?.length > 0 && <p>Pages: {invoice.pages.length}</p>}
+                      <h3>{invoice?.invoiceDate || '-'} · {invoice?.invoiceNo || 'No Invoice #'}</h3>
+                      <p>{money(invoice?.totalAmount)} · {invoice?.status || '-'}</p>
+                      <p className="long-text">{invoice?.archiveFilePath || invoice?.imagePath || 'No archive path'}</p>
+                      {safeArray(invoice?.pages).length > 0 && <p>Pages: {safeArray(invoice?.pages).length}</p>}
                     </div>
                     <div className="row-actions">
-                      <Link className="icon-button" to={`/invoices/${encodeURIComponent(invoice.id)}`}>查看</Link>
+                      <Link className="icon-button" to={`/invoices/${encodeURIComponent(invoice?.id || '')}`}>查看</Link>
                     </div>
                   </div>
                 ))}
@@ -1867,23 +1923,24 @@ function PromoAllocationDialog({ items, onClose, onSave }) {
 function ProductSearchPage() {
   const [q, setQ] = useState('');
   const [results, setResults] = useState([]);
-  const load = () => localDb.searchProducts(q).then(setResults);
+  const load = () => localDb.searchProducts(q).then((data) => setResults(safeArray(data)));
   useLocalReload(load, [q]);
+  const productResults = safeArray(results);
   return (
     <Page title="商品价格查询" subtitle="优先查询本地 IndexedDB；异常商品不会进入正式价格统计。">
       <Section title="搜索">
         <label className="field"><span>商品名称</span><input value={q} onChange={(event) => setQ(event.target.value)} placeholder="千页豆腐 / Rice Chips / ITOEN" /></label>
         {!q && <p className="hint">未输入关键词时显示最近 20 个购买商品。</p>}
       </Section>
-      {results.length === 0 && <EmptyState text="暂无商品记录" />}
+      {productResults.length === 0 && <EmptyState text="暂无商品记录" />}
       <div className="card-list">
-        {results.map((item) => (
-          <Link className="row-card" to={`/products/${encodeURIComponent(item.productNameNormalized || item.name || item.productNameOriginal)}`} key={item.productNameNormalized || item.name || item.productNameOriginal}>
+        {productResults.map((item, index) => (
+          <Link className="row-card" to={`/products/${encodeURIComponent(item?.productNameNormalized || item?.name || item?.productNameOriginal || '')}`} key={item?.productNameNormalized || item?.name || item?.productNameOriginal || index}>
             <div>
-              <h3>{item.productNameNormalized || item.name || item.productNameOriginal}</h3>
-              <p>最近价格 {money(item.recentPrice)} · 最低价 {money(item.minPrice)} · 最高价 {money(item.maxPrice)}</p>
-              <p>均价 {money(item.averagePrice)} · 最近供应商 {item.recentSupplierName || '-'} · 最近采购 {item.recentPurchaseDate || '-'} · {item.recordCount || 0} 条</p>
-              {item.pendingCount > 0 && <p className="warning-text">{item.pendingCount} 条价格来自待确认/异常发票</p>}
+              <h3>{item?.productNameNormalized || item?.name || item?.productNameOriginal || '-'}</h3>
+              <p>最近价格 {money(item?.recentPrice)} · 最低价 {money(item?.minPrice)} · 最高价 {money(item?.maxPrice)}</p>
+              <p>均价 {money(item?.averagePrice)} · 最近供应商 {item?.recentSupplierName || '-'} · 最近采购 {item?.recentPurchaseDate || '-'} · {item?.recordCount || 0} 条</p>
+              {Number(item?.pendingCount || 0) > 0 && <p className="warning-text">{item.pendingCount} 条价格来自待确认/异常发票</p>}
             </div>
             <ChevronRight />
           </Link>
@@ -1899,29 +1956,29 @@ function ProductDetailPage() {
   const load = () => localDb.getProductDetail(decoded).then(setDetail);
   useLocalReload(load, [decoded]);
   if (!detail) return <Page title="商品详情"><EmptyState text="暂无记录" /></Page>;
-  const records = detail.records || [];
-  const supplierCompare = detail.supplierCompare || [];
+  const records = safeArray(detail.records);
+  const supplierCompare = safeArray(detail.supplierCompare);
   return (
     <Page title={detail.standardName || decoded} subtitle="按 productId / normalizedName / alias 匹配历史价格">
       <Section title="供应商价格对比">
         {supplierCompare.length === 0 && <EmptyState text="暂无供应商价格记录" />}
-        {supplierCompare.map((row) => (
-          <div className="detail-item" key={row.supplierId || row.supplierName}>
-            <div className="split"><strong>{row.supplierName}</strong><strong>{money(row.minPrice)}</strong></div>
-            <p>最近价格 {money(row.recentPrice)} · 历史最低 {money(row.minPrice)} · 记录 {row.count || 0} 条</p>
+        {supplierCompare.map((row, index) => (
+          <div className="detail-item" key={row?.supplierId || row?.supplierName || index}>
+            <div className="split"><strong>{row?.supplierName || '-'}</strong><strong>{money(row?.minPrice)}</strong></div>
+            <p>最近价格 {money(row?.recentPrice)} · 历史最低 {money(row?.minPrice)} · 记录 {row?.count || 0} 条</p>
           </div>
         ))}
       </Section>
       <Section title="采购记录">
         {records.length === 0 && <EmptyState text="暂无采购记录" />}
-        {records.map((record) => (
-          <div className="detail-item" key={record.id}>
-            <div className="split"><strong>{record.invoiceDate}</strong><strong>{money(record.effectiveUnitCost || record.unitPrice)}</strong></div>
-            <p>{record.supplierName} · 发票 {record.invoiceNo || '-'}</p>
-            <p>原始名称：{record.productNameOriginal}</p>
-            <p>数量 {numberText(record.quantity)} {record.unit || ''} · 原始单价 {money(record.unitPrice)} · 实际摊薄成本 {money(record.effectiveUnitCost || record.unitPrice)}</p>
-            <p>赠品 {Number(record.isFreeItem || 0) ? '是' : '否'} · 分摊组 {record.promoGroupName || '-'}</p>
-            {record.invoiceId && <Link to={`/invoices/${record.invoiceId}`}>查看完整发票</Link>}
+        {records.map((record, index) => (
+          <div className="detail-item" key={record?.id || index}>
+            <div className="split"><strong>{record?.invoiceDate || '-'}</strong><strong>{money(record?.effectiveUnitCost || record?.unitPrice)}</strong></div>
+            <p>{record?.supplierName || '-'} · 发票 {record?.invoiceNo || '-'}</p>
+            <p>原始名称：{record?.productNameOriginal || '-'}</p>
+            <p>数量 {numberText(record?.quantity)} {record?.unit || ''} · 原始单价 {money(record?.unitPrice)} · 实际摊薄成本 {money(record?.effectiveUnitCost || record?.unitPrice)}</p>
+            <p>赠品 {Number(record?.isFreeItem || 0) ? '是' : '否'} · 分摊组 {record?.promoGroupName || '-'}</p>
+            {record?.invoiceId && <Link to={`/invoices/${record.invoiceId}`}>查看完整发票</Link>}
           </div>
         ))}
       </Section>
@@ -1931,23 +1988,24 @@ function ProductDetailPage() {
 function SupplierCenterPage() {
   const [q, setQ] = useState('');
   const [rows, setRows] = useState([]);
-  const load = () => localDb.searchSupplierCenter(q).then(setRows);
+  const load = () => localDb.searchSupplierCenter(q).then((data) => setRows(safeArray(data)));
   useLocalReload(load, [q]);
+  const supplierRows = safeArray(rows);
   return (
     <Page title="供应商查询中心" subtitle="按供应商、电话、联系人、发票号、商品名称搜索">
       <form className="search-bar" onSubmit={(event) => event.preventDefault()}>
         <input placeholder="输入供应商/电话/联系人/发票号/商品名" value={q} onChange={(event) => setQ(event.target.value)} />
         <button type="button"><Search size={18} />搜索</button>
       </form>
-      {rows.length === 0 && <EmptyState text="暂无供应商采购数据" />}
+      {supplierRows.length === 0 && <EmptyState text="暂无供应商采购数据" />}
       <div className="card-list">
-        {rows.map((row) => (
-          <Link className="row-card" key={row.id} to={`/suppliers/${row.id}`}>
+        {supplierRows.map((row, index) => (
+          <Link className="row-card" key={row?.id || index} to={`/suppliers/${row?.id || ''}`}>
             <div>
-              <h3>{row.displayName || row.name}</h3>
-              <p>累计采购 {money(row.totalAmount)} · 发票 {row.invoiceCount || 0} 张 · SKU {row.skuCount || 0}</p>
-              <p>最近采购 {row.lastPurchaseDate || '-'} · 最近金额 {money(row.lastPurchaseAmount)}</p>
-              <p>赠品数量 {numberText(row.freeQty)} · 折扣 {money(row.discountAmount)} · 异常 {row.abnormalInvoiceCount || 0}</p>
+              <h3>{row?.displayName || row?.name || '-'}</h3>
+              <p>累计采购 {money(row?.totalAmount)} · 发票 {row?.invoiceCount || 0} 张 · SKU {row?.skuCount || 0}</p>
+              <p>最近采购 {row?.lastPurchaseDate || '-'} · 最近金额 {money(row?.lastPurchaseAmount)}</p>
+              <p>赠品数量 {numberText(row?.freeQty)} · 折扣 {money(row?.discountAmount)} · 异常 {row?.abnormalInvoiceCount || 0}</p>
             </div>
             <ChevronRight />
           </Link>
@@ -2017,9 +2075,13 @@ function SupplierProductsPage() {
 }
 function PurchaseAnalysisPage() {
   const [analytics, setAnalytics] = useState(null);
-  const load = () => localDb.getPurchaseAnalytics().then(setAnalytics);
+  const load = () => localDb.getPurchaseAnalytics().then((data) => setAnalytics(safeObject(data)));
   useLocalReload(load);
   if (!analytics) return <Page title="采购分析"><EmptyState text="正在读取本地分析数据" /></Page>;
+  const supplierRanking = safeArray(analytics.supplierRanking);
+  const productRanking = safeArray(analytics.productRanking);
+  const monthly = safeArray(analytics.monthly);
+  const lowestPrices = safeArray(analytics.lowestPrices);
   return (
     <Page title="采购分析">
       {(analytics.pendingInvoiceCount > 0 || analytics.abnormalInvoiceCount > 0) && (
@@ -2032,30 +2094,30 @@ function PurchaseAnalysisPage() {
         </Section>
       )}
       <Section title="供应商采购排名">
-        {analytics.supplierRanking.length === 0 && <EmptyState text="暂无供应商采购数据" />}
-        {analytics.supplierRanking.slice(0, 20).map((row) => (
-          <div className="detail-item" key={row.supplierName}>
-            <div className="split"><strong>{row.supplierName}</strong><strong>{money(row.amount)}</strong></div>
-            <p>采购次数 {row.count || 0} · 平均订单 {money(row.averageOrderAmount)}</p>
+        {supplierRanking.length === 0 && <EmptyState text="暂无供应商采购数据" />}
+        {supplierRanking.slice(0, 20).map((row, index) => (
+          <div className="detail-item" key={row?.supplierName || index}>
+            <div className="split"><strong>{row?.supplierName || '-'}</strong><strong>{money(row?.amount)}</strong></div>
+            <p>采购次数 {row?.count || 0} · 平均订单 {money(row?.averageOrderAmount)}</p>
           </div>
         ))}
       </Section>
       <Section title="商品采购排名">
-        {analytics.productRanking.slice(0, 20).map((row) => (
-          <div className="detail-item" key={row.productNameNormalized}>
-            <div className="split"><strong>{row.productNameNormalized}</strong><strong>{numberText(row.quantity)}</strong></div>
-            <p>采购金额 {money(row.amount)}</p>
+        {productRanking.slice(0, 20).map((row, index) => (
+          <div className="detail-item" key={row?.productNameNormalized || row?.productName || index}>
+            <div className="split"><strong>{row?.productNameNormalized || row?.productName || '-'}</strong><strong>{numberText(row?.quantity)}</strong></div>
+            <p>采购金额 {money(row?.amount)}</p>
           </div>
         ))}
       </Section>
       <Section title="月度采购分析">
-        {analytics.monthly.map((row) => <Info key={row.month} label={row.month} value={`${money(row.amount)} / ${numberText(row.quantity)}`} />)}
+        {monthly.map((row, index) => <Info key={row?.month || index} label={row?.month || '-'} value={`${money(row?.amount)} / ${numberText(row?.quantity)}`} />)}
       </Section>
       <Section title="最低采购价分析">
-        {analytics.lowestPrices.slice(0, 20).map((row) => (
-          <div className="detail-item" key={`${row.productNameNormalized}-${row.invoiceId}`}>
-            <div className="split"><strong>{row.productNameNormalized}</strong><strong>{money(row.unitPrice)}</strong></div>
-            <p>{row.supplierName} · {row.invoiceDate} · 发票 {row.invoiceNo || '-'}</p>
+        {lowestPrices.slice(0, 20).map((row, index) => (
+          <div className="detail-item" key={`${row?.productNameNormalized || row?.productName || index}-${row?.invoiceId || ''}`}>
+            <div className="split"><strong>{row?.productNameNormalized || row?.productName || '-'}</strong><strong>{money(row?.unitPrice)}</strong></div>
+            <p>{row?.supplierName || '-'} · {row?.invoiceDate || '-'} · 发票 {row?.invoiceNo || '-'}</p>
           </div>
         ))}
       </Section>
@@ -2301,8 +2363,8 @@ function MemberManagementPanel() {
   const [resetMember, setResetMember] = useState(null);
   async function loadMembers() {
     try {
-      const data = await api.getAdminMembers();
-      setMembers(data.members || []);
+      const data = await (api.getAdminMembers ? api.getAdminMembers() : api.getMembers());
+      setMembers(safeArray(data?.members));
     } catch (error) {
       setMessage(error.message || '读取成员失败');
     }
@@ -2310,8 +2372,8 @@ function MemberManagementPanel() {
   useEffect(() => { loadMembers(); }, []);
   async function saveMember(payload) {
     try {
-      if (payload.id) await api.updateAdminMember(payload.id, payload);
-      else await api.createAdminMember(payload);
+      if (payload.id) await (api.updateAdminMember || api.updateMember)(payload.id, payload);
+      else await (api.createAdminMember || api.createMember)(payload);
       setEditingMember(null);
       setMessage('成员已保存');
       await loadMembers();
@@ -2321,7 +2383,7 @@ function MemberManagementPanel() {
   }
   async function resetPassword(id, password) {
     try {
-      await api.resetAdminMemberPassword(id, { password });
+      await (api.resetAdminMemberPassword || api.resetMemberPassword)(id, password);
       setResetMember(null);
       setMessage('密码已重置');
     } catch (error) {
@@ -2330,8 +2392,8 @@ function MemberManagementPanel() {
   }
   async function toggleStatus(member, enabled) {
     try {
-      if (enabled) await api.enableAdminMember(member.id);
-      else await api.disableAdminMember(member.id);
+      if (enabled) await (api.enableAdminMember || api.enableMember)(member.id);
+      else await (api.disableAdminMember || api.disableMember)(member.id);
       await loadMembers();
     } catch (error) {
       setMessage(error.message || '修改状态失败');
@@ -2340,7 +2402,7 @@ function MemberManagementPanel() {
   async function removeMember(member) {
     if (!confirm('确认删除/停用该成员？')) return;
     try {
-      await api.deleteAdminMember(member.id);
+      await (api.deleteAdminMember || api.deleteMember)(member.id);
       await loadMembers();
     } catch (error) {
       setMessage(error.message || '删除成员失败');
@@ -2494,7 +2556,7 @@ function SettingsPage() {
       </Section>
       <MemberManagementPanel />
       <Section title="数据库统计">
-        {Object.entries(stats).map(([key, value]) => <Info key={key} label={key} value={value} />)}
+        {Object.entries(safeObject(stats)).map(([key, value]) => <Info key={key} label={key} value={value} />)}
       </Section>
       <Section title="导出/维护">
         <div className="row-actions">
@@ -2735,14 +2797,23 @@ function Dialog({ title, onClose, children }) {
 }
 
 function BottomNav() {
+  const labels = {
+    documents: '\u6587\u6863',
+    home: '\u9996\u9875',
+    invoices: '\u53d1\u7968',
+    purchase: '\u91c7\u8d2d',
+    search: '\u67e5\u8be2',
+    analytics: '\u5206\u6790',
+    settings: '\u8bbe\u7f6e'
+  };
   const items = [
-    ['/archive', FileText, '鏂囨。'],
-    ['/', Home, '棣栭〉'],
-    ['/invoices', FileText, '鍙戠エ'],
-    ['/supplier-center', Building2, '閲囪喘'],
-    ['/products', Search, '鏌ヨ'],
-    ['/analytics', BarChart3, '鍒嗘瀽'],
-    ['/settings', Settings, '璁剧疆']
+    ['/archive', FileText, labels.documents],
+    ['/', Home, labels.home],
+    ['/invoices', FileText, labels.invoices],
+    ['/supplier-center', Building2, labels.purchase],
+    ['/products', Search, labels.search],
+    ['/analytics', BarChart3, labels.analytics],
+    ['/settings', Settings, labels.settings]
   ];
   return (
     <nav className="bottom-nav">
@@ -2760,7 +2831,16 @@ function useLocalReload(loader, deps = [], options = {}) {
   useEffect(() => {
     let cancelled = false;
     const listenToEvents = options.listenToEvents !== false;
-    const run = () => Promise.resolve(loader()).catch(() => {}).then(() => undefined);
+    const run = () => {
+      try {
+        return Promise.resolve(loader()).catch((error) => {
+          recordPageError(error, { componentStack: 'useLocalReload' }, 'loader');
+        }).then(() => undefined);
+      } catch (error) {
+        recordPageError(error, { componentStack: 'useLocalReload' }, 'loader');
+        return Promise.resolve();
+      }
+    };
     const guardedRun = () => {
       if (!cancelled) run();
     };

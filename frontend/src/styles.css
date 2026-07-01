@@ -74,6 +74,21 @@ a {
   overflow-wrap: anywhere;
 }
 
+.error-summary {
+  display: grid;
+  gap: 6px;
+  padding: 12px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: #fff;
+  overflow-wrap: anywhere;
+}
+
+.error-summary span {
+  color: var(--muted);
+  font-size: 13px;
+}
+
 .page-error pre {
   max-height: 45dvh;
   overflow: auto;

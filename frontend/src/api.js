@@ -3,11 +3,43 @@ const AUTH_KEY = 'invoicePriceTrackerAuth';
 const AUTH_TOKEN_KEY = 'authToken';
 const LEGACY_AUTH_KEYS = ['token', 'user', 'company', 'companyId', 'invoicePriceTrackerLoggedOut'];
 const DEFAULT_TIMEOUT_MS = 20000;
+const API_DEBUG_KEY = 'invoice_last_api_debug';
 
 function makeApiError(message, extras = {}) {
   const error = new Error(message);
   Object.assign(error, extras);
   return error;
+}
+
+function rememberApiDebug(entry) {
+  try {
+    localStorage.setItem(API_DEBUG_KEY, JSON.stringify({
+      ...entry,
+      createdAt: new Date().toISOString()
+    }));
+  } catch {
+    // Diagnostic only.
+  }
+}
+
+export function getLastApiDebug() {
+  try {
+    return JSON.parse(localStorage.getItem(API_DEBUG_KEY) || 'null');
+  } catch {
+    return null;
+  }
+}
+
+function summarizeApiPayload(value) {
+  if (Array.isArray(value)) return { type: 'array', length: value.length };
+  if (!value || typeof value !== 'object') return value;
+  const summary = {};
+  for (const [key, item] of Object.entries(value)) {
+    if (Array.isArray(item)) summary[key] = { type: 'array', length: item.length };
+    else if (item && typeof item === 'object') summary[key] = { type: 'object', keys: Object.keys(item).slice(0, 20) };
+    else summary[key] = item;
+  }
+  return summary;
 }
 
 function parseStoredSession() {
@@ -116,6 +148,7 @@ async function request(path, options = {}) {
       signal: controller.signal
     });
   } catch (error) {
+    rememberApiDebug({ path, method: options.method || 'GET', status: 0, error: error?.message || 'network error' });
     if (error?.name === 'AbortError') {
       throw makeApiError('请求超时，请稍后重试', { isTimeout: true, status: 0 });
     }
@@ -132,11 +165,17 @@ async function request(path, options = {}) {
     } catch {
       message = response.statusText || message;
     }
+    rememberApiDebug({ path, method: options.method || 'GET', status: response.status, error: message });
     throw makeApiError(message, { status: response.status });
   }
 
   const contentType = response.headers.get('content-type') || '';
-  if (contentType.includes('application/json')) return response.json();
+  if (contentType.includes('application/json')) {
+    const data = await response.json();
+    rememberApiDebug({ path, method: options.method || 'GET', status: response.status, response: summarizeApiPayload(data) });
+    return data;
+  }
+  rememberApiDebug({ path, method: options.method || 'GET', status: response.status, responseType: contentType || 'unknown' });
   return response;
 }
 
