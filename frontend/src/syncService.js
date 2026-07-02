@@ -2,7 +2,7 @@ import { api, getAuthSession, getCompanyId } from './api.js';
 import { localDb, syncTables, getDeviceId, nowIso } from './localDb.js';
 
 const SYNC_BATCH_SIZE = 20;
-const PULL_IMPORT_CHUNK_SIZE = 100;
+const PULL_IMPORT_CHUNK_SIZE = 50;
 const AUTO_SYNC_INTERVAL_MS = 30 * 60 * 1000;
 const SYNC_TIMEOUT_MS = 120 * 1000;
 const CORE_PULL_TABLES = new Set(['purchase_batches', 'suppliers', 'invoices', 'invoice_items', 'products', 'price_history']);
@@ -15,6 +15,12 @@ let autoSyncTimer = null;
 let activeSyncRunId = 0;
 let syncWatchdogTimer = null;
 let syncStartedAt = 0;
+let lastSyncProgressAt = 0;
+
+function touchSyncProgress(extra = {}) {
+  lastSyncProgressAt = Date.now();
+  syncProgress = { ...syncProgress, ...extra, updatedAt: nowIso() };
+}
 
 function lastSyncStorageKey(companyId) {
   return `invoicePriceTrackerLastSyncAt:${companyId || 'default'}`;
@@ -49,7 +55,9 @@ function armSyncWatchdog(runId) {
         finishedAt: nowIso(),
         error: lastError,
         pendingCount: remaining,
-        failedCount: syncProgress.failed
+        failedCount: syncProgress.failed,
+        stalledAt: syncProgress.table || '',
+        lastRecordId: syncProgress.lastRecordId || ''
       }).catch(() => {});
     }
     console.error('[SYNC] watchdog timeout reset:', {
@@ -372,10 +380,18 @@ export async function clearLastSyncedPendingRecords() {
     applied += 1;
     appliedByTable[result.table] = (appliedByTable[result.table] || 0) + 1;
   }
+  const clearedWithServerId = typeof localDb.clearPendingRecordsWithServerId === 'function'
+    ? await localDb.clearPendingRecordsWithServerId()
+    : {};
+  for (const [table, count] of Object.entries(clearedWithServerId)) {
+    applied += Number(count || 0);
+    appliedByTable[table] = (appliedByTable[table] || 0) + Number(count || 0);
+  }
   const pendingCount = await localDb.getPendingCount();
   await setSyncDiagnostic(companyId, {
     manualPendingClearAt: nowIso(),
     manualPendingClearApplied: applied,
+    manualPendingClearByServerId: clearedWithServerId,
     pendingCount
   });
   console.log('[SYNC FRONTEND] manual clear last synced pending', {
@@ -408,13 +424,26 @@ async function importPulledTable(table, records = [], importWarnings = []) {
   if (!records.length) return { table, imported: 0, skipped: 0 };
   let imported = 0;
   let skipped = 0;
+  let failed = 0;
+  const failedRecords = [];
   for (let index = 0; index < records.length; index += PULL_IMPORT_CHUNK_SIZE) {
     const chunk = records.slice(index, index + PULL_IMPORT_CHUNK_SIZE);
+    touchSyncProgress({
+      phase: 'import',
+      table,
+      tableDone: index,
+      tableTotal: records.length,
+      lastRecordId: chunk[0]?.id || chunk[0]?.localId || chunk[0]?.serverId || ''
+    });
+    emitSyncStateChange();
+    const failedBeforeChunk = failedRecords.length;
     try {
       if (typeof localDb.mergeRemoteMany === 'function') {
-        const result = await localDb.mergeRemoteMany(table, chunk, { silent: true });
+        const result = await localDb.mergeRemoteMany(table, chunk, { silent: true, batchSize: 50 });
         imported += Number(result.imported || 0);
         skipped += Number(result.skipped || 0);
+        failed += Number(result.failed || 0);
+        if (Array.isArray(result.failedRecords)) failedRecords.push(...result.failedRecords);
       } else {
         for (const record of chunk) await localDb.mergeRemote(table, record);
         imported += chunk.length;
@@ -432,18 +461,37 @@ async function importPulledTable(table, records = [], importWarnings = []) {
       if (CORE_PULL_TABLES.has(table)) throw error;
       importWarnings.push({ table, ...details });
     } finally {
+      const newFailedCount = failedRecords.length - failedBeforeChunk;
+      if (newFailedCount > 0) {
+        importWarnings.push({
+          table,
+          warning: 'Some records failed to import',
+          failedRecords: failedRecords.slice(failedBeforeChunk).slice(-20)
+        });
+        syncProgress.failed = Number(syncProgress.failed || 0) + newFailedCount;
+      }
       syncProgress.done = Math.min(syncProgress.total, syncProgress.done + chunk.length);
+      touchSyncProgress({
+        phase: 'import',
+        table,
+        tableDone: Math.min(records.length, index + chunk.length),
+        tableTotal: records.length,
+        lastRecordId: chunk[chunk.length - 1]?.id || chunk[chunk.length - 1]?.localId || chunk[chunk.length - 1]?.serverId || ''
+      });
       emitSyncStateChange();
       await yieldToBrowser();
     }
   }
-  return { table, imported, skipped };
+  return { table, imported, skipped, failed, failedRecords };
 }
 
 function syncLabel({ session, pendingCount, conflictCount, error }) {
   if (!session) return '\u8bf7\u5148\u767b\u5f55';
   if (!navigator.onLine) return '\u2601 \u79bb\u7ebf\u6a21\u5f0f';
   if (waitingForWifi) return '\u2601 \u7b49\u5f85 WiFi';
+  if (syncing && syncProgress.phase === 'import' && syncProgress.table) {
+    return `\u2601 \u6b63\u5728\u5bfc\u5165 ${syncProgress.table} ${syncProgress.done}/${syncProgress.total}`;
+  }
   if (syncing && syncProgress.total > 0) return `\u2601 \u6b63\u5728\u540c\u6b65 ${syncProgress.done}/${syncProgress.total}`;
   if (syncing) return '\u2601 \u6b63\u5728\u540c\u6b65...';
   if (error) return syncProgress.failed > 0 ? `\u2601 \u540c\u6b65\u5931\u8d25 ${syncProgress.failed} \u6761` : '\u2601 \u540c\u6b65\u5931\u8d25';
@@ -454,6 +502,24 @@ function syncLabel({ session, pendingCount, conflictCount, error }) {
 
 
 export async function getSyncSnapshot() {
+  if (syncing && lastSyncProgressAt && Date.now() - lastSyncProgressAt > 60 * 1000) {
+    const companyId = getCompanyId();
+    lastError = `\u540c\u6b65\u505c\u6ede\uff1a${syncProgress.table || '\u672a\u77e5\u8868'} ${syncProgress.lastRecordId || ''}`;
+    syncing = false;
+    clearSyncWatchdog();
+    syncStartedAt = 0;
+    if (companyId) {
+      await setSyncDiagnostic(companyId, {
+        status: 'failed',
+        finishedAt: nowIso(),
+        error: lastError,
+        stalledAt: syncProgress.table || '',
+        lastRecordId: syncProgress.lastRecordId || '',
+        pendingCount: await localDb.getPendingCount().catch(() => null),
+        failedCount: syncProgress.failed || 0
+      }).catch(() => {});
+    }
+  }
   if (syncing && syncStartedAt && Date.now() - syncStartedAt > SYNC_TIMEOUT_MS + 10000) {
     console.warn('[SYNC] stale sync state reset from snapshot', {
       startedAt: syncStartedAt,
@@ -546,8 +612,9 @@ export async function syncNow({ force = false, reason = 'manual' } = {}) {
 
   syncing = true;
   syncStartedAt = Date.now();
+  lastSyncProgressAt = Date.now();
   waitingForWifi = false;
-  syncProgress = { done: 0, total: 0, failed: 0 };
+  touchSyncProgress({ done: 0, total: 0, failed: 0, phase: 'start', table: '', lastRecordId: '' });
   lastError = '';
   const runId = activeSyncRunId + 1;
   activeSyncRunId = runId;
@@ -592,6 +659,12 @@ export async function syncNow({ force = false, reason = 'manual' } = {}) {
     if (Object.keys(clearedRemoteRepairPending).length) {
       console.log('[SYNC FRONTEND] cleared remote repair pending records', clearedRemoteRepairPending);
     }
+    const clearedServerIdPending = typeof localDb.clearPendingRecordsWithServerId === 'function'
+      ? await localDb.clearPendingRecordsWithServerId()
+      : {};
+    if (Object.keys(clearedServerIdPending).length) {
+      console.log('[SYNC FRONTEND] cleared pending records with serverId', clearedServerIdPending);
+    }
 
     const pending = await localDb.getPendingChanges();
     const pendingRecords = flattenPendingChanges(pending);
@@ -623,7 +696,7 @@ export async function syncNow({ force = false, reason = 'manual' } = {}) {
     });
 
     if (pendingRecords.length) {
-      syncProgress = { done: 0, total: pendingRecords.length, failed: 0 };
+      touchSyncProgress({ done: 0, total: pendingRecords.length, failed: 0, phase: 'push', table: '', lastRecordId: '' });
       emitSyncStateChange();
 
       for (let index = 0; index < pendingRecords.length; index += SYNC_BATCH_SIZE) {
@@ -699,7 +772,7 @@ export async function syncNow({ force = false, reason = 'manual' } = {}) {
             }
           }
         } finally {
-          syncProgress.done = Math.min(syncProgress.total, syncProgress.done + batch.length);
+          touchSyncProgress({ done: Math.min(syncProgress.total, syncProgress.done + batch.length), phase: 'push' });
           emitSyncStateChange();
         }
       }
@@ -723,7 +796,7 @@ export async function syncNow({ force = false, reason = 'manual' } = {}) {
     const pulled = await api.syncPull(hasLocalData ? (meta?.value || '') : '');
     pulledTotal = totalSyncRecords(pulled.data || {});
     if (pulledTotal > 0) {
-      syncProgress = { done: 0, total: pulledTotal, failed: syncProgress.failed || 0 };
+      touchSyncProgress({ done: 0, total: pulledTotal, failed: syncProgress.failed || 0, phase: 'import', table: '', lastRecordId: '' });
       emitSyncStateChange();
     }
     console.log('[SYNC] pull finish', {
@@ -826,8 +899,9 @@ export async function pullFromCloud({ full = false } = {}) {
   }
   syncing = true;
   syncStartedAt = Date.now();
+  lastSyncProgressAt = Date.now();
   waitingForWifi = false;
-  syncProgress = { done: 0, total: 0, failed: 0 };
+  touchSyncProgress({ done: 0, total: 0, failed: 0, phase: 'pull', table: '', lastRecordId: '' });
   lastError = '';
   const runId = activeSyncRunId + 1;
   activeSyncRunId = runId;
@@ -852,7 +926,7 @@ export async function pullFromCloud({ full = false } = {}) {
     const pulled = await api.syncPull(meta?.value || '');
     const restorePullTotal = totalSyncRecords(pulled.data || {});
     if (restorePullTotal > 0) {
-      syncProgress = { done: 0, total: restorePullTotal, failed: 0 };
+      touchSyncProgress({ done: 0, total: restorePullTotal, failed: 0, phase: 'import', table: '', lastRecordId: '' });
       emitSyncStateChange();
     }
     console.log('[sync] cloud pull completed:', {
@@ -922,8 +996,9 @@ export async function resetLocalCacheAndPull() {
   }
   syncing = true;
   syncStartedAt = Date.now();
+  lastSyncProgressAt = Date.now();
   waitingForWifi = false;
-  syncProgress = { done: 0, total: 0, failed: 0 };
+  touchSyncProgress({ done: 0, total: 0, failed: 0, phase: 'reset', table: '', lastRecordId: '' });
   lastError = '';
   const runId = activeSyncRunId + 1;
   activeSyncRunId = runId;

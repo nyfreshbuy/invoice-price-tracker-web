@@ -515,6 +515,29 @@ async function putMany(table, records, options = {}) {
   if (!options.silent) window.dispatchEvent(new CustomEvent('local-db-change', { detail: { table } }));
 }
 
+async function putRemoteChunk(table, rows) {
+  const { tx, objectStore } = await store(table, 'readwrite');
+  for (const row of rows) objectStore.put(repairRecordEncoding(row));
+  await new Promise((resolve, reject) => {
+    tx.oncomplete = resolve;
+    tx.onerror = () => reject(tx.error);
+    tx.onabort = () => reject(tx.error || new Error(`IndexedDB transaction aborted for ${table}`));
+  });
+}
+
+function recordSyncErrorInfo(table, record = {}, error) {
+  return {
+    table,
+    id: record.id || '',
+    localId: record.localId || '',
+    serverId: record.serverId || '',
+    invoiceNo: record.invoiceNo || '',
+    updatedAt: record.updatedAt || '',
+    message: error?.message || String(error || ''),
+    name: error?.name || ''
+  };
+}
+
 async function get(table, id) {
   const { objectStore } = await store(table);
   return promisify(objectStore.get(id));
@@ -654,13 +677,13 @@ function safeArchiveSegment(value = '') {
     .slice(0, 80) || 'Unknown Supplier';
 }
 
-function buildArchivePath({ supplierName = '', invoiceDate = '', invoiceNo = '', pageNumber = 1, fileHash = '', originalFileName = '' } = {}) {
-  const supplierFolder = safeArchiveSegment(supplierName);
+function buildArchivePath({ companyName = '', supplierName = '', invoiceDate = '', invoiceNo = '', pageNumber = 1, fileHash = '', originalFileName = '' } = {}) {
+  const companyFolder = safeArchiveSegment(companyName || supplierName);
   const month = invoiceMonth(invoiceDate);
   const datePart = /^\d{4}-\d{2}-\d{2}$/.test(String(invoiceDate || '')) ? invoiceDate : 'undated';
   const invoicePart = safeArchiveSegment(invoiceNo || (fileHash ? fileHash.slice(0, 8) : String(originalFileName || 'invoice').replace(/\.[^.]+$/, '')));
   const ext = (String(originalFileName || '').match(/\.[A-Za-z0-9]+$/)?.[0] || '.jpg').toLowerCase();
-  const archiveFolder = `InvoiceArchive/${supplierFolder}/${month}`;
+  const archiveFolder = `InvoiceArchive/${companyFolder}/${month}`;
   return {
     archiveFolder,
     invoiceMonth: month,
@@ -825,6 +848,30 @@ export const localDb = {
     return clearedByTable;
   },
 
+  async clearPendingRecordsWithServerId() {
+    const clearedByTable = {};
+    for (const table of syncTables) {
+      const stale = (await all(table)).filter((record) => (
+        belongsToCurrentCompany(record)
+        && record.serverId
+        && record.syncStatus === 'pending'
+        && !record.deletedAt
+      ));
+      if (!stale.length) continue;
+      await putMany(table, stale.map((record) => ({
+        ...record,
+        syncStatus: 'synced',
+        pendingSync: false,
+        dirty: false,
+        syncError: '',
+        syncNote: record.syncNote || 'cleared pending state for existing server record',
+        syncedAt: record.syncedAt || nowIso()
+      })));
+      clearedByTable[table] = stale.length;
+    }
+    return clearedByTable;
+  },
+
   async getPendingDebugDetails() {
     const pending = await this.getPendingChanges();
     return syncTables.flatMap((table) => (pending[table] || []).map((record) => ({
@@ -935,9 +982,10 @@ export const localDb = {
     for (const record of records) {
       for (const key of [record.serverId, record.id].filter(Boolean)) localByKey.set(key, record);
     }
-    const { tx, objectStore } = await store(table, 'readwrite');
     let imported = 0;
     let skipped = 0;
+    const rows = [];
+    const failedRecords = [];
     for (const remote of incoming) {
       const repairedRemote = repairRecordEncoding(remote);
       const encodingFixed = repairedRemote !== remote;
@@ -947,12 +995,12 @@ export const localDb = {
         continue;
       }
       if (local && local.syncStatus === 'pending' && local.updatedAt <= remote.updatedAt && ['invoices', 'invoice_items'].includes(table)) {
-        objectStore.put(repairRecordEncoding({ ...local, syncStatus: 'conflict', conflictRecord: JSON.stringify(repairedRemote) }));
+        rows.push(repairRecordEncoding({ ...local, syncStatus: 'conflict', conflictRecord: JSON.stringify(repairedRemote) }));
         imported += 1;
         continue;
       }
       const id = local?.id || remote.serverId || remote.id || generateId();
-      objectStore.put(repairRecordEncoding({
+      rows.push(repairRecordEncoding({
         ...repairedRemote,
         id,
         localId: local?.localId || remote.localId || id,
@@ -967,13 +1015,31 @@ export const localDb = {
       }));
       imported += 1;
     }
-    await new Promise((resolve, reject) => {
-      tx.oncomplete = resolve;
-      tx.onerror = () => reject(tx.error);
-      tx.onabort = () => reject(tx.error || new Error(`IndexedDB transaction aborted for ${table}`));
-    });
+    const batchSize = Number(options.batchSize || 50);
+    for (let index = 0; index < rows.length; index += batchSize) {
+      const chunk = rows.slice(index, index + batchSize);
+      try {
+        await putRemoteChunk(table, chunk);
+      } catch (batchError) {
+        console.warn('[IndexedDB] batch write failed, falling back to single records', {
+          table,
+          chunkStart: index,
+          chunkSize: chunk.length,
+          error: batchError?.message || String(batchError || '')
+        });
+        for (const row of chunk) {
+          try {
+            await putRemoteChunk(table, [row]);
+          } catch (singleError) {
+            failedRecords.push(recordSyncErrorInfo(table, row, singleError));
+            imported = Math.max(0, imported - 1);
+            console.error('[IndexedDB] single remote record write failed', recordSyncErrorInfo(table, row, singleError));
+          }
+        }
+      }
+    }
     if (!options.silent) window.dispatchEvent(new CustomEvent('local-db-change', { detail: { table } }));
-    return { table, imported, skipped };
+    return { table, imported, skipped, failed: failedRecords.length, failedRecords };
   },
 
   async getSuppliers() {
@@ -1076,6 +1142,8 @@ export const localDb = {
     if (!fileList.length) throw new Error('No files selected');
     const timestamp = nowIso();
     const sessionId = options.id || generateId();
+    const currentCompanyName = options.companyName || options.defaultCompanyName || '我的公司';
+    const uploadDate = today();
     const existingPages = (await all('invoice_pages')).filter(active);
     const existingHashes = new Set(existingPages.map((page) => page.fileHash).filter(Boolean));
     const session = syncFields({
@@ -1108,6 +1176,13 @@ export const localDb = {
       }
       const groupKey = pageInfo.groupKey || pageId;
       if (!groupsByKey.has(groupKey)) groupsByKey.set(groupKey, []);
+      const archiveFields = buildArchivePath({
+        companyName: currentCompanyName,
+        invoiceDate: uploadDate,
+        pageNumber: pageInfo.pageNumber || index + 1,
+        fileHash,
+        originalFileName: file.name || `image-${index + 1}`
+      });
       const page = syncFields({
         id: pageId,
         localId: pageId,
@@ -1120,8 +1195,12 @@ export const localDb = {
         pageCount: pageInfo.pageCount,
         originalFileName: file.name || `image-${index + 1}`,
         originalFilePath: file.name || '',
-        archiveFilePath: '',
-        archiveFolder: '',
+        archiveFilePath: archiveFields.archiveFilePath,
+        archiveFolder: archiveFields.archiveFolder,
+        invoiceMonth: archiveFields.invoiceMonth,
+        archiveStatus: duplicateFile ? 'skipped_duplicate' : 'local',
+        assignedCompanyName: currentCompanyName,
+        companyName: currentCompanyName,
         fileHash,
         fileSize: Number(file.size || 0),
         imageId: duplicateFile ? '' : imageId,
@@ -1146,16 +1225,18 @@ export const localDb = {
         serverId: groupId,
         importSessionId: sessionId,
         supplierId: '',
-        supplierName: '',
+        supplierName: currentCompanyName,
         invoiceNo: '',
-        invoiceDate: '',
+        invoiceDate: uploadDate,
         confidence: key === groupPages[0]?.id ? 0.2 : 0.55,
-        reason: key === groupPages[0]?.id ? 'Initial single-page group; confirm or merge if needed.' : 'Grouped by filename page pattern.',
+        reason: key === groupPages[0]?.id ? 'Assigned to current company folder before full AI recognition.' : 'Grouped by filename page pattern and assigned to current company folder.',
         status: 'needs_review',
         pageIds: JSON.stringify(pageIds),
         pageCount: groupPages.length,
         totalAmount: 0,
-        aiSupplierNameCandidate: ''
+        aiSupplierNameCandidate: '',
+        fixedCompanyName: currentCompanyName,
+        assignedCompanyName: currentCompanyName
       }));
       for (const page of groupPages) page.invoiceGroupId = groupId;
     }

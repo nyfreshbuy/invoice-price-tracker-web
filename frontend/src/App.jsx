@@ -833,6 +833,8 @@ function MergeInvoiceDialog({ invoice, onClose, onMerged }) {
 function BatchImportPage() {
   const navigate = useNavigate();
   const fileInputRef = useRef(null);
+  const session = getAuthSession();
+  const currentCompanyName = displayCompanyName(session);
   const [entries, setEntries] = useState([]);
   const [existingInvoices, setExistingInvoices] = useState([]);
   const [message, setMessage] = useState('');
@@ -907,7 +909,7 @@ function BatchImportPage() {
     setSaving(true);
     let createdSession = null;
     try {
-      createdSession = await localDb.createImportSessionFromFiles(fileList);
+      createdSession = await localDb.createImportSessionFromFiles(fileList, { companyName: currentCompanyName });
       setImportSession(createdSession);
     } catch (error) {
       setMessage(error.message || 'Import session create failed');
@@ -944,6 +946,9 @@ function BatchImportPage() {
       data.append('image', entry.file);
       data.append('batchId', nextBatchId);
       data.append('importSessionId', createdSession?.session?.id || nextBatchId);
+      data.append('companyName', currentCompanyName);
+      data.append('fixedCompanyName', currentCompanyName);
+      data.append('supplierHint', currentCompanyName);
       if (entry.group?.id) data.append('invoiceGroupId', entry.group.id);
       if (entry.page?.id) data.append('invoicePageId', entry.page.id);
       try {
@@ -974,6 +979,9 @@ function BatchImportPage() {
     const data = new FormData();
     data.append('image', entry.file);
     data.append('batchId', batchId || generateId());
+    data.append('companyName', currentCompanyName);
+    data.append('fixedCompanyName', currentCompanyName);
+    data.append('supplierHint', currentCompanyName);
     if (importSession?.session?.id) data.append('importSessionId', importSession.session.id);
     if (entry.group?.id) data.append('invoiceGroupId', entry.group.id);
     if (entry.page?.id) data.append('invoicePageId', entry.page.id);
@@ -1475,58 +1483,49 @@ function InvoiceArchivePage() {
 function buildArchiveFileSystem(tree, companyName, sortMode = 'name') {
   const nodeIndex = new Map();
   const allFiles = [];
-  let supplierCount = 0;
+  const supplierNames = new Set();
   let invoiceCount = 0;
   let storageBytes = 0;
   const root = createArchiveNode('root', 'Home', 'root', '');
-  const companyNode = createArchiveNode('company', companyName || '我的公司', 'company', root.key);
+  const companyNode = createArchiveNode('company', companyName || '\u6211\u7684\u516c\u53f8', 'company', root.key);
   root.children.push(companyNode);
 
-  const suppliers = safeArray(tree).map((supplier) => ({
-    ...supplier,
-    supplierName: normalizeArchiveLabel(supplier?.supplierName || '未分类')
-  }));
-  supplierCount = suppliers.length;
-  sortArchiveEntries(suppliers, sortMode, (supplier) => supplier.supplierName);
+  const monthMap = new Map();
+  for (const supplier of safeArray(tree)) {
+    const supplierName = normalizeArchiveLabel(supplier?.supplierName || '\u672a\u5206\u7c7b');
+    if (supplierName) supplierNames.add(supplierName);
+    for (const month of safeArray(supplier?.months)) {
+      const monthKey = month?.month || '\u672a\u5206\u7c7b\u6708\u4efd';
+      if (!monthMap.has(monthKey)) monthMap.set(monthKey, []);
+      monthMap.get(monthKey).push(...safeArray(month?.invoices).map((invoice) => ({
+        ...invoice,
+        supplierName: normalizeArchiveLabel(invoice?.supplierDisplayName || invoice?.supplierName || supplierName || '\u672a\u5206\u7c7b')
+      })));
+    }
+  }
 
-  for (const supplier of suppliers) {
-    const supplierNode = createArchiveNode(`supplier:${supplier.supplierName}`, supplier.supplierName || '未分类', 'supplier', companyNode.key);
-    supplierNode.meta = `${Number(supplier.invoiceCount || 0)} 张`;
-    companyNode.children.push(supplierNode);
-    const yearMap = new Map();
-    for (const month of safeArray(supplier.months)) {
-      const monthKey = month?.month || '未分类月份';
-      const year = monthKey.slice(0, 4) || '未分类';
-      const yearLabel = /^\d{4}$/.test(year) ? `${year}年` : year;
-      if (!yearMap.has(yearLabel)) {
-        const yearNode = createArchiveNode(`year:${supplier.supplierName}:${yearLabel}`, yearLabel, 'year', supplierNode.key);
-        yearMap.set(yearLabel, yearNode);
-        supplierNode.children.push(yearNode);
+  const months = [...monthMap.entries()].map(([monthKey, invoices]) => ({ monthKey, invoices }));
+  sortArchiveEntries(months, sortMode, (month) => month.monthKey);
+  for (const month of months) {
+    const monthNode = createArchiveNode(`month:${month.monthKey}`, formatArchiveMonth(month.monthKey), 'month', companyNode.key);
+    const monthInvoices = safeArray(month.invoices);
+    sortArchiveEntries(monthInvoices, sortMode, (invoice) => `${invoice?.invoiceDate || ''} ${invoice?.invoiceNo || ''}`);
+    let sequence = 1;
+    for (const invoice of monthInvoices) {
+      invoiceCount += 1;
+      const supplierName = normalizeArchiveLabel(invoice?.supplierDisplayName || invoice?.supplierName || '\u672a\u5206\u7c7b');
+      if (supplierName) supplierNames.add(supplierName);
+      const files = archiveFilesForInvoice(invoice, sequence);
+      sequence += files.length || 1;
+      for (const file of files) {
+        storageBytes += Number(file.size || 0);
+        file.parentKey = monthNode.key;
+        monthNode.files.push(file);
+        allFiles.push(file);
       }
-      const yearNode = yearMap.get(yearLabel);
-      const monthLabel = formatArchiveMonth(monthKey);
-      const monthNode = createArchiveNode(`month:${supplier.supplierName}:${monthKey}`, monthLabel, 'month', yearNode.key);
-      monthNode.meta = `${Number(month?.invoiceCount || 0)} 张`;
-      const monthInvoices = safeArray(month?.invoices);
-      sortArchiveEntries(monthInvoices, sortMode, (invoice) => `${invoice?.invoiceDate || ''} ${invoice?.invoiceNo || ''}`);
-      let sequence = 1;
-      for (const invoice of monthInvoices) {
-        invoiceCount += 1;
-        const files = archiveFilesForInvoice(invoice, sequence);
-        sequence += files.length || 1;
-        for (const file of files) {
-          storageBytes += Number(file.size || 0);
-          file.parentKey = monthNode.key;
-          monthNode.files.push(file);
-          allFiles.push(file);
-        }
-      }
-      yearNode.children.push(monthNode);
     }
-    for (const yearNode of supplierNode.children) {
-      sortArchiveEntries(yearNode.children, sortMode, (node) => node.label);
-      yearNode.meta = `${yearNode.children.reduce((sum, monthNode) => sum + safeArray(monthNode.files).length, 0)} 张`;
-    }
+    monthNode.meta = `${safeArray(monthNode.files).length} \u5f20`;
+    companyNode.children.push(monthNode);
   }
 
   const visit = (node) => {
@@ -1534,9 +1533,8 @@ function buildArchiveFileSystem(tree, companyName, sortMode = 'name') {
     for (const child of safeArray(node.children)) visit(child);
   };
   visit(root);
-  return { root, nodeIndex, allFiles, stats: { supplierCount, invoiceCount, storageBytes } };
+  return { root, nodeIndex, allFiles, stats: { supplierCount: supplierNames.size, invoiceCount, storageBytes } };
 }
-
 function createArchiveNode(key, label, type, parentKey) {
   return {
     key,
@@ -1551,7 +1549,7 @@ function createArchiveNode(key, label, type, parentKey) {
 
 function normalizeArchiveLabel(value) {
   const text = String(value || '').trim();
-  if (!text || /^unknown supplier$/i.test(text) || text === '未命名供应商') return '未分类';
+  if (!text || /^unknown supplier$/i.test(text) || text === '\u672a\u547d\u540d\u4f9b\u5e94\u5546') return '\u672a\u5206\u7c7b';
   return text.replace(/\s+/g, ' ');
 }
 
@@ -1570,8 +1568,8 @@ function sortArchiveEntries(entries, sortMode, labelGetter) {
 
 function formatArchiveMonth(monthKey) {
   const match = String(monthKey || '').match(/^(\d{4})-(\d{1,2})/);
-  if (!match) return monthKey || '未分类月份';
-  return `${match[1]}年${Number(match[2])}月份`;
+  if (!match) return monthKey || '\u672a\u5206\u7c7b\u6708\u4efd';
+  return `${match[1]}-${String(Number(match[2])).padStart(2, '0')}`;
 }
 
 function archiveFilesForInvoice(invoice, startSequence = 1) {
@@ -4234,7 +4232,6 @@ function summarizePromoGroups(items = []) {
       effectiveUnitCost: group.actualQty > 0 ? group.invoiceAmount / group.actualQty : 0
     }));
 }
-
 
 
 
