@@ -144,15 +144,23 @@ async function request(path, options = {}) {
     options.signal.addEventListener('abort', () => controller.abort(), { once: true });
   }
   let response;
+  const url = `${API_BASE}${path}`;
+  const isSyncPull = path.startsWith('/api/sync/pull');
+  if (isSyncPull) {
+    console.log('[SYNC API] pull request', { url, method: options.method || 'GET' });
+  }
   try {
     const { timeoutMs: _timeoutMs, signal: _signal, ...fetchOptions } = options;
-    response = await fetch(`${API_BASE}${path}`, {
+    response = await fetch(url, {
       headers,
       ...fetchOptions,
       signal: controller.signal
     });
   } catch (error) {
     rememberApiDebug({ path, method: options.method || 'GET', status: 0, error: error?.message || 'network error' });
+    if (isSyncPull) {
+      console.error('[SYNC API] pull network error', { url, message: error?.message || 'network error', stack: error?.stack || '' });
+    }
     if (error?.name === 'AbortError') {
       throw makeApiError('请求超时，请稍后重试', { isTimeout: true, status: 0 });
     }
@@ -170,12 +178,27 @@ async function request(path, options = {}) {
       message = response.statusText || message;
     }
     rememberApiDebug({ path, method: options.method || 'GET', status: response.status, error: message });
+    if (isSyncPull) {
+      console.error('[SYNC API] pull failed', { url, status: response.status, statusText: response.statusText, error: message });
+    }
     throw makeApiError(message, { status: response.status });
   }
 
   const contentType = response.headers.get('content-type') || '';
   if (contentType.includes('application/json')) {
     const data = await response.json();
+    if (isSyncPull) {
+      const body = data?.data && typeof data.data === 'object' ? data.data : data;
+      console.log('[SYNC API] pull response', {
+        url,
+        status: response.status,
+        keys: Object.keys(data || {}),
+        dataKeys: body && typeof body === 'object' ? Object.keys(body) : [],
+        counts: body && typeof body === 'object'
+          ? Object.fromEntries(Object.entries(body).filter(([, value]) => Array.isArray(value)).map(([key, value]) => [key, value.length]))
+          : {}
+      });
+    }
     rememberApiDebug({ path, method: options.method || 'GET', status: response.status, response: summarizeApiPayload(data) });
     return data;
   }

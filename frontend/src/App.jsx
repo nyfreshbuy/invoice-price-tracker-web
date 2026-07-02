@@ -2503,12 +2503,19 @@ function ProductSearchPage() {
       const seq = searchSeq.current + 1;
       searchSeq.current = seq;
       const keyword = q;
+      const localDiagnostics = await localDb.getLocalDiagnostics().catch((error) => ({
+        counts: {
+          products: `error: ${error.message || error}`,
+          invoice_items: `error: ${error.message || error}`,
+          price_history: `error: ${error.message || error}`
+        }
+      }));
+      const snapshot = await getSyncSnapshot().catch((error) => ({
+        label: '同步状态读取失败',
+        lastError: error.message || String(error)
+      }));
       try {
-        const [data, localDiagnostics, snapshot] = await Promise.all([
-          localDb.searchProducts(keyword),
-          localDb.getLocalDiagnostics(),
-          getSyncSnapshot()
-        ]);
+        const data = await localDb.searchProducts(keyword);
         if (!cancelled && searchSeq.current === seq) {
           setResults(safeArray(data));
           setDiagnostics(localDiagnostics);
@@ -2518,7 +2525,8 @@ function ProductSearchPage() {
         recordPageError(error, { componentStack: 'ProductSearchPage' }, 'searchProducts');
         if (!cancelled && searchSeq.current === seq) {
           setResults([]);
-          setSyncSnapshot(await getSyncSnapshot().catch(() => null));
+          setDiagnostics(localDiagnostics);
+          setSyncSnapshot(snapshot);
         }
       }
     };
@@ -2535,6 +2543,11 @@ function ProductSearchPage() {
   const productResults = safeArray(results);
   const hasKeyword = q.trim().length > 0;
   const counts = diagnostics?.counts || {};
+  const syncErrorText = syncSnapshot?.lastError
+    || syncSnapshot?.diagnostic?.error
+    || (syncSnapshot?.diagnostic?.status === 'failed' ? '同步失败但未返回错误，请查看 Console [SYNC]' : '')
+    || (syncSnapshot?.diagnostic?.warningCount ? `同步有 ${syncSnapshot.diagnostic.warningCount} 个警告` : '')
+    || '\u65e0';
   const noLocalData = Number(counts.invoice_items || 0) === 0 && Number(counts.price_history || 0) === 0 && Number(counts.products || 0) === 0;
   const emptyText = hasKeyword
     ? '\u6ca1\u6709\u627e\u5230\u76f8\u5173\u5546\u54c1'
@@ -2554,7 +2567,7 @@ function ProductSearchPage() {
           <Info label="invoice_items" value={counts.invoice_items ?? '-'} />
           <Info label="price_history" value={counts.price_history ?? '-'} />
           <Info label={'\u540c\u6b65\u72b6\u6001'} value={syncSnapshot?.label || '-'} />
-          <Info label={'\u540c\u6b65\u9519\u8bef'} value={syncSnapshot?.lastError || syncSnapshot?.diagnostic?.error || '\u65e0'} />
+          <Info label={'\u540c\u6b65\u9519\u8bef'} value={syncErrorText} />
         </Section>
       )}
       <div className="card-list">
@@ -4256,8 +4269,6 @@ function summarizePromoGroups(items = []) {
       effectiveUnitCost: group.actualQty > 0 ? group.invoiceAmount / group.actualQty : 0
     }));
 }
-
-
 
 
 

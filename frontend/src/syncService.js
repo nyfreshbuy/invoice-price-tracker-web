@@ -202,6 +202,19 @@ function hasCoreBusinessData(stats = {}) {
     .some((table) => Number(stats?.[table] || 0) > 0);
 }
 
+function extractPullData(payload = {}) {
+  if (payload?.data && typeof payload.data === 'object') return payload.data;
+  const rootData = {};
+  for (const table of syncTables) {
+    if (Array.isArray(payload?.[table])) rootData[table] = payload[table];
+  }
+  return rootData;
+}
+
+function pullDataCounts(data = {}) {
+  return Object.fromEntries(syncTables.map((table) => [table, Array.isArray(data?.[table]) ? data[table].length : 0]));
+}
+
 function resultKey(result = {}) {
   const record = result.record || {};
   return [
@@ -809,7 +822,8 @@ export async function syncNow({ force = false, reason = 'manual' } = {}) {
       }
     });
     const pulled = await api.syncPull(hasLocalData ? (meta?.value || '') : '');
-    pulledTotal = totalSyncRecords(pulled.data || {});
+    const pulledData = extractPullData(pulled);
+    pulledTotal = totalSyncRecords(pulledData);
     if (pulledTotal > 0) {
       touchSyncProgress({ done: 0, total: pulledTotal, failed: syncProgress.failed || 0, phase: 'import', table: '', lastRecordId: '' });
       emitSyncStateChange();
@@ -818,12 +832,13 @@ export async function syncNow({ force = false, reason = 'manual' } = {}) {
       companyId,
       since: hasLocalData ? (meta?.value || '') : '',
       backend: pulled.backend || '',
-      counts: Object.fromEntries(syncTables.map((table) => [table, (pulled.data?.[table] || []).length]))
+      responseKeys: Object.keys(pulled || {}),
+      counts: pullDataCounts(pulledData)
     });
-    console.log('[SYNC] pull response counts', Object.fromEntries(syncTables.map((table) => [table, (pulled.data?.[table] || []).length])));
+    console.log('[SYNC] pull response counts', pullDataCounts(pulledData));
     const importWarnings = [];
     for (const table of syncTables) {
-      const records = pulled.data?.[table] || [];
+      const records = pulledData?.[table] || [];
       console.log(`[SYNC] importing ${table} count`, records.length);
       const result = await importPulledTable(table, records, importWarnings);
       console.log(`[SYNC] imported ${table}`, result);
@@ -834,12 +849,12 @@ export async function syncNow({ force = false, reason = 'manual' } = {}) {
       : null;
     const statsAfterProductRebuild = await localDb.getStats().catch(() => ({}));
     console.log('[SYNC FRONTEND] products restore summary', {
-      cloudProducts: (pulled.data?.products || []).length,
+      cloudProducts: (pulledData?.products || []).length,
       localProductsBefore: statsBeforeProductRebuild.products ?? null,
       localProductsAfter: statsAfterProductRebuild.products ?? null,
       rebuiltCreated: productRebuild?.created || 0,
       rebuiltUpdatedReferences: productRebuild?.updatedReferences || 0,
-      deletedProducts: (pulled.data?.products || []).filter((record) => record?.deletedAt).length
+      deletedProducts: (pulledData?.products || []).filter((record) => record?.deletedAt).length
     });
     window.dispatchEvent(new Event('local-db-change'));
     console.log('[SYNC] import finished', { warnings: importWarnings });
@@ -973,7 +988,8 @@ export async function pullFromCloud({ full = false } = {}) {
     const shouldFullPull = full || !hasCoreBusinessData(stats);
     const meta = shouldFullPull ? null : await localDb.getMeta(metaKey);
     const pulled = await api.syncPull(meta?.value || '');
-    const restorePullTotal = totalSyncRecords(pulled.data || {});
+    const pulledData = extractPullData(pulled);
+    const restorePullTotal = totalSyncRecords(pulledData);
     if (restorePullTotal > 0) {
       touchSyncProgress({ done: 0, total: restorePullTotal, failed: 0, phase: 'import', table: '', lastRecordId: '' });
       emitSyncStateChange();
@@ -989,12 +1005,13 @@ export async function pullFromCloud({ full = false } = {}) {
         price_history: stats.price_history || 0
       },
       backend: pulled.backend || '',
-      counts: Object.fromEntries(syncTables.map((table) => [table, (pulled.data?.[table] || []).length]))
+      responseKeys: Object.keys(pulled || {}),
+      counts: pullDataCounts(pulledData)
     });
-    console.log('[SYNC] pull response counts', Object.fromEntries(syncTables.map((table) => [table, (pulled.data?.[table] || []).length])));
+    console.log('[SYNC] pull response counts', pullDataCounts(pulledData));
     const importWarnings = [];
     for (const table of syncTables) {
-      const records = pulled.data?.[table] || [];
+      const records = pulledData?.[table] || [];
       console.log(`[SYNC] importing ${table} count`, records.length);
       const result = await importPulledTable(table, records, importWarnings);
       console.log(`[SYNC] imported ${table}`, result);
@@ -1026,7 +1043,7 @@ export async function pullFromCloud({ full = false } = {}) {
       lastSyncAt: latestLastSyncAt,
       lastSyncError: '',
       pushCount: 0,
-      pullCount: totalSyncRecords(pulled.data || {}),
+      pullCount: totalSyncRecords(pulledData),
       pendingCount: await localDb.getPendingCount()
     });
     lastError = '';
