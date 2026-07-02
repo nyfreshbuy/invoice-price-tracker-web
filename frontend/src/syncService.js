@@ -535,6 +535,13 @@ export async function syncNow({ force = false, reason = 'manual' } = {}) {
       }
     }
 
+    const clearedRemoteRepairPending = typeof localDb.clearRemoteRepairPendingRecords === 'function'
+      ? await localDb.clearRemoteRepairPendingRecords()
+      : {};
+    if (Object.keys(clearedRemoteRepairPending).length) {
+      console.log('[SYNC FRONTEND] cleared remote repair pending records', clearedRemoteRepairPending);
+    }
+
     const pending = await localDb.getPendingChanges();
     const pendingRecords = flattenPendingChanges(pending);
     const pendingDetails = await localDb.getPendingDebugDetails();
@@ -664,6 +671,10 @@ export async function syncNow({ force = false, reason = 'manual' } = {}) {
     });
     const pulled = await api.syncPull(hasLocalData ? (meta?.value || '') : '');
     pulledTotal = totalSyncRecords(pulled.data || {});
+    if (pulledTotal > 0) {
+      syncProgress = { done: 0, total: pulledTotal, failed: syncProgress.failed || 0 };
+      emitSyncStateChange();
+    }
     console.log('[SYNC] pull finish', {
       companyId,
       since: hasLocalData ? (meta?.value || '') : '',
@@ -688,6 +699,11 @@ export async function syncNow({ force = false, reason = 'manual' } = {}) {
         console.error('[SYNC] failed table:', table, details);
         if (CORE_PULL_TABLES.has(table)) throw error;
         importWarnings.push({ table, ...details });
+      } finally {
+        if (records.length) {
+          syncProgress.done = Math.min(syncProgress.total, syncProgress.done + records.length);
+          emitSyncStateChange();
+        }
       }
     }
     console.log('[SYNC] import finished', { warnings: importWarnings });
@@ -799,6 +815,11 @@ export async function pullFromCloud({ full = false } = {}) {
     const metaKey = `lastPullAt:${companyId}`;
     const meta = full ? null : await localDb.getMeta(metaKey);
     const pulled = await api.syncPull(meta?.value || '');
+    const restorePullTotal = totalSyncRecords(pulled.data || {});
+    if (restorePullTotal > 0) {
+      syncProgress = { done: 0, total: restorePullTotal, failed: 0 };
+      emitSyncStateChange();
+    }
     console.log('[sync] cloud pull completed:', {
       companyId,
       full,
@@ -824,6 +845,11 @@ export async function pullFromCloud({ full = false } = {}) {
         console.error('[SYNC] failed table:', table, details);
         if (CORE_PULL_TABLES.has(table)) throw error;
         importWarnings.push({ table, ...details });
+      } finally {
+        if (records.length) {
+          syncProgress.done = Math.min(syncProgress.total, syncProgress.done + records.length);
+          emitSyncStateChange();
+        }
       }
     }
     console.log('[SYNC] import finished', { warnings: importWarnings });

@@ -799,6 +799,31 @@ export const localDb = {
     return retriedByTable;
   },
 
+  async clearRemoteRepairPendingRecords() {
+    const clearedByTable = {};
+    for (const table of syncTables) {
+      const stale = (await all(table)).filter((record) => (
+        belongsToCurrentCompany(record)
+        && record.serverId
+        && record.syncStatus === 'pending'
+        && record.encodingFixedAt
+        && !record.deletedAt
+      ));
+      if (!stale.length) continue;
+      await putMany(table, stale.map((record) => ({
+        ...record,
+        syncStatus: 'synced',
+        pendingSync: false,
+        dirty: false,
+        syncError: '',
+        syncNote: record.syncNote || 'cleared remote repair pending state',
+        syncedAt: record.syncedAt || nowIso()
+      })));
+      clearedByTable[table] = stale.length;
+    }
+    return clearedByTable;
+  },
+
   async getPendingDebugDetails() {
     const pending = await this.getPendingChanges();
     return syncTables.flatMap((table) => (pending[table] || []).map((record) => ({
@@ -891,7 +916,10 @@ export const localDb = {
       id,
       localId: local?.localId || remote.localId || id,
       serverId: remote.serverId || remote.id,
-      syncStatus: remote.deletedAt ? 'deleted' : (encodingFixed ? 'pending' : 'synced'),
+      syncStatus: remote.deletedAt ? 'deleted' : 'synced',
+      pendingSync: false,
+      dirty: false,
+      syncError: '',
       encodingFixedAt: encodingFixed ? nowIso() : repairedRemote.encodingFixedAt,
       updatedAt: encodingFixed ? nowIso() : repairedRemote.updatedAt,
       version: Number(remote.version || local?.version || 1)
@@ -928,7 +956,10 @@ export const localDb = {
         id,
         localId: local?.localId || remote.localId || id,
         serverId: remote.serverId || remote.id,
-        syncStatus: remote.deletedAt ? 'deleted' : (encodingFixed ? 'pending' : 'synced'),
+        syncStatus: remote.deletedAt ? 'deleted' : 'synced',
+        pendingSync: false,
+        dirty: false,
+        syncError: '',
         encodingFixedAt: encodingFixed ? nowIso() : repairedRemote.encodingFixedAt,
         updatedAt: encodingFixed ? nowIso() : repairedRemote.updatedAt,
         version: Number(remote.version || local?.version || 1)
