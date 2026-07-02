@@ -491,15 +491,74 @@ function promisify(request) {
   });
 }
 
-async function all(table) {
+function txDone(tx, table) {
+  return new Promise((resolve, reject) => {
+    tx.oncomplete = resolve;
+    tx.onerror = () => reject(tx.error || new Error(`IndexedDB transaction error for ${table}`));
+    tx.onabort = () => reject(tx.error || new Error(`IndexedDB transaction aborted for ${table}`));
+  });
+}
+
+function isInactiveTransactionError(error) {
+  const message = String(error?.message || error || '');
+  const name = String(error?.name || '');
+  return name === 'TransactionInactiveError'
+    || message.includes('without an in-progress transaction')
+    || message.includes('transaction is not active')
+    || message.includes('transaction inactive');
+}
+
+function waitForNextTick() {
+  return new Promise((resolve) => setTimeout(resolve, 0));
+}
+
+async function cursorAll(table) {
   const { objectStore } = await store(table);
-  return promisify(objectStore.getAll());
+  return new Promise((resolve, reject) => {
+    const rows = [];
+    const request = objectStore.openCursor();
+    request.onsuccess = () => {
+      const cursor = request.result;
+      if (!cursor) {
+        resolve(rows);
+        return;
+      }
+      rows.push(cursor.value);
+      cursor.continue();
+    };
+    request.onerror = () => reject(request.error);
+  });
+}
+
+async function all(table) {
+  let lastError;
+  for (let attempt = 0; attempt < 3; attempt += 1) {
+    try {
+      const { objectStore } = await store(table);
+      return await promisify(objectStore.getAll());
+    } catch (error) {
+      lastError = error;
+      if (!isInactiveTransactionError(error)) throw error;
+      console.warn('[IndexedDB] getAll transaction inactive, retrying', {
+        table,
+        attempt: attempt + 1,
+        error: error?.message || String(error || '')
+      });
+      await waitForNextTick();
+    }
+  }
+  console.warn('[IndexedDB] getAll retry failed, falling back to cursor scan', {
+    table,
+    error: lastError?.message || String(lastError || '')
+  });
+  return cursorAll(table);
 }
 
 async function put(table, record) {
-  const { objectStore } = await store(table, 'readwrite');
+  const { tx, objectStore } = await store(table, 'readwrite');
   const nextRecord = table === 'invoice_images' ? record : repairRecordEncoding(record);
-  await promisify(objectStore.put(nextRecord));
+  objectStore.put(nextRecord);
+  await txDone(tx, table);
   window.dispatchEvent(new CustomEvent('local-db-change', { detail: { table } }));
   return nextRecord;
 }
@@ -507,22 +566,14 @@ async function put(table, record) {
 async function putMany(table, records, options = {}) {
   const { tx, objectStore } = await store(table, 'readwrite');
   for (const record of records) objectStore.put(table === 'invoice_images' ? record : repairRecordEncoding(record));
-  await new Promise((resolve, reject) => {
-    tx.oncomplete = resolve;
-    tx.onerror = () => reject(tx.error);
-    tx.onabort = () => reject(tx.error || new Error(`IndexedDB transaction aborted for ${table}`));
-  });
+  await txDone(tx, table);
   if (!options.silent) window.dispatchEvent(new CustomEvent('local-db-change', { detail: { table } }));
 }
 
 async function putRemoteChunk(table, rows) {
   const { tx, objectStore } = await store(table, 'readwrite');
   for (const row of rows) objectStore.put(repairRecordEncoding(row));
-  await new Promise((resolve, reject) => {
-    tx.oncomplete = resolve;
-    tx.onerror = () => reject(tx.error);
-    tx.onabort = () => reject(tx.error || new Error(`IndexedDB transaction aborted for ${table}`));
-  });
+  await txDone(tx, table);
 }
 
 function recordSyncErrorInfo(table, record = {}, error) {
@@ -544,8 +595,9 @@ async function get(table, id) {
 }
 
 async function remove(table, id) {
-  const { objectStore } = await store(table, 'readwrite');
-  await promisify(objectStore.delete(id));
+  const { tx, objectStore } = await store(table, 'readwrite');
+  objectStore.delete(id);
+  await txDone(tx, table);
   window.dispatchEvent(new CustomEvent('local-db-change', { detail: { table } }));
 }
 
