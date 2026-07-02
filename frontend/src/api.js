@@ -292,6 +292,7 @@ export const api = {
   resumeRecognitionBatch: (batchId) => request(`/api/invoice-recognition/batches/${encodeURIComponent(batchId)}/resume`, { method: 'POST' }),
   cancelRecognitionBatch: (batchId) => request(`/api/invoice-recognition/batches/${encodeURIComponent(batchId)}/cancel`, { method: 'POST' }),
   fileUrl,
+  syncPushBatch: (payload) => request('/api/sync/push/batch', { method: 'POST', body: JSON.stringify(payload), timeoutMs: 120000 }),
   syncPush: (payload) => request('/api/sync/push', { method: 'POST', body: JSON.stringify(payload), timeoutMs: 60000 }),
   syncPull: (since) => request(`/api/sync/pull${since ? `?since=${encodeURIComponent(since)}` : ''}`, { timeoutMs: 60000 }),
   syncStatus: () => request('/api/sync/status')

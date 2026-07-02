@@ -247,12 +247,72 @@ async function pushOneMongo(db, table, incoming, deviceId, companyId, syncContex
   return { table, localId: incoming.localId || incoming.id || record.localId, serverId: record.serverId, status: 'synced', record };
 }
 
+async function bulkPushMongoTable(db, table, records = [], deviceId, companyId) {
+  if (!records.length) return [];
+  const collection = db.collection(collectionName(table));
+  const prepared = records.map((incoming) => {
+    const serverId = incoming.serverId || incoming.id || id();
+    const record = cleanRecord(table, { ...incoming, id: serverId, serverId }, companyId, deviceId);
+    return { incoming, record };
+  });
+  const operations = prepared.map(({ record }) => ({
+    updateOne: {
+      filter: { companyId, serverId: record.serverId },
+      update: { $set: record, $setOnInsert: { _id: record.serverId } },
+      upsert: true
+    }
+  }));
+  const startedAt = Date.now();
+  try {
+    await collection.bulkWrite(operations, { ordered: false });
+    console.log('[SYNC PUSH BATCH] bulkWrite finish:', {
+      table,
+      count: records.length,
+      durationMs: Date.now() - startedAt
+    });
+    return prepared.map(({ incoming, record }) => ({
+      table,
+      localId: incoming.localId || incoming.id || record.localId,
+      serverId: record.serverId,
+      status: 'synced',
+      record
+    }));
+  } catch (error) {
+    console.error('[SYNC PUSH BATCH] bulkWrite failed, falling back to one-by-one:', {
+      table,
+      count: records.length,
+      durationMs: Date.now() - startedAt,
+      message: error?.message || String(error || '')
+    });
+    const results = [];
+    const fallbackContext = { changes: { [table]: records }, rejectedInvoiceIds: new Set() };
+    for (const record of records) {
+      results.push(await pushOneMongo(db, table, record, deviceId, companyId, fallbackContext));
+    }
+    return results;
+  }
+}
+
 export async function mongoSyncPush({ companyId, deviceId = 'unknown', changes = {} }) {
   const db = await getDb();
   const results = [];
   const syncContext = { changes, rejectedInvoiceIds: new Set() };
   for (const table of syncTables) {
     const records = Array.isArray(changes[table]) ? changes[table] : [];
+    if (table === 'price_history' && records.length > 1) {
+      const skipped = [];
+      const allowed = records.filter((record) => {
+        const relatedItem = (changes.invoice_items || []).find((item) => [item.id, item.localId, item.serverId].filter(Boolean).includes(record.invoiceItemId));
+        if (relatedItem && syncContext.rejectedInvoiceIds.has(relatedItem.invoiceId)) {
+          skipped.push({ table, localId: record.localId || record.id, serverId: '', status: 'skipped_duplicate_invoice', record: null });
+          return false;
+        }
+        return true;
+      });
+      results.push(...skipped);
+      results.push(...await bulkPushMongoTable(db, table, allowed, deviceId, companyId));
+      continue;
+    }
     for (const record of records) {
       if ((table === 'invoice_items' || table === 'invoice_discounts') && syncContext.rejectedInvoiceIds.has(record.invoiceId)) {
         results.push({ table, localId: record.localId || record.id, serverId: '', status: 'skipped_duplicate_invoice', record: null });
@@ -269,6 +329,10 @@ export async function mongoSyncPush({ companyId, deviceId = 'unknown', changes =
     }
   }
   return { ok: true, companyId, serverTime: nowIso(), results, backend: 'mongodb' };
+}
+
+export async function mongoSyncPushBatch({ companyId, deviceId = 'unknown', changes = {} }) {
+  return mongoSyncPush({ companyId, deviceId, changes });
 }
 
 export async function mongoSyncPull({ companyId, since = '' }) {

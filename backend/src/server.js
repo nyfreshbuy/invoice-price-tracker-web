@@ -72,7 +72,7 @@ import {
   toPublicMongoUser,
   updateMongoUserFromLegacy
 } from './services/mongoAccountStore.js';
-import { mongoSyncPull, mongoSyncPush, mongoSyncStatus } from './services/mongoSyncStore.js';
+import { mongoSyncPull, mongoSyncPush, mongoSyncPushBatch, mongoSyncStatus } from './services/mongoSyncStore.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
@@ -3464,7 +3464,91 @@ app.post('/api/account-connections/:id/reject', requireAccountAuth, asyncHandler
   res.json({ success: true, request });
 }));
 
+async function sqlSyncPush({ companyId, deviceId, changes, logLabel = '[SYNC PUSH SQL]' }) {
+  const results = [];
+  const syncContext = { changes, rejectedInvoiceIds: new Set(), integritySavedInvoiceIds: new Set() };
+  try {
+    await withTransaction(async (client) => {
+      for (const table of syncTables) {
+        const records = Array.isArray(changes[table]) ? changes[table] : [];
+        for (const record of records) {
+          if ((table === 'invoice_items' || table === 'invoice_discounts') && syncContext.rejectedInvoiceIds.has(record.invoiceId)) {
+            results.push({ table, localId: record.localId || record.id, serverId: '', status: 'skipped_duplicate_invoice', record: null });
+            continue;
+          }
+          if ((table === 'invoice_items' || table === 'invoice_discounts') && syncContext.integritySavedInvoiceIds.has(record.invoiceId)) {
+            results.push({ table, localId: record.localId || record.id, serverId: record.serverId || record.id || '', status: 'skipped_integrity_generated', record: null });
+            continue;
+          }
+          if (table === 'price_history') {
+            const relatedItem = (changes.invoice_items || []).find((item) => (item.id && item.id === record.invoiceItemId) || (item.localId && item.localId === record.invoiceItemId) || (item.serverId && item.serverId === record.invoiceItemId));
+            if (relatedItem && syncContext.rejectedInvoiceIds.has(relatedItem.invoiceId)) {
+              results.push({ table, localId: record.localId || record.id, serverId: '', status: 'skipped_duplicate_invoice', record: null });
+              continue;
+            }
+            if (relatedItem && syncContext.integritySavedInvoiceIds.has(relatedItem.invoiceId)) {
+              results.push({ table, localId: record.localId || record.id, serverId: record.serverId || record.id || '', status: 'skipped_integrity_generated', record: null });
+              continue;
+            }
+          }
+          results.push(await pushOne(table, record, deviceId, companyId, client, syncContext));
+        }
+      }
+    });
+  } catch (error) {
+    console.error(`${logLabel} error:`, { companyId, backend: usingPostgres ? 'postgres' : 'sqlite', message: error.message, stack: error.stack });
+    throw error;
+  }
+  return { ok: true, companyId, serverTime: nowIso(), results };
+}
+
 app.use('/api/ai-invoice', requireAuth, aiInvoiceRoutes);
+
+app.post('/api/sync/push/batch', requireAuth, asyncHandler(async (req, res) => {
+  const requestStartedAt = Date.now();
+  const deviceId = req.body.deviceId || 'unknown';
+  const companyId = req.user.companyId;
+  const changes = req.body.changes || {};
+  const counts = countSyncRecords(changes);
+  console.log('[SYNC PUSH BATCH] start:', { companyId, deviceId, backend: syncBackend, counts });
+  if (useMongoSync()) {
+    try {
+      const dbStartedAt = Date.now();
+      const result = await mongoSyncPushBatch({ companyId, deviceId, changes });
+      const results = Array.isArray(result.results) ? result.results : [];
+      console.log('[SYNC PUSH BATCH] finish:', {
+        companyId,
+        backend: 'mongodb',
+        requestDurationMs: Date.now() - requestStartedAt,
+        dbDurationMs: Date.now() - dbStartedAt,
+        resultCount: results.length,
+        resultTables: countSyncResultTables(results),
+        resultStatuses: countSyncResultStatuses(results)
+      });
+      res.json(result);
+      return;
+    } catch (error) {
+      console.error('[SYNC PUSH BATCH] error:', {
+        companyId,
+        backend: 'mongodb',
+        requestDurationMs: Date.now() - requestStartedAt,
+        message: error.message,
+        stack: error.stack
+      });
+      throw error;
+    }
+  }
+  const fallback = await sqlSyncPush({ companyId, deviceId, changes, logLabel: '[SYNC PUSH BATCH]' });
+  console.log('[SYNC PUSH BATCH] finish:', {
+    companyId,
+    backend: usingPostgres ? 'postgres' : 'sqlite',
+    requestDurationMs: Date.now() - requestStartedAt,
+    resultCount: fallback.results.length,
+    resultTables: countSyncResultTables(fallback.results),
+    resultStatuses: countSyncResultStatuses(fallback.results)
+  });
+  res.json(fallback);
+}));
 
 app.post('/api/sync/push', requireAuth, asyncHandler(async (req, res) => {
   const deviceId = req.body.deviceId || 'unknown';

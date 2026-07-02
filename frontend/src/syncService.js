@@ -1,12 +1,15 @@
 import { api, getAuthSession, getCompanyId } from './api.js';
 import { localDb, syncTables, getDeviceId, nowIso } from './localDb.js';
 
-const SYNC_BATCH_SIZE = 5;
+const SYNC_BATCH_SIZE = 50;
+const PRICE_HISTORY_SYNC_BATCH_SIZE = 200;
 const PULL_IMPORT_CHUNK_SIZE = 50;
 const AUTO_SYNC_INTERVAL_MS = 30 * 60 * 1000;
 const SYNC_TIMEOUT_MS = 10 * 60 * 1000;
 const SYNC_STALE_MS = 120 * 1000;
 const CORE_PULL_TABLES = new Set(['purchase_batches', 'suppliers', 'invoices', 'invoice_items', 'products', 'price_history']);
+const PUSH_TABLE_PRIORITY = ['suppliers', 'invoices', 'invoice_items', 'products'];
+const LOW_PRIORITY_PUSH_TABLES = new Set(['price_history']);
 
 let syncing = false;
 let lastError = '';
@@ -70,7 +73,39 @@ function armSyncWatchdog(runId) {
 }
 
 function flattenPendingChanges(changes) {
-  return syncTables.flatMap((table) => (changes[table] || []).map((record) => ({ table, record })));
+  const orderedTables = [
+    ...PUSH_TABLE_PRIORITY,
+    ...syncTables.filter((table) => !PUSH_TABLE_PRIORITY.includes(table) && !LOW_PRIORITY_PUSH_TABLES.has(table)),
+    ...syncTables.filter((table) => LOW_PRIORITY_PUSH_TABLES.has(table))
+  ];
+  return orderedTables.flatMap((table) => (changes[table] || []).map((record) => ({ table, record })));
+}
+
+function pushBatchSizeFor(table) {
+  return LOW_PRIORITY_PUSH_TABLES.has(table) ? PRICE_HISTORY_SYNC_BATCH_SIZE : SYNC_BATCH_SIZE;
+}
+
+function buildPushBatches(records = []) {
+  const batches = [];
+  let current = [];
+  let currentTable = '';
+  for (const entry of records) {
+    const size = pushBatchSizeFor(entry.table);
+    if (!current.length) {
+      current = [entry];
+      currentTable = entry.table;
+      continue;
+    }
+    if (entry.table !== currentTable || current.length >= size) {
+      batches.push(current);
+      current = [entry];
+      currentTable = entry.table;
+      continue;
+    }
+    current.push(entry);
+  }
+  if (current.length) batches.push(current);
+  return batches;
 }
 
 function buildBatchChanges(records) {
@@ -720,19 +755,25 @@ export async function syncNow({ force = false, reason = 'manual' } = {}) {
       touchSyncProgress({ done: 0, total: pendingRecords.length, failed: 0, phase: 'push', table: '', lastRecordId: '' });
       emitSyncStateChange();
 
-      for (let index = 0; index < pendingRecords.length; index += SYNC_BATCH_SIZE) {
-        const batch = pendingRecords.slice(index, index + SYNC_BATCH_SIZE);
+      const pushBatches = buildPushBatches(pendingRecords);
+      let processedPushRecords = 0;
+      for (let batchIndex = 0; batchIndex < pushBatches.length; batchIndex += 1) {
+        const batch = pushBatches[batchIndex];
+        const batchStart = processedPushRecords;
+        const batchTable = batch[0]?.table || '';
         try {
           const batchChanges = buildBatchChanges(batch);
           console.log('[SYNC FRONTEND] pushed table price_history count', (batchChanges.price_history || []).length);
           console.log('[SYNC FRONTEND] pushed table products count', (batchChanges.products || []).length);
-          const pushed = await api.syncPush({ deviceId, companyId, changes: batchChanges });
+          const pushed = await api.syncPushBatch({ deviceId, companyId, changes: batchChanges });
           const results = Array.isArray(pushed.results) ? pushed.results : [];
           pushedTotal += results.length;
           const resultTables = countResultsByTable(results);
           console.log('[SYNC] push batch finish', {
             companyId,
-            batchStart: index,
+            batchStart,
+            batchIndex,
+            batchTable,
             batchSize: batch.length,
             uploadCounts: Object.fromEntries(Object.entries(batchChanges).map(([table, records]) => [table, records.length]).filter(([, count]) => count > 0)),
             resultCount: results.length,
@@ -755,7 +796,9 @@ export async function syncNow({ force = false, reason = 'manual' } = {}) {
           console.log('[SYNC FRONTEND] pending after markSynced', remainingAfterBatch);
           console.log('[SYNC] local apply finish', {
             companyId,
-            batchStart: index,
+            batchStart,
+            batchIndex,
+            batchTable,
             appliedCount,
             notFoundCount,
             missingResultCount,
@@ -766,12 +809,12 @@ export async function syncNow({ force = false, reason = 'manual' } = {}) {
           });
         } catch (error) {
           lastError = error.message || '\u540c\u6b65\u5931\u8d25';
-          console.error('[SYNC] push error', { batchStart: index, batchSize: batch.length, error });
-          console.warn('[SYNC] retrying failed batch item-by-item', { batchStart: index, batchSize: batch.length });
+          console.error('[SYNC] push error', { batchStart, batchIndex, batchTable, batchSize: batch.length, error });
+          console.warn('[SYNC] retrying failed batch item-by-item', { batchStart, batchIndex, batchTable, batchSize: batch.length });
           for (const entry of batch) {
             try {
               const singleChanges = buildBatchChanges([entry]);
-              const pushed = await api.syncPush({ deviceId, companyId, changes: singleChanges });
+              const pushed = await api.syncPushBatch({ deviceId, companyId, changes: singleChanges });
               const singleResults = Array.isArray(pushed.results) ? pushed.results : [];
               pushedTotal += singleResults.length;
               const applied = await applyPushResults([entry], singleResults);
@@ -801,8 +844,9 @@ export async function syncNow({ force = false, reason = 'manual' } = {}) {
             }
           }
         } finally {
+          processedPushRecords += batch.length;
           touchSyncProgress({ done: Math.min(syncProgress.total, syncProgress.done + batch.length), phase: 'push' });
-          emitSyncStateChange();
+          if (processedPushRecords % 100 === 0 || processedPushRecords >= pendingRecords.length) emitSyncStateChange();
         }
       }
     }
