@@ -293,6 +293,55 @@ async function bulkPushMongoTable(db, table, records = [], deviceId, companyId) 
   }
 }
 
+async function upsertGeneratedPriceHistoryForItem(db, item = {}, companyId, deviceId) {
+  if (item.deletedAt || item.syncStatus === 'deleted') {
+    await db.collection('price_history').updateMany(
+      { companyId, invoiceItemId: { $in: [item.id, item.serverId, item.localId].filter(Boolean) } },
+      { $set: { deletedAt: item.deletedAt || nowIso(), syncStatus: 'deleted', updatedAt: nowIso() } }
+    );
+    return;
+  }
+  if (Number(item.isDiscountLine || 0) || Number(item.candidateOnly || 0) || Number(item.isFreeItem || 0)) return;
+  const price = Number(item.discountedEffectiveUnitCost || item.effectiveUnitCost || item.unitPrice || 0);
+  const amount = Number(item.totalPrice || 0);
+  const quantity = Number(item.actualQty || item.totalQty || item.quantity || 0);
+  const name = item.productNameOriginal || item.rawName || item.name || item.productNameNormalized || item.normalizedName || '';
+  if (!price || !amount || !quantity || !name) return;
+  const invoiceItemId = item.serverId || item.id || item.localId;
+  const serverId = `price-${invoiceItemId}`;
+  const record = cleanRecord('price_history', {
+    id: serverId,
+    serverId,
+    localId: serverId,
+    productId: item.productId || '',
+    invoiceId: item.invoiceId || '',
+    invoiceItemId,
+    supplierId: item.supplierId || '',
+    productName: name,
+    productNameOriginal: item.productNameOriginal || item.rawName || name,
+    productNameNormalized: item.productNameNormalized || item.normalizedName || name,
+    normalizedName: item.normalizedName || item.productNameNormalized || name,
+    originalName: item.productNameOriginal || item.rawName || name,
+    itemName: name,
+    name,
+    nameCn: item.nameCn || '',
+    nameEn: item.nameEn || '',
+    price,
+    quantity,
+    unit: item.unit || '',
+    invoiceDate: item.invoiceDate || '',
+    status: 'active',
+    createdAt: item.createdAt || nowIso(),
+    updatedAt: item.updatedAt || nowIso(),
+    deviceId
+  }, companyId, deviceId);
+  await db.collection('price_history').updateOne(
+    { companyId, invoiceItemId },
+    { $set: record, $setOnInsert: { _id: serverId } },
+    { upsert: true }
+  );
+}
+
 export async function mongoSyncPush({ companyId, deviceId = 'unknown', changes = {} }) {
   const db = await getDb();
   const results = [];
@@ -325,7 +374,11 @@ export async function mongoSyncPush({ companyId, deviceId = 'unknown', changes =
           continue;
         }
       }
-      results.push(await pushOneMongo(db, table, record, deviceId, companyId, syncContext));
+      const result = await pushOneMongo(db, table, record, deviceId, companyId, syncContext);
+      results.push(result);
+      if (table === 'invoice_items' && result.status === 'synced' && result.record) {
+        await upsertGeneratedPriceHistoryForItem(db, result.record, companyId, deviceId);
+      }
     }
   }
   return { ok: true, companyId, serverTime: nowIso(), results, backend: 'mongodb' };

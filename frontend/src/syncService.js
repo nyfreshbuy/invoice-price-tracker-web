@@ -10,6 +10,8 @@ const SYNC_STALE_MS = 120 * 1000;
 const CORE_PULL_TABLES = new Set(['purchase_batches', 'suppliers', 'invoices', 'invoice_items', 'products', 'price_history']);
 const PUSH_TABLE_PRIORITY = ['suppliers', 'invoices', 'invoice_items', 'products'];
 const LOW_PRIORITY_PUSH_TABLES = new Set(['price_history']);
+const CLIENT_PUSH_TABLES = new Set(['suppliers', 'invoices', 'invoice_items', 'products']);
+const CLIENT_GENERATED_TABLES = new Set(syncTables.filter((table) => !CLIENT_PUSH_TABLES.has(table)));
 
 let syncing = false;
 let lastError = '';
@@ -594,10 +596,10 @@ export async function getSyncSnapshot() {
   const session = getAuthSession();
   const companyId = getCompanyId();
   const [pendingCount, conflictCount, failedCount, pendingChanges, preferences, lastSync, diagnostic] = await Promise.all([
-    localDb.getPendingCount(),
+    localDb.getPendingCount({ excludeTables: [...CLIENT_GENERATED_TABLES] }),
     localDb.getConflictCount(),
     localDb.getFailedCount(),
-    localDb.getPendingChanges(),
+    localDb.getPendingChanges({ excludeTables: [...CLIENT_GENERATED_TABLES] }),
     getSyncPreferences(),
     lastSyncAt(),
     getSyncDiagnostic(companyId)
@@ -722,7 +724,14 @@ export async function syncNow({ force = false, reason = 'manual' } = {}) {
     if (Object.keys(clearedRemoteRepairPending).length) {
       console.log('[SYNC FRONTEND] cleared remote repair pending records', clearedRemoteRepairPending);
     }
-    const pending = await localDb.getPendingChanges();
+    for (const table of CLIENT_GENERATED_TABLES) {
+      const cleared = typeof localDb.markPendingTableAsSynced === 'function'
+        ? await localDb.markPendingTableAsSynced(table)
+        : 0;
+      if (cleared) console.log('[SYNC FRONTEND] cleared local-cache-only pending table', { table, cleared });
+    }
+
+    const pending = await localDb.getPendingChanges({ excludeTables: [...CLIENT_GENERATED_TABLES] });
     const pendingRecords = flattenPendingChanges(pending);
     const pendingDetails = await localDb.getPendingDebugDetails();
     await setSyncDiagnostic(companyId, {

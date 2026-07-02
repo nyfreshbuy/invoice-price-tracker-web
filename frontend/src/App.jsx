@@ -2086,12 +2086,17 @@ function InvoiceDetailPage() {
 function HomeDashboardPage() {
   const [dashboard, setDashboard] = useState(null);
   const load = () => {
-    const readDashboard = localDb.getDashboardStats || localDb.getDashboardMetrics;
-    if (typeof readDashboard !== 'function') {
-      setDashboard({});
-      return Promise.resolve();
-    }
-    return readDashboard.call(localDb).then((data) => setDashboard(data || {}));
+    const readLocalDashboard = localDb.getDashboardStats || localDb.getDashboardMetrics;
+    return api.getDashboardStats()
+      .then((data) => setDashboard(data || {}))
+      .catch((error) => {
+        console.warn('[dashboard] cloud stats failed, falling back to IndexedDB', error);
+        if (typeof readLocalDashboard !== 'function') {
+          setDashboard({});
+          return null;
+        }
+        return readLocalDashboard.call(localDb).then((data) => setDashboard(data || {}));
+      });
   };
   useLocalReload(load);
   return (
@@ -2515,7 +2520,13 @@ function ProductSearchPage() {
         lastError: error.message || String(error)
       }));
       try {
-        const data = await localDb.searchProducts(keyword);
+        let data;
+        try {
+          data = await api.searchProducts(keyword);
+        } catch (cloudError) {
+          console.warn('[products] cloud search failed, falling back to IndexedDB', cloudError);
+          data = await localDb.searchProducts(keyword);
+        }
         if (!cancelled && searchSeq.current === seq) {
           setResults(safeArray(data));
           setDiagnostics(localDiagnostics);
@@ -2553,7 +2564,7 @@ function ProductSearchPage() {
     ? '\u6ca1\u6709\u627e\u5230\u76f8\u5173\u5546\u54c1'
     : (noLocalData ? '\u672c\u5730\u6682\u65e0\u6570\u636e\uff0c\u8bf7\u5148\u540c\u6b65' : '\u672c\u5730\u6709\u6570\u636e\uff0c\u4f46\u6ca1\u6709\u53ef\u663e\u793a\u7684\u5546\u54c1\u8bb0\u5f55');
   return (
-    <Page title={'\u5546\u54c1\u4ef7\u683c\u67e5\u8be2'} subtitle={'\u4f18\u5148\u67e5\u8be2\u672c\u5730 IndexedDB\uff1b\u5f02\u5e38\u5546\u54c1\u4e0d\u4f1a\u8fdb\u5165\u6b63\u5f0f\u4ef7\u683c\u7edf\u8ba1\u3002'}>
+    <Page title={'\u5546\u54c1\u4ef7\u683c\u67e5\u8be2'} subtitle={'\u8054\u7f51\u65f6\u76f4\u63a5\u67e5\u8be2\u4e91\u7aef\u6570\u636e\uff1b\u79bb\u7ebf\u65f6\u4f7f\u7528\u672c\u5730 IndexedDB \u7f13\u5b58\u3002'}>
       <Section title={'\u641c\u7d22'}>
         <label className="field"><span>{'\u5546\u54c1\u540d\u79f0'}</span><input value={q} onChange={(event) => setQ(event.target.value)} placeholder={'\u5343\u9875\u8c46\u8150 / Rice Chips / ITOEN'} /></label>
         {!hasKeyword && <p className="hint">{'\u672a\u8f93\u5165\u5173\u952e\u8bcd\u65f6\u663e\u793a\u6700\u8fd1 20 \u4e2a\u8d2d\u4e70\u5546\u54c1\u3002'}</p>}
@@ -2591,11 +2602,47 @@ function ProductSearchPage() {
   );
 }
 
+function buildSupplierCompareFromRecords(records = []) {
+  const groups = new Map();
+  for (const record of safeArray(records)) {
+    const key = record?.supplierId || record?.supplierName || 'unknown';
+    const group = groups.get(key) || { supplierId: record?.supplierId || '', supplierName: record?.supplierName || '-', prices: [], recentDate: '', recentPrice: 0, count: 0 };
+    const price = Number(record?.effectiveUnitCost || record?.unitPrice || record?.price || 0);
+    if (price > 0) group.prices.push(price);
+    const date = record?.invoiceDate || record?.createdAt || '';
+    if (!group.recentDate || String(date).localeCompare(group.recentDate) > 0) {
+      group.recentDate = date;
+      group.recentPrice = price;
+    }
+    group.count += 1;
+    groups.set(key, group);
+  }
+  return [...groups.values()].map((group) => ({
+    supplierId: group.supplierId,
+    supplierName: group.supplierName,
+    recentPrice: group.recentPrice,
+    minPrice: group.prices.length ? Math.min(...group.prices) : 0,
+    count: group.count
+  }));
+}
+
 function ProductDetailPage() {
   const { name } = useParams();
   const decoded = decodeURIComponent(name || '');
   const [detail, setDetail] = useState(null);
-  const load = () => localDb.getProductDetail(decoded).then(setDetail);
+  const load = async () => {
+    try {
+      const records = await api.getProductPriceHistory(decoded);
+      setDetail({
+        standardName: decoded,
+        records: safeArray(records),
+        supplierCompare: buildSupplierCompareFromRecords(safeArray(records))
+      });
+    } catch (error) {
+      console.warn('[products] cloud price history failed, falling back to IndexedDB', error);
+      setDetail(await localDb.getProductDetail(decoded));
+    }
+  };
   useLocalReload(load, [decoded]);
   if (!detail) return <Page title="商品详情"><EmptyState text="暂无记录" /></Page>;
   const records = safeArray(detail.records);
@@ -2717,7 +2764,12 @@ function SupplierProductsPage() {
 }
 function PurchaseAnalysisPage() {
   const [analytics, setAnalytics] = useState(null);
-  const load = () => localDb.getPurchaseAnalytics().then((data) => setAnalytics(safeObject(data)));
+  const load = () => api.getPurchaseAnalytics()
+    .then((data) => setAnalytics(safeObject(data)))
+    .catch((error) => {
+      console.warn('[analytics] cloud analytics failed, falling back to IndexedDB', error);
+      return localDb.getPurchaseAnalytics().then((data) => setAnalytics(safeObject(data)));
+    });
   useLocalReload(load);
   if (!analytics) return <Page title="采购分析"><EmptyState text="正在读取本地分析数据" /></Page>;
   const supplierRanking = safeArray(analytics.supplierRanking);
@@ -3242,7 +3294,7 @@ function SettingsPage() {
         <Info label="IndexedDB products" value={diagnosticCounts.products ?? '-'} />
         <Info label="IndexedDB invoice_items" value={diagnosticCounts.invoice_items ?? '-'} />
         <Info label="IndexedDB price_history" value={diagnosticCounts.price_history ?? '-'} />
-        <Info label="pendingPush" value={diagnostics?.pendingCount ?? syncSnapshot.pendingCount ?? 0} />
+        <Info label="pendingPush" value={syncSnapshot.pendingCount ?? diagnostics?.pendingCount ?? 0} />
         <Info label="failedItems" value={diagnostics?.failedCount ?? syncSnapshot.failedCount ?? 0} />
         <Info label="last pull count" value={syncDiagnostic.pullCount ?? '-'} />
         <Info label="last push count" value={syncDiagnostic.pushCount ?? '-'} />
@@ -4287,13 +4339,6 @@ function summarizePromoGroups(items = []) {
       effectiveUnitCost: group.actualQty > 0 ? group.invoiceAmount / group.actualQty : 0
     }));
 }
-
-
-
-
-
-
-
 
 
 

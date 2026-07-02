@@ -836,8 +836,10 @@ export const localDb = {
     return put('meta', { id: key, value, updatedAt: nowIso() });
   },
 
-  async getPendingCount() {
-    const groups = await Promise.all(syncTables.map(async (table) => (await all(table)).filter((record) => belongsToCurrentCompany(record) && ['pending', 'deleted'].includes(record.syncStatus)).length));
+  async getPendingCount(options = {}) {
+    const excludeTables = new Set(options.excludeTables || []);
+    const tables = syncTables.filter((table) => !excludeTables.has(table));
+    const groups = await Promise.all(tables.map(async (table) => (await all(table)).filter((record) => belongsToCurrentCompany(record) && ['pending', 'deleted'].includes(record.syncStatus)).length));
     return groups.reduce((sum, count) => sum + count, 0);
   },
 
@@ -851,12 +853,31 @@ export const localDb = {
     return groups.reduce((sum, count) => sum + count, 0);
   },
 
-  async getPendingChanges() {
-    const entries = await Promise.all(syncTables.map(async (table) => [
+  async getPendingChanges(options = {}) {
+    const excludeTables = new Set(options.excludeTables || []);
+    const tables = syncTables.filter((table) => !excludeTables.has(table));
+    const entries = await Promise.all(tables.map(async (table) => [
       table,
       (await all(table)).filter((record) => belongsToCurrentCompany(record) && ['pending', 'deleted'].includes(record.syncStatus))
     ]));
     return Object.fromEntries(entries);
+  },
+
+  async markPendingTableAsSynced(table) {
+    if (!syncTables.includes(table)) return 0;
+    const records = (await all(table)).filter((record) => belongsToCurrentCompany(record) && ['pending', 'deleted', 'failed'].includes(record.syncStatus));
+    if (!records.length) return 0;
+    await putMany(table, records.map((record) => ({
+      ...record,
+      syncStatus: 'synced',
+      pendingSync: false,
+      dirty: false,
+      syncError: '',
+      syncNote: 'local cache only; cloud rebuilds this table',
+      syncedAt: nowIso()
+    })), { silent: true });
+    window.dispatchEvent(new CustomEvent('local-db-change', { detail: { table } }));
+    return records.length;
   },
 
   async retryFailedSyncRecords() {

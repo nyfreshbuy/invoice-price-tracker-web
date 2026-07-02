@@ -272,6 +272,9 @@ export const api = {
 
   searchProducts: (q) => request(`/api/products/search?q=${encodeURIComponent(q)}`),
   getProduct: (name) => request(`/api/products/${encodeURIComponent(name)}`),
+  getProductPriceHistory: (id) => request(`/api/products/${encodeURIComponent(id)}/price-history`),
+  getDashboardStats: () => request('/api/dashboard/stats'),
+  getPurchaseAnalytics: () => request('/api/purchase/analytics'),
 
   getStats: () => request('/api/stats'),
   clearData: () => request('/api/dev/clear', { method: 'DELETE' }),
