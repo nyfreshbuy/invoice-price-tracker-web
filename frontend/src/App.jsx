@@ -909,7 +909,7 @@ function BatchImportPage() {
     setSaving(true);
     let createdSession = null;
     try {
-      createdSession = await localDb.createImportSessionFromFiles(fileList, { companyName: currentCompanyName });
+      createdSession = await localDb.createImportSessionFromFiles(fileList, { defaultSupplierName: '未分类' });
       setImportSession(createdSession);
     } catch (error) {
       setMessage(error.message || 'Import session create failed');
@@ -947,8 +947,6 @@ function BatchImportPage() {
       data.append('batchId', nextBatchId);
       data.append('importSessionId', createdSession?.session?.id || nextBatchId);
       data.append('companyName', currentCompanyName);
-      data.append('fixedCompanyName', currentCompanyName);
-      data.append('supplierHint', currentCompanyName);
       if (entry.group?.id) data.append('invoiceGroupId', entry.group.id);
       if (entry.page?.id) data.append('invoicePageId', entry.page.id);
       try {
@@ -980,8 +978,6 @@ function BatchImportPage() {
     data.append('image', entry.file);
     data.append('batchId', batchId || generateId());
     data.append('companyName', currentCompanyName);
-    data.append('fixedCompanyName', currentCompanyName);
-    data.append('supplierHint', currentCompanyName);
     if (importSession?.session?.id) data.append('importSessionId', importSession.session.id);
     if (entry.group?.id) data.append('invoiceGroupId', entry.group.id);
     if (entry.page?.id) data.append('invoicePageId', entry.page.id);
@@ -1307,6 +1303,7 @@ function RecognitionTaskListPage() {
 }
 function InvoiceArchivePage() {
   const navigate = useNavigate();
+  const uploadRef = useRef(null);
   const [q, setQ] = useState('');
   const [tree, setTree] = useState([]);
   const [message, setMessage] = useState('');
@@ -1329,6 +1326,14 @@ function InvoiceArchivePage() {
   const currentNode = archive.nodeIndex.get(currentKey) || archive.root;
   const breadcrumbs = archiveBreadcrumbs(archive.nodeIndex, currentNode.key);
   const searchResults = useMemo(() => archiveSearchResults(archive, q), [archive, q]);
+  const currentSupplierName = useMemo(() => {
+    if (currentNode?.type === 'supplier') return currentNode.label;
+    if (currentNode?.type === 'month') {
+      const parent = archive.nodeIndex.get(currentNode.parentKey);
+      return parent?.type === 'supplier' ? parent.label : '';
+    }
+    return '';
+  }, [archive, currentNode]);
 
   useEffect(() => {
     if (!archive.nodeIndex.has(currentKey)) setCurrentKey('root');
@@ -1373,12 +1378,55 @@ function InvoiceArchivePage() {
     setQ('');
   }
 
+  async function handleArchiveUpload(files) {
+    const fileList = Array.from(files || []);
+    if (!fileList.length) return;
+    if (!currentSupplierName || currentSupplierName === '未分类') {
+      setMessage('请先进入具体供货商文件夹，再上传发票照片。');
+      return;
+    }
+    try {
+      setMessage('正在导入到当前供货商目录...');
+      const session = await localDb.createImportSessionFromFiles(fileList, { supplierName: currentSupplierName });
+      const batchId = session?.session?.id || generateId();
+      for (const file of fileList) {
+        const page = session?.pages?.find((entry) => entry.originalFileName === file.name);
+        const group = session?.groups?.find((entry) => entry.pages?.some((pageEntry) => pageEntry.originalFileName === file.name));
+        if (page?.status === 'skipped_duplicate') continue;
+        const data = new FormData();
+        data.append('image', file);
+        data.append('batchId', batchId);
+        data.append('companyName', companyName);
+        data.append('supplierHint', currentSupplierName);
+        if (session?.session?.id) data.append('importSessionId', session.session.id);
+        if (group?.id) data.append('invoiceGroupId', group.id);
+        if (page?.id) data.append('invoicePageId', page.id);
+        await api.createRecognitionTask(data);
+      }
+      markSyncPending();
+      await load();
+      setMessage(`已上传到 ${currentSupplierName}，识别任务已创建。`);
+    } catch (error) {
+      setMessage(error.message || '上传到供货商目录失败');
+    } finally {
+      if (uploadRef.current) uploadRef.current.value = '';
+    }
+  }
+
   const folderNodes = safeArray(currentNode?.children);
   const files = safeArray(currentNode?.files);
 
   return (
-    <Page title="发票文档库" subtitle="文件管理器模式，按公司、供应商、年份、月份自动归档">
+    <Page title="发票文档库" subtitle="文件管理器模式，按供货商和年月自动归档">
       <div className="archive-manager">
+        <input
+          ref={uploadRef}
+          type="file"
+          accept="image/*,application/pdf"
+          multiple
+          hidden
+          onChange={(event) => handleArchiveUpload(event.target.files)}
+        />
         <div className="archive-topbar">
           <button type="button" className="icon-button" onClick={goBack} disabled={currentNode.key === 'root'} aria-label="返回上一级">
             <ArrowLeft size={18} />
@@ -1397,6 +1445,7 @@ function InvoiceArchivePage() {
             </button>
             {menuOpen && (
               <div className="archive-menu">
+                <button type="button" onClick={() => { uploadRef.current?.click(); setMenuOpen(false); }} disabled={!currentSupplierName || currentSupplierName === '未分类'}>上传到当前供货商</button>
                 <button type="button" onClick={() => { setMessage('文档库目录由 AI 识别和确认入库自动创建。'); setMenuOpen(false); }}>新建文件夹（管理员）</button>
                 <button type="button" onClick={() => { setSortMode('date'); setMenuOpen(false); }}>排序：按日期</button>
                 <button type="button" onClick={() => { setSortMode('supplier'); setMenuOpen(false); }}>排序：按供应商</button>
@@ -1419,7 +1468,7 @@ function InvoiceArchivePage() {
           <input
             value={q}
             onChange={(event) => setQ(event.target.value)}
-            placeholder="搜索公司、供应商、年份、月份、发票号、日期"
+            placeholder="搜索供货商、年份、月份、发票号、日期"
           />
         </div>
 
@@ -1438,7 +1487,7 @@ function InvoiceArchivePage() {
           </div>
         )}
 
-        {folderNodes.length === 0 && files.length === 0 && <EmptyState text="暂无归档发票。确认入库后的发票会按公司、供应商、年份和月份自动出现在这里。" />}
+        {folderNodes.length === 0 && files.length === 0 && <EmptyState text="暂无归档发票。确认入库后的发票会按供货商和年月自动出现在这里。" />}
 
         {folderNodes.length > 0 && (
           <div className="archive-grid" aria-label="文件夹">
@@ -1487,46 +1536,39 @@ function buildArchiveFileSystem(tree, companyName, sortMode = 'name') {
   let invoiceCount = 0;
   let storageBytes = 0;
   const root = createArchiveNode('root', 'Home', 'root', '');
-  const companyNode = createArchiveNode('company', companyName || '\u6211\u7684\u516c\u53f8', 'company', root.key);
-  root.children.push(companyNode);
 
-  const monthMap = new Map();
   for (const supplier of safeArray(tree)) {
     const supplierName = normalizeArchiveLabel(supplier?.supplierName || '\u672a\u5206\u7c7b');
     if (supplierName) supplierNames.add(supplierName);
+    const supplierNode = createArchiveNode(`supplier:${supplierName}`, supplierName, 'supplier', root.key);
     for (const month of safeArray(supplier?.months)) {
       const monthKey = month?.month || '\u672a\u5206\u7c7b\u6708\u4efd';
-      if (!monthMap.has(monthKey)) monthMap.set(monthKey, []);
-      monthMap.get(monthKey).push(...safeArray(month?.invoices).map((invoice) => ({
+      const monthNode = createArchiveNode(`supplier:${supplierName}:month:${monthKey}`, formatArchiveMonth(monthKey), 'month', supplierNode.key);
+      const monthInvoices = safeArray(month?.invoices).map((invoice) => ({
         ...invoice,
         supplierName: normalizeArchiveLabel(invoice?.supplierDisplayName || invoice?.supplierName || supplierName || '\u672a\u5206\u7c7b')
-      })));
-    }
-  }
-
-  const months = [...monthMap.entries()].map(([monthKey, invoices]) => ({ monthKey, invoices }));
-  sortArchiveEntries(months, sortMode, (month) => month.monthKey);
-  for (const month of months) {
-    const monthNode = createArchiveNode(`month:${month.monthKey}`, formatArchiveMonth(month.monthKey), 'month', companyNode.key);
-    const monthInvoices = safeArray(month.invoices);
-    sortArchiveEntries(monthInvoices, sortMode, (invoice) => `${invoice?.invoiceDate || ''} ${invoice?.invoiceNo || ''}`);
-    let sequence = 1;
-    for (const invoice of monthInvoices) {
-      invoiceCount += 1;
-      const supplierName = normalizeArchiveLabel(invoice?.supplierDisplayName || invoice?.supplierName || '\u672a\u5206\u7c7b');
-      if (supplierName) supplierNames.add(supplierName);
-      const files = archiveFilesForInvoice(invoice, sequence);
-      sequence += files.length || 1;
-      for (const file of files) {
-        storageBytes += Number(file.size || 0);
-        file.parentKey = monthNode.key;
-        monthNode.files.push(file);
-        allFiles.push(file);
+      }));
+      sortArchiveEntries(monthInvoices, sortMode, (invoice) => `${invoice?.invoiceDate || ''} ${invoice?.invoiceNo || ''}`);
+      let sequence = 1;
+      for (const invoice of monthInvoices) {
+        invoiceCount += 1;
+        const files = archiveFilesForInvoice(invoice, sequence);
+        sequence += files.length || 1;
+        for (const file of files) {
+          storageBytes += Number(file.size || 0);
+          file.parentKey = monthNode.key;
+          monthNode.files.push(file);
+          allFiles.push(file);
+        }
       }
+      monthNode.meta = `${safeArray(monthNode.files).length} \u5f20`;
+      supplierNode.children.push(monthNode);
     }
-    monthNode.meta = `${safeArray(monthNode.files).length} \u5f20`;
-    companyNode.children.push(monthNode);
+    sortArchiveEntries(supplierNode.children, sortMode, (month) => month.label);
+    supplierNode.meta = `${supplierNode.children.length} \u4e2a\u6708 / ${supplierNode.children.reduce((sum, month) => sum + safeArray(month.files).length, 0)} \u5f20`;
+    root.children.push(supplierNode);
   }
+  sortArchiveEntries(root.children, sortMode, (supplier) => supplier.label);
 
   const visit = (node) => {
     nodeIndex.set(node.key, node);
@@ -4232,13 +4274,6 @@ function summarizePromoGroups(items = []) {
       effectiveUnitCost: group.actualQty > 0 ? group.invoiceAmount / group.actualQty : 0
     }));
 }
-
-
-
-
-
-
-
 
 
 

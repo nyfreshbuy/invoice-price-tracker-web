@@ -678,12 +678,12 @@ function safeArchiveSegment(value = '') {
 }
 
 function buildArchivePath({ companyName = '', supplierName = '', invoiceDate = '', invoiceNo = '', pageNumber = 1, fileHash = '', originalFileName = '' } = {}) {
-  const companyFolder = safeArchiveSegment(companyName || supplierName);
+  const supplierFolder = safeArchiveSegment(supplierName || '未分类');
   const month = invoiceMonth(invoiceDate);
   const datePart = /^\d{4}-\d{2}-\d{2}$/.test(String(invoiceDate || '')) ? invoiceDate : 'undated';
   const invoicePart = safeArchiveSegment(invoiceNo || (fileHash ? fileHash.slice(0, 8) : String(originalFileName || 'invoice').replace(/\.[^.]+$/, '')));
   const ext = (String(originalFileName || '').match(/\.[A-Za-z0-9]+$/)?.[0] || '.jpg').toLowerCase();
-  const archiveFolder = `InvoiceArchive/${companyFolder}/${month}`;
+  const archiveFolder = `InvoiceArchive/${supplierFolder}/${month}`;
   return {
     archiveFolder,
     invoiceMonth: month,
@@ -1142,7 +1142,7 @@ export const localDb = {
     if (!fileList.length) throw new Error('No files selected');
     const timestamp = nowIso();
     const sessionId = options.id || generateId();
-    const currentCompanyName = options.companyName || options.defaultCompanyName || '我的公司';
+    const initialSupplierName = options.supplierName || options.defaultSupplierName || '未分类';
     const uploadDate = today();
     const existingPages = (await all('invoice_pages')).filter(active);
     const existingHashes = new Set(existingPages.map((page) => page.fileHash).filter(Boolean));
@@ -1177,7 +1177,7 @@ export const localDb = {
       const groupKey = pageInfo.groupKey || pageId;
       if (!groupsByKey.has(groupKey)) groupsByKey.set(groupKey, []);
       const archiveFields = buildArchivePath({
-        companyName: currentCompanyName,
+        supplierName: initialSupplierName,
         invoiceDate: uploadDate,
         pageNumber: pageInfo.pageNumber || index + 1,
         fileHash,
@@ -1199,8 +1199,8 @@ export const localDb = {
         archiveFolder: archiveFields.archiveFolder,
         invoiceMonth: archiveFields.invoiceMonth,
         archiveStatus: duplicateFile ? 'skipped_duplicate' : 'local',
-        assignedCompanyName: currentCompanyName,
-        companyName: currentCompanyName,
+        assignedSupplierName: initialSupplierName,
+        supplierName: initialSupplierName,
         fileHash,
         fileSize: Number(file.size || 0),
         imageId: duplicateFile ? '' : imageId,
@@ -1225,18 +1225,18 @@ export const localDb = {
         serverId: groupId,
         importSessionId: sessionId,
         supplierId: '',
-        supplierName: currentCompanyName,
+        supplierName: initialSupplierName,
         invoiceNo: '',
         invoiceDate: uploadDate,
         confidence: key === groupPages[0]?.id ? 0.2 : 0.55,
-        reason: key === groupPages[0]?.id ? 'Assigned to current company folder before full AI recognition.' : 'Grouped by filename page pattern and assigned to current company folder.',
+        reason: key === groupPages[0]?.id ? 'Assigned to unclassified supplier folder before supplier recognition.' : 'Grouped by filename page pattern and assigned to unclassified supplier folder.',
         status: 'needs_review',
         pageIds: JSON.stringify(pageIds),
         pageCount: groupPages.length,
         totalAmount: 0,
         aiSupplierNameCandidate: '',
-        fixedCompanyName: currentCompanyName,
-        assignedCompanyName: currentCompanyName
+        fixedSupplierName: initialSupplierName,
+        assignedSupplierName: initialSupplierName
       }));
       for (const page of groupPages) page.invoiceGroupId = groupId;
     }
@@ -1947,8 +1947,62 @@ export const localDb = {
     return repaired.length;
   },
 
+  async rebuildProductsFromLocalRecords() {
+    const products = (await all('products')).filter((product) => belongsToCurrentCompany(product));
+    const productsById = new Map(products.flatMap((product) => idsFor(product).map((idValue) => [idValue, product])));
+    const productsByName = new Map(products.filter(active).map((product) => [normalizeProductName(product.normalizedName || product.name || ''), product]).filter(([key]) => key));
+    const items = (await all('invoice_items')).filter((item) => belongsToCurrentCompany(item) && active(item) && trustedItemName(item) && !Number(item.isDiscountLine || 0) && !Number(item.candidateOnly || 0));
+    const priceRows = (await all('price_history')).filter((row) => belongsToCurrentCompany(row) && active(row) && !['deleted', 'inactive'].includes(String(row.status || '').toLowerCase()));
+    const itemById = new Map(items.flatMap((item) => idsFor(item).map((idValue) => [idValue, item])));
+    const created = [];
+    const updated = [];
+    const candidates = [
+      ...items.map((item) => ({ item, row: {} })),
+      ...priceRows.map((row) => ({ item: itemById.get(row.invoiceItemId) || {}, row }))
+    ];
+    for (const { item, row } of candidates) {
+      const explicitProduct = row.productId || item.productId || '';
+      if (explicitProduct && productsById.has(explicitProduct)) continue;
+      const productName = productDisplayName(row, item, {});
+      const normalizedName = normalizeProductName(row.normalizedName || row.productNameNormalized || item.productNameNormalized || productName);
+      if (!normalizedName || normalizedName === normalizeProductName('未命名商品')) continue;
+      const existing = productsByName.get(normalizedName);
+      if (existing) {
+        if (explicitProduct && !idsFor(existing).includes(explicitProduct)) {
+          productsById.set(explicitProduct, existing);
+          updated.push(existing.id || existing.localId || normalizedName);
+        }
+        continue;
+      }
+      const idValue = explicitProduct || generateId();
+      const product = syncFields({
+        id: idValue,
+        localId: idValue,
+        serverId: row.productId || item.productId || null,
+        name: productName,
+        normalizedName,
+        category: item.category || row.category || '',
+        notes: 'rebuilt from local invoice items / price history'
+      });
+      await put('products', product);
+      productsById.set(product.id, product);
+      if (product.serverId) productsById.set(product.serverId, product);
+      productsByName.set(normalizedName, product);
+      created.push(product.id);
+    }
+    console.info('[ProductSync] rebuilt products from local records', {
+      beforeProducts: products.length,
+      invoiceItems: items.length,
+      priceHistory: priceRows.length,
+      created: created.length,
+      updatedReferences: updated.length
+    });
+    return { beforeProducts: products.length, invoiceItems: items.length, priceHistory: priceRows.length, created: created.length, updatedReferences: updated.length };
+  },
+
   async searchProducts(query) {
     await localDb.repairPriceHistoryProductNames();
+    await localDb.rebuildProductsFromLocalRecords();
     const q = normalizeProductName(query);
     const allInvoices = await all('invoices');
     const invoiceAnyById = new Map(allInvoices.flatMap((invoice) => idsFor(invoice).map((idValue) => [idValue, invoice])));
@@ -1960,16 +2014,16 @@ export const localDb = {
     const allActiveInvoices = allInvoices.filter(active);
     const invoiceById = new Map(allActiveInvoices.flatMap((invoice) => idsFor(invoice).map((idValue) => [idValue, invoice])));
     const approvedInvoiceIds = invoiceIdSet(allActiveInvoices.filter(approvedForStats));
-    const suppliers = await all('suppliers');
-    const products = (await all('products')).filter(active);
+    const suppliers = (await all('suppliers')).filter((supplier) => belongsToCurrentCompany(supplier) && active(supplier));
+    const products = (await all('products')).filter((product) => belongsToCurrentCompany(product) && active(product));
     const productById = new Map(products.flatMap((product) => idsFor(product).map((idValue) => [idValue, product])));
-    const aliases = (await all('product_aliases')).filter(active);
+    const aliases = (await all('product_aliases')).filter((alias) => belongsToCurrentCompany(alias) && active(alias));
     const aliasProductIds = new Set(aliases
       .filter((alias) => `${normalizeProductName(alias.aliasName || alias.rawName || alias.keyword || '')} ${normalizeProductName(alias.normalizedAlias || '')} ${normalizeProductName(alias.standardName || '')}`.includes(q))
       .map((alias) => alias.productId)
       .filter(Boolean));
     const allItems = (await all('invoice_items')).filter((item) => {
-      if (!active(item) || Number(item.isDiscountLine || 0) || Number(item.candidateOnly || 0)) return false;
+      if (!belongsToCurrentCompany(item) || !active(item) || Number(item.isDiscountLine || 0) || Number(item.candidateOnly || 0)) return false;
       if (!invoiceRecordUsable(item.invoiceId)) return false;
       return true;
     });

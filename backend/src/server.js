@@ -1858,6 +1858,14 @@ function countSyncResultStatuses(results = []) {
   }, {});
 }
 
+function countSyncResultTables(results = []) {
+  return results.reduce((counts, result) => {
+    const table = result?.table || 'unknown';
+    counts[table] = (counts[table] || 0) + 1;
+    return counts;
+  }, {});
+}
+
 async function mirrorSqlSyncDataToMongo(companyId, reason = 'server-save', since = '') {
   if (!useMongoSync()) return null;
   try {
@@ -3473,6 +3481,7 @@ app.post('/api/sync/push', requireAuth, asyncHandler(async (req, res) => {
         companyId,
         backend: 'mongodb',
         resultCount: results.length,
+        resultTables: countSyncResultTables(results),
         resultStatuses: countSyncResultStatuses(results)
       });
       res.json(result);
@@ -3522,6 +3531,7 @@ app.post('/api/sync/push', requireAuth, asyncHandler(async (req, res) => {
     companyId,
     backend: usingPostgres ? 'postgres' : 'sqlite',
     resultCount: results.length,
+    resultTables: countSyncResultTables(results),
     resultStatuses: countSyncResultStatuses(results)
   });
   res.json({ ok: true, companyId, serverTime: nowIso(), results });

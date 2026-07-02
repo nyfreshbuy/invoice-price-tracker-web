@@ -189,6 +189,14 @@ function countByStatus(results = []) {
   }, {});
 }
 
+function countResultsByTable(results = []) {
+  return results.reduce((counts, result) => {
+    const table = result?.table || 'unknown';
+    counts[table] = (counts[table] || 0) + 1;
+    return counts;
+  }, {});
+}
+
 function resultKey(result = {}) {
   const record = result.record || {};
   return [
@@ -659,13 +667,6 @@ export async function syncNow({ force = false, reason = 'manual' } = {}) {
     if (Object.keys(clearedRemoteRepairPending).length) {
       console.log('[SYNC FRONTEND] cleared remote repair pending records', clearedRemoteRepairPending);
     }
-    const clearedServerIdPending = typeof localDb.clearPendingRecordsWithServerId === 'function'
-      ? await localDb.clearPendingRecordsWithServerId()
-      : {};
-    if (Object.keys(clearedServerIdPending).length) {
-      console.log('[SYNC FRONTEND] cleared pending records with serverId', clearedServerIdPending);
-    }
-
     const pending = await localDb.getPendingChanges();
     const pendingRecords = flattenPendingChanges(pending);
     const pendingDetails = await localDb.getPendingDebugDetails();
@@ -704,21 +705,25 @@ export async function syncNow({ force = false, reason = 'manual' } = {}) {
         try {
           const batchChanges = buildBatchChanges(batch);
           console.log('[SYNC FRONTEND] pushed table price_history count', (batchChanges.price_history || []).length);
+          console.log('[SYNC FRONTEND] pushed table products count', (batchChanges.products || []).length);
           const pushed = await api.syncPush({ deviceId, companyId, changes: batchChanges });
           const results = Array.isArray(pushed.results) ? pushed.results : [];
           pushedTotal += results.length;
+          const resultTables = countResultsByTable(results);
           console.log('[SYNC] push batch finish', {
             companyId,
             batchStart: index,
             batchSize: batch.length,
             uploadCounts: Object.fromEntries(Object.entries(batchChanges).map(([table, records]) => [table, records.length]).filter(([, count]) => count > 0)),
             resultCount: results.length,
+            resultTables,
             resultStatuses: countByStatus(results),
             backend: pushed.backend || '',
             responseOk: Boolean(pushed.ok)
           });
           const { appliedCount, notFoundCount, missingResultCount, appliedByTable, lastSyncedResults } = await applyPushResults(batch, results);
           syncedResultsForDiagnostic.push(...lastSyncedResults);
+          console.log('[SYNC FRONTEND] markSynced table products success count', appliedByTable.products || 0);
           console.log('[SYNC FRONTEND] markSynced table price_history success count', appliedByTable.price_history || 0);
           if (missingResultCount > 0) {
             syncProgress.failed += missingResultCount;
@@ -813,6 +818,19 @@ export async function syncNow({ force = false, reason = 'manual' } = {}) {
       const result = await importPulledTable(table, records, importWarnings);
       console.log(`[SYNC] imported ${table}`, result);
     }
+    const statsBeforeProductRebuild = await localDb.getStats().catch(() => ({}));
+    const productRebuild = typeof localDb.rebuildProductsFromLocalRecords === 'function'
+      ? await localDb.rebuildProductsFromLocalRecords()
+      : null;
+    const statsAfterProductRebuild = await localDb.getStats().catch(() => ({}));
+    console.log('[SYNC FRONTEND] products restore summary', {
+      cloudProducts: (pulled.data?.products || []).length,
+      localProductsBefore: statsBeforeProductRebuild.products ?? null,
+      localProductsAfter: statsAfterProductRebuild.products ?? null,
+      rebuiltCreated: productRebuild?.created || 0,
+      rebuiltUpdatedReferences: productRebuild?.updatedReferences || 0,
+      deletedProducts: (pulled.data?.products || []).filter((record) => record?.deletedAt).length
+    });
     window.dispatchEvent(new Event('local-db-change'));
     console.log('[SYNC] import finished', { warnings: importWarnings });
     if (syncProgress.failed === 0) {
