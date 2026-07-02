@@ -2655,21 +2655,49 @@ export const localDb = {
 
   async getLocalDiagnostics() {
     const counts = {};
+    const errors = {};
     for (const table of [...syncTables, 'invoice_images']) {
       try {
         const records = await all(table);
         counts[table] = records.filter((record) => (table === 'invoice_images' ? belongsToCurrentCompany(record) : active(record))).length;
       } catch (error) {
-        counts[table] = `error: ${error.message || error}`;
+        const message = error.message || String(error);
+        counts[table] = `error: ${message}`;
+        errors[table] = message;
       }
+    }
+    let pendingCount = 0;
+    let failedCount = 0;
+    let conflictCount = 0;
+    let pendingByTable = {};
+    try {
+      pendingCount = await localDb.getPendingCount();
+    } catch (error) {
+      errors.pendingCount = error.message || String(error);
+    }
+    try {
+      failedCount = await localDb.getFailedCount();
+    } catch (error) {
+      errors.failedCount = error.message || String(error);
+    }
+    try {
+      conflictCount = await localDb.getConflictCount();
+    } catch (error) {
+      errors.conflictCount = error.message || String(error);
+    }
+    try {
+      pendingByTable = Object.fromEntries(Object.entries(await localDb.getPendingChanges()).map(([table, rows]) => [table, rows.length]));
+    } catch (error) {
+      errors.pendingByTable = error.message || String(error);
     }
     return {
       companyId: getCurrentCompanyId(),
       counts,
-      pendingCount: await localDb.getPendingCount(),
-      failedCount: await localDb.getFailedCount(),
-      conflictCount: await localDb.getConflictCount(),
-      pendingByTable: Object.fromEntries(Object.entries(await localDb.getPendingChanges()).map(([table, rows]) => [table, rows.length]))
+      errors,
+      pendingCount,
+      failedCount,
+      conflictCount,
+      pendingByTable
     };
   },
 

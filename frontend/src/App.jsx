@@ -261,6 +261,15 @@ function safeArray(value) {
   return Array.isArray(value) ? value : [];
 }
 
+function apiItems(value) {
+  if (Array.isArray(value)) return value;
+  return safeArray(value?.items || value?.results || value?.data);
+}
+
+function errorMessage(error) {
+  return error?.message || String(error || '');
+}
+
 function safeObject(value) {
   return value && typeof value === 'object' && !Array.isArray(value) ? value : {};
 }
@@ -2501,6 +2510,7 @@ function ProductSearchPage() {
   const [results, setResults] = useState([]);
   const [diagnostics, setDiagnostics] = useState(null);
   const [syncSnapshot, setSyncSnapshot] = useState(null);
+  const [searchError, setSearchError] = useState('');
   const searchSeq = useRef(0);
   useEffect(() => {
     let cancelled = false;
@@ -2508,27 +2518,42 @@ function ProductSearchPage() {
       const seq = searchSeq.current + 1;
       searchSeq.current = seq;
       const keyword = q;
-      const localDiagnostics = await localDb.getLocalDiagnostics().catch((error) => ({
-        counts: {
-          products: `error: ${error.message || error}`,
-          invoice_items: `error: ${error.message || error}`,
-          price_history: `error: ${error.message || error}`
-        }
-      }));
-      const snapshot = await getSyncSnapshot().catch((error) => ({
-        label: '同步状态读取失败',
-        lastError: error.message || String(error)
-      }));
       try {
+        console.info('[products] cloud search request', { q: keyword });
         let data;
+        let nextSearchError = '';
         try {
           data = await api.searchProducts(keyword);
+          console.info('[products] cloud search response', {
+            q: keyword,
+            count: apiItems(data).length,
+            counts: data?.counts || null,
+            source: data?.source || 'cloud'
+          });
         } catch (cloudError) {
           console.warn('[products] cloud search failed, falling back to IndexedDB', cloudError);
+          nextSearchError = `云端查询失败：${errorMessage(cloudError)}`;
           data = await localDb.searchProducts(keyword);
         }
         if (!cancelled && searchSeq.current === seq) {
-          setResults(safeArray(data));
+          setResults(apiItems(data));
+          setSearchError(nextSearchError);
+        }
+        const [localDiagnostics, snapshot] = await Promise.all([
+          localDb.getLocalDiagnostics().catch((error) => ({
+            counts: {
+              products: `error: ${errorMessage(error)}`,
+              invoice_items: `error: ${errorMessage(error)}`,
+              price_history: `error: ${errorMessage(error)}`
+            },
+            error: errorMessage(error)
+          })),
+          getSyncSnapshot().catch((error) => ({
+            label: '同步状态读取失败',
+            lastError: errorMessage(error)
+          }))
+        ]);
+        if (!cancelled && searchSeq.current === seq) {
           setDiagnostics(localDiagnostics);
           setSyncSnapshot(snapshot);
         }
@@ -2536,8 +2561,19 @@ function ProductSearchPage() {
         recordPageError(error, { componentStack: 'ProductSearchPage' }, 'searchProducts');
         if (!cancelled && searchSeq.current === seq) {
           setResults([]);
-          setDiagnostics(localDiagnostics);
-          setSyncSnapshot(snapshot);
+          setSearchError(`商品查询失败：${errorMessage(error)}`);
+          setDiagnostics({
+            counts: {
+              products: `error: ${errorMessage(error)}`,
+              invoice_items: `error: ${errorMessage(error)}`,
+              price_history: `error: ${errorMessage(error)}`
+            },
+            error: errorMessage(error)
+          });
+          setSyncSnapshot({
+            label: '同步状态读取失败',
+            lastError: errorMessage(error)
+          });
         }
       }
     };
@@ -2561,7 +2597,7 @@ function ProductSearchPage() {
     || '\u65e0';
   const noLocalData = Number(counts.invoice_items || 0) === 0 && Number(counts.price_history || 0) === 0 && Number(counts.products || 0) === 0;
   const emptyText = hasKeyword
-    ? '\u6ca1\u6709\u627e\u5230\u76f8\u5173\u5546\u54c1'
+    ? (searchError || '\u6ca1\u6709\u627e\u5230\u76f8\u5173\u5546\u54c1')
     : (noLocalData ? '\u672c\u5730\u6682\u65e0\u6570\u636e\uff0c\u8bf7\u5148\u540c\u6b65' : '\u672c\u5730\u6709\u6570\u636e\uff0c\u4f46\u6ca1\u6709\u53ef\u663e\u793a\u7684\u5546\u54c1\u8bb0\u5f55');
   return (
     <Page title={'\u5546\u54c1\u4ef7\u683c\u67e5\u8be2'} subtitle={'\u8054\u7f51\u65f6\u76f4\u63a5\u67e5\u8be2\u4e91\u7aef\u6570\u636e\uff1b\u79bb\u7ebf\u65f6\u4f7f\u7528\u672c\u5730 IndexedDB \u7f13\u5b58\u3002'}>
@@ -2574,6 +2610,7 @@ function ProductSearchPage() {
       )}
       {productResults.length === 0 && (
         <Section title={'\u672c\u5730\u6570\u636e\u8bca\u65ad'}>
+          {searchError && <p className="error">{searchError}</p>}
           <Info label="products" value={counts.products ?? '-'} />
           <Info label="invoice_items" value={counts.invoice_items ?? '-'} />
           <Info label="price_history" value={counts.price_history ?? '-'} />
@@ -2583,8 +2620,8 @@ function ProductSearchPage() {
       )}
       <div className="card-list">
         {productResults.map((item, index) => {
-          const displayName = item?.productName || item?.productNameOriginal || item?.name || item?.standardName || item?.productNameNormalized || '\u672a\u547d\u540d\u5546\u54c1';
-          const routeName = item?.productNameNormalized || item?.normalizedName || item?.standardName || displayName;
+          const displayName = uiText(item?.productName || item?.productNameOriginal || item?.originalName || item?.itemName || item?.name || item?.standardName || item?.productNameNormalized || '\u672a\u547d\u540d\u5546\u54c1');
+          const routeName = uiText(item?.productNameNormalized || item?.normalizedName || item?.standardName || displayName);
           return (
           <Link className="row-card" to={`/products/${encodeURIComponent(routeName || '')}`} key={routeName || item?.productId || index}>
             <div>
@@ -2632,11 +2669,12 @@ function ProductDetailPage() {
   const [detail, setDetail] = useState(null);
   const load = async () => {
     try {
-      const records = await api.getProductPriceHistory(decoded);
+      const response = await api.getProductPriceHistory(decoded);
+      const records = apiItems(response);
       setDetail({
-        standardName: decoded,
-        records: safeArray(records),
-        supplierCompare: buildSupplierCompareFromRecords(safeArray(records))
+        standardName: uiText(decoded),
+        records,
+        supplierCompare: buildSupplierCompareFromRecords(records)
       });
     } catch (error) {
       console.warn('[products] cloud price history failed, falling back to IndexedDB', error);
@@ -4339,8 +4377,3 @@ function summarizePromoGroups(items = []) {
       effectiveUnitCost: group.actualQty > 0 ? group.invoiceAmount / group.actualQty : 0
     }));
 }
-
-
-
-
-

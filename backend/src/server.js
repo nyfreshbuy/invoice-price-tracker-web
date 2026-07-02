@@ -4487,7 +4487,51 @@ function cloudPriceForItem(item = {}) {
 }
 
 function cloudItemName(item = {}) {
-  return item.productName || item.productNameOriginal || item.rawName || item.name || item.productNameNormalized || item.normalizedName || '';
+  return item.productName
+    || item.productNameOriginal
+    || item.originalName
+    || item.itemName
+    || item.rawName
+    || item.name
+    || item.nameCn
+    || item.nameEn
+    || item.productNameNormalized
+    || item.normalizedName
+    || '';
+}
+
+function cloudProductName(product = {}) {
+  return product.productName
+    || product.name
+    || product.originalName
+    || product.itemName
+    || product.rawName
+    || product.standardName
+    || product.normalizedName
+    || '';
+}
+
+function cloudProductSearchText(record = {}, product = {}) {
+  return [
+    record.productName,
+    record.productNameOriginal,
+    record.originalName,
+    record.itemName,
+    record.rawName,
+    record.name,
+    record.nameCn,
+    record.nameEn,
+    record.productNameNormalized,
+    record.normalizedName,
+    record.standardName,
+    product.productName,
+    product.name,
+    product.originalName,
+    product.itemName,
+    product.rawName,
+    product.standardName,
+    product.normalizedName
+  ].map((value) => normalizeProductNameAdvanced(value || '')).join(' ');
 }
 
 function cloudProductSummaries(data = {}, query = '') {
@@ -4496,15 +4540,52 @@ function cloudProductSummaries(data = {}, query = '') {
   const supplierById = new Map(suppliers.flatMap((supplier) => [supplier.id, supplier.serverId, supplier.localId].filter(Boolean).map((key) => [key, supplier])));
   const invoices = activeCloudRows(data.invoices || []);
   const invoiceById = new Map(invoices.flatMap((invoice) => [invoice.id, invoice.serverId, invoice.localId].filter(Boolean).map((key) => [key, invoice])));
-  const rows = activeCloudRows(data.invoice_items || []).filter((row) => {
-    if (!trustedCloudItem(row)) return false;
-    if (!q) return true;
-    const haystack = `${normalizeProductNameAdvanced(row.rawName || row.productNameOriginal || row.name || '')} ${normalizeProductNameAdvanced(row.normalizedName || row.productNameNormalized || '')}`;
-    return haystack.includes(q);
-  });
+  const products = activeCloudRows(data.products || []);
+  const productById = new Map(products.flatMap((product) => [product.id, product.serverId, product.localId].filter(Boolean).map((key) => [key, product])));
+  const rows = [];
+
+  for (const row of activeCloudRows(data.invoice_items || [])) {
+    if (!trustedCloudItem(row)) continue;
+    const product = productById.get(row.productId) || {};
+    if (q && !cloudProductSearchText(row, product).includes(q)) continue;
+    rows.push({ ...row, source: 'invoice_items' });
+  }
+
+  for (const row of activeCloudRows(data.price_history || [])) {
+    const status = String(row.status || 'active').toLowerCase();
+    if (['deleted', 'inactive'].includes(status)) continue;
+    const product = productById.get(row.productId) || {};
+    if (q && !cloudProductSearchText(row, product).includes(q)) continue;
+    rows.push({
+      ...row,
+      source: 'price_history',
+      totalPrice: row.totalPrice || row.amount || 0,
+      unitPrice: row.unitPrice || row.price || 0,
+      invoiceDate: row.invoiceDate || row.date || ''
+    });
+  }
+
+  if (q) {
+    for (const product of products) {
+      if (!cloudProductSearchText(product, product).includes(q)) continue;
+      rows.push({
+        ...product,
+        productId: product.id || product.serverId || product.localId || '',
+        productName: cloudProductName(product),
+        productNameNormalized: product.normalizedName || product.standardName || cloudProductName(product),
+        source: 'products'
+      });
+    }
+  }
+
   const groups = new Map();
   for (const row of rows) {
-    const key = row.productId || row.productNameNormalized || normalizeProductNameAdvanced(cloudItemName(row));
+    const product = productById.get(row.productId) || {};
+    const key = row.productId
+      || row.productNameNormalized
+      || row.normalizedName
+      || product.normalizedName
+      || normalizeProductNameAdvanced(cloudItemName(row) || cloudProductName(product));
     if (!key) continue;
     const group = groups.get(key) || [];
     group.push(row);
@@ -4516,11 +4597,22 @@ function cloudProductSummaries(data = {}, query = '') {
     const recent = sorted[0] || {};
     const invoice = invoiceById.get(recent.invoiceId) || {};
     const supplier = supplierById.get(recent.supplierId || invoice.supplierId) || {};
+    const product = productById.get(recent.productId) || {};
+    const productName = cloudItemName(recent) || cloudProductName(product) || recent.productNameNormalized || recent.normalizedName || key;
+    const recentPrice = cloudPriceForItem(recent);
     return {
       productId: recent.productId || '',
-      productName: cloudItemName(recent) || recent.productNameNormalized || key,
-      standardName: recent.productNameNormalized || recent.normalizedName || key,
-      recentPrice: cloudPriceForItem(recent),
+      productName,
+      name: productName,
+      originalName: recent.productNameOriginal || recent.originalName || product.originalName || product.name || productName,
+      normalizedName: recent.productNameNormalized || recent.normalizedName || product.normalizedName || key,
+      standardName: recent.productNameNormalized || recent.normalizedName || product.normalizedName || key,
+      itemName: recent.itemName || '',
+      supplierName: cloudSupplierName(supplier),
+      lastPrice: recentPrice,
+      lastDate: recent.invoiceDate || '',
+      source: recent.source || '',
+      recentPrice,
       minPrice: prices.length ? Math.min(...prices) : 0,
       maxPrice: prices.length ? Math.max(...prices) : 0,
       averagePrice: prices.length ? prices.reduce((sum, price) => sum + price, 0) / prices.length : 0,
@@ -4605,54 +4697,24 @@ app.get('/api/purchase/analytics', requireAuth, asyncHandler(async (req, res) =>
 app.get('/api/products/search', requireAuth, asyncHandler(async (req, res) => {
   const rawQuery = String(req.query.q || '').trim();
   const cloudData = await cloudSyncData(req.user.companyId);
-  if (useMongoSync() || !rawQuery) {
-    res.json(cloudProductSummaries(cloudData, rawQuery));
-    return;
-  }
-  const q = normalizeProductNameAdvanced(String(req.query.q || '').trim());
-  if (!q) return res.json([]);
-  const aliases = await queryAll(`
-    SELECT * FROM ${quoteTable('product_aliases')}
-    WHERE ${quoteIdentifier('companyId')} = ? AND ${quoteIdentifier('deletedAt')} IS NULL
-  `, [req.user.companyId]);
-  const aliasProductIds = new Set(aliases
-    .filter((alias) => `${normalizeProductNameAdvanced(alias.aliasName || alias.rawName || alias.keyword)} ${normalizeProductNameAdvanced(alias.normalizedAlias || '')} ${normalizeProductNameAdvanced(alias.standardName || '')}`.includes(q))
-    .map((alias) => alias.productId)
-    .filter(Boolean));
-  const rows = await queryAll(`
-    SELECT * FROM ${quoteTable('invoice_items')}
-    WHERE ${quoteIdentifier('companyId')} = ?
-      AND ${quoteIdentifier('deletedAt')} IS NULL
-      AND COALESCE(${quoteIdentifier('isDiscountLine')}, 0) = 0
-      AND COALESCE(${quoteIdentifier('candidateOnly')}, 0) = 0
-      AND COALESCE(${quoteIdentifier('nameQualityStatus')}, 'trusted') != 'needs_review'
-  `, [req.user.companyId]);
-  const matched = rows.filter((row) => {
-    const haystack = `${normalizeProductNameAdvanced(row.rawName || row.productNameOriginal || '')} ${normalizeProductNameAdvanced(row.normalizedName || row.productNameNormalized || '')}`;
-    return haystack.includes(q) || aliasProductIds.has(row.productId);
+  const items = cloudProductSummaries(cloudData, rawQuery);
+  const counts = {
+    products: activeCloudRows(cloudData.products || []).length,
+    invoice_items: activeCloudRows(cloudData.invoice_items || []).length,
+    price_history: activeCloudRows(cloudData.price_history || []).length
+  };
+  console.log('[products/search] cloud query', {
+    companyId: req.user.companyId,
+    q: rawQuery,
+    counts,
+    resultCount: items.length,
+    source: useMongoSync() ? 'mongodb' : (usingPostgres ? 'postgres' : 'sqlite')
   });
-  const groups = new Map();
-  for (const row of matched) {
-    const key = row.productId || row.productNameNormalized || normalizeProductNameAdvanced(row.productNameOriginal || row.rawName || '');
-    const group = groups.get(key) || [];
-    group.push(row);
-    groups.set(key, group);
-  }
-  const summaries = [...groups.entries()].map(([key, records]) => {
-    const sorted = [...records].sort((a, b) => `${b.invoiceDate || ''}${b.createdAt || ''}`.localeCompare(`${a.invoiceDate || ''}${a.createdAt || ''}`));
-    const prices = records.map((record) => Number(record.discountedEffectiveUnitCost || record.effectiveUnitCost || record.unitPrice || 0));
-    return {
-      productId: records[0]?.productId || '',
-      standardName: records[0]?.productNameNormalized || records[0]?.normalizedName || key,
-      recentPrice: prices.length ? Number(sorted[0]?.discountedEffectiveUnitCost || sorted[0]?.effectiveUnitCost || sorted[0]?.unitPrice || 0) : 0,
-      minPrice: prices.length ? Math.min(...prices) : 0,
-      maxPrice: prices.length ? Math.max(...prices) : 0,
-      averagePrice: prices.length ? prices.reduce((sum, price) => sum + price, 0) / prices.length : 0,
-      recentPurchaseDate: sorted[0]?.invoiceDate || '',
-      recordCount: records.length
-    };
-  }).sort((a, b) => (b.recentPurchaseDate || '').localeCompare(a.recentPurchaseDate || ''));
-  res.json(summaries);
+  res.json({
+    items,
+    counts,
+    source: useMongoSync() ? 'mongodb' : (usingPostgres ? 'postgres' : 'sqlite')
+  });
 }));
 
 app.get('/api/products/:id/price-history', requireAuth, asyncHandler(async (req, res) => {
@@ -4663,10 +4725,13 @@ app.get('/api/products/:id/price-history', requireAuth, asyncHandler(async (req,
   const supplierById = new Map(suppliers.flatMap((supplier) => [supplier.id, supplier.serverId, supplier.localId].filter(Boolean).map((key) => [key, supplier])));
   const invoices = activeCloudRows(data.invoices || []);
   const invoiceById = new Map(invoices.flatMap((invoice) => [invoice.id, invoice.serverId, invoice.localId].filter(Boolean).map((key) => [key, invoice])));
-  const rows = activeCloudRows(data.invoice_items || [])
+  const products = activeCloudRows(data.products || []);
+  const productById = new Map(products.flatMap((product) => [product.id, product.serverId, product.localId].filter(Boolean).map((key) => [key, product])));
+  const itemRows = activeCloudRows(data.invoice_items || [])
     .filter((row) => {
       if (!trustedCloudItem(row)) return false;
-      const haystack = `${normalizeProductNameAdvanced(row.productId || '')} ${normalizeProductNameAdvanced(row.rawName || row.productNameOriginal || row.name || '')} ${normalizeProductNameAdvanced(row.normalizedName || row.productNameNormalized || '')}`;
+      const product = productById.get(row.productId) || {};
+      const haystack = `${normalizeProductNameAdvanced(row.productId || '')} ${cloudProductSearchText(row, product)}`;
       return haystack.includes(q);
     })
     .map((row) => {
@@ -4679,9 +4744,37 @@ app.get('/api/products/:id/price-history', requireAuth, asyncHandler(async (req,
         invoiceImagePath: invoice.imagePath || '',
         price: cloudPriceForItem(row)
       };
+    });
+  const priceRows = activeCloudRows(data.price_history || [])
+    .filter((row) => {
+      const status = String(row.status || 'active').toLowerCase();
+      if (['deleted', 'inactive'].includes(status)) return false;
+      const product = productById.get(row.productId) || {};
+      const haystack = `${normalizeProductNameAdvanced(row.productId || '')} ${cloudProductSearchText(row, product)}`;
+      return haystack.includes(q);
     })
+    .map((row) => {
+      const invoice = invoiceById.get(row.invoiceId) || {};
+      const supplier = supplierById.get(row.supplierId || invoice.supplierId) || {};
+      const product = productById.get(row.productId) || {};
+      return {
+        ...row,
+        productNameOriginal: row.productName || row.productNameOriginal || row.originalName || cloudProductName(product),
+        productNameNormalized: row.normalizedName || row.productNameNormalized || product.normalizedName || row.productName || cloudProductName(product),
+        supplierName: cloudSupplierName(supplier),
+        invoiceNo: invoice.invoiceNo || row.invoiceNo || '',
+        invoiceImagePath: invoice.imagePath || '',
+        price: cloudPriceForItem(row)
+      };
+    });
+  const rowsByKey = new Map();
+  for (const row of [...itemRows, ...priceRows]) {
+    const key = row.invoiceItemId || row.id || row.serverId || `${row.productId || row.productNameOriginal || row.productName}-${row.invoiceId || ''}-${row.invoiceDate || ''}`;
+    if (!rowsByKey.has(key) || row.price) rowsByKey.set(key, row);
+  }
+  const rows = [...rowsByKey.values()]
     .sort((a, b) => `${b.invoiceDate || ''}${b.createdAt || ''}`.localeCompare(`${a.invoiceDate || ''}${a.createdAt || ''}`));
-  res.json(rows);
+  res.json({ items: rows });
 }));
 
 app.get('/api/products/:name', requireAuth, asyncHandler(async (req, res) => {
