@@ -476,7 +476,6 @@ async function importPulledTable(table, records = [], importWarnings = []) {
           warning: 'Some records failed to import',
           failedRecords: failedRecords.slice(failedBeforeChunk).slice(-20)
         });
-        syncProgress.failed = Number(syncProgress.failed || 0) + newFailedCount;
       }
       syncProgress.done = Math.min(syncProgress.total, syncProgress.done + chunk.length);
       touchSyncProgress({
@@ -837,10 +836,11 @@ export async function syncNow({ force = false, reason = 'manual' } = {}) {
       await setLastSyncAt(companyId, pulled.serverTime || nowIso());
       console.log('[SYNC] lastSyncAt updated', { companyId, lastSyncAt: await lastSyncAt() });
       await setSyncDiagnostic(companyId, {
-        status: 'success',
+        status: importWarnings.length ? 'success_with_warnings' : 'success',
         finishedAt: nowIso(),
         error: '',
         warnings: importWarnings,
+        warningCount: importWarnings.length,
         pushCount: pushedTotal,
         pullCount: pulledTotal,
         pendingCount: await localDb.getPendingCount(),
