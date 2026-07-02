@@ -40,10 +40,6 @@ export const db = sqliteDb;
 
 export const syncTables = [
   'purchase_batches',
-  'import_sessions',
-  'invoice_groups',
-  'invoice_pages',
-  'invoice_image_resources',
   'suppliers',
   'invoices',
   'invoice_items',

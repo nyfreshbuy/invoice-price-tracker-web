@@ -1,5 +1,5 @@
 import { Component, useEffect, useMemo, useRef, useState } from 'react';
-import { Link, NavLink, Route, Routes, useLocation, useNavigate, useParams } from 'react-router-dom';
+import { Link, NavLink, Navigate, Route, Routes, useLocation, useNavigate, useParams } from 'react-router-dom';
 import {
   ArrowLeft,
   Building2,
@@ -483,7 +483,7 @@ export default function App() {
           <Route path="/invoices/new" element={<ProtectedPage pageName="InvoiceForm" session={authSession}><InvoiceFormPage /></ProtectedPage>} />
           <Route path="/invoices/batch" element={<ProtectedPage pageName="BatchImport" session={authSession}><BatchImportPage /></ProtectedPage>} />
           <Route path="/recognition-tasks" element={<ProtectedPage pageName="RecognitionTaskList" session={authSession}><RecognitionTaskListPage /></ProtectedPage>} />
-          <Route path="/archive" element={<ProtectedPage pageName="InvoiceArchive" session={authSession}><InvoiceArchivePage /></ProtectedPage>} />
+          <Route path="/archive" element={<Navigate to="/" replace />} />
           <Route path="/invoices/:id" element={<ProtectedPage pageName="InvoiceDetail" session={authSession}><InvoiceDetailPageWithGifts /></ProtectedPage>} />
           <Route path="/products" element={<ProtectedPage pageName="ProductSearch" session={authSession}><ProductSearchPage /></ProtectedPage>} />
           <Route path="/products/:name" element={<ProtectedPage pageName="ProductDetail" session={authSession}><ProductDetailPage /></ProtectedPage>} />
@@ -840,7 +840,6 @@ function BatchImportPage() {
   const [message, setMessage] = useState('');
   const [saving, setSaving] = useState(false);
   const [batchId, setBatchId] = useState('');
-  const [importSession, setImportSession] = useState(null);
   const [selectedMergeIds, setSelectedMergeIds] = useState([]);
   const [batchAction, setBatchAction] = useState('');
 
@@ -907,30 +906,21 @@ function BatchImportPage() {
     const fileList = Array.from(files || []);
     if (fileList.length === 0) return;
     setSaving(true);
-    let createdSession = null;
-    try {
-      createdSession = await localDb.createImportSessionFromFiles(fileList, { defaultSupplierName: '未分类' });
-      setImportSession(createdSession);
-    } catch (error) {
-      setMessage(error.message || 'Import session create failed');
-      setSaving(false);
-      return;
-    }
-    const nextBatchId = createdSession?.session?.id || generateId();
+    const nextBatchId = generateId();
     setBatchId(nextBatchId);
     const nextEntries = fileList.map((file) => ({
-      id: createdSession?.pages?.find((page) => page.originalFileName === file.name)?.id || `${Date.now()}-${Math.random().toString(36).slice(2)}`,
-      page: createdSession?.pages?.find((page) => page.originalFileName === file.name) || null,
-      group: createdSession?.groups?.find((group) => group.pages?.some((page) => page.originalFileName === file.name)) || null,
+      id: `${Date.now()}-${Math.random().toString(36).slice(2)}`,
+      page: null,
+      group: null,
       file,
       fileName: file.name,
       previewUrl: URL.createObjectURL(file),
-      status: createdSession?.pages?.find((page) => page.originalFileName === file.name)?.status === 'skipped_duplicate' ? 'skipped' : 'pending',
+      status: 'pending',
       result: null,
-      error: createdSession?.pages?.find((page) => page.originalFileName === file.name)?.status === 'skipped_duplicate' ? 'Duplicate file hash skipped' : ''
+      error: ''
     }));
     setEntries(nextEntries);
-    setMessage(`Import Session: ${createdSession?.session?.sessionName || nextBatchId}`);
+    setMessage(`批量识别任务：${nextBatchId}`);
 
     if (!navigator.onLine) {
       setMessage('离线模式下无法批量 OCR/AI 识别，请联网后再导入。');
@@ -945,10 +935,7 @@ function BatchImportPage() {
       const data = new FormData();
       data.append('image', entry.file);
       data.append('batchId', nextBatchId);
-      data.append('importSessionId', createdSession?.session?.id || nextBatchId);
       data.append('companyName', currentCompanyName);
-      if (entry.group?.id) data.append('invoiceGroupId', entry.group.id);
-      if (entry.page?.id) data.append('invoicePageId', entry.page.id);
       try {
         const created = await api.createRecognitionTask(data);
         console.log('Batch recognition task:', entry.fileName, created);
@@ -978,9 +965,6 @@ function BatchImportPage() {
     data.append('image', entry.file);
     data.append('batchId', batchId || generateId());
     data.append('companyName', currentCompanyName);
-    if (importSession?.session?.id) data.append('importSessionId', importSession.session.id);
-    if (entry.group?.id) data.append('invoiceGroupId', entry.group.id);
-    if (entry.page?.id) data.append('invoicePageId', entry.page.id);
     try {
       const created = await api.createRecognitionTask(data);
       updateEntry(entry.id, {
@@ -1061,9 +1045,9 @@ function BatchImportPage() {
         </div>
         {batchId && (
           <div className="detail-item">
-            <Info label="Import Session" value={importSession?.session?.sessionName || batchId} />
-            <Info label="Invoice Groups" value={importSession?.groups?.length || 0} />
-            <Info label="Pages" value={importSession?.pages?.length || entries.length} />
+            <Info label="识别批次" value={batchId} />
+            <Info label="照片数量" value={entries.length} />
+            <Info label="已完成" value={successfulEntries.length} />
           </div>
         )}
         {batchId && (
@@ -3591,7 +3575,6 @@ function Dialog({ title, onClose, children }) {
 
 function BottomNav() {
   const labels = {
-    documents: '\u6587\u6863',
     home: '\u9996\u9875',
     invoices: '\u53d1\u7968',
     purchase: '\u91c7\u8d2d',
@@ -3600,7 +3583,6 @@ function BottomNav() {
     settings: '\u8bbe\u7f6e'
   };
   const items = [
-    ['/archive', FileText, labels.documents],
     ['/', Home, labels.home],
     ['/invoices', FileText, labels.invoices],
     ['/supplier-center', Building2, labels.purchase],
@@ -4274,12 +4256,6 @@ function summarizePromoGroups(items = []) {
       effectiveUnitCost: group.actualQty > 0 ? group.invoiceAmount / group.actualQty : 0
     }));
 }
-
-
-
-
-
-
 
 
 

@@ -4,8 +4,8 @@ import { hasEncodingDamage, repairRecordEncoding, repairTextEncoding } from './e
 const DB_NAME = 'InvoicePriceTrackerLocal';
 const DB_VERSION = 14;
 
-export const syncTables = ['purchase_batches', 'import_sessions', 'invoice_groups', 'invoice_pages', 'invoice_image_resources', 'suppliers', 'invoices', 'invoice_items', 'products', 'price_history', 'invoice_discounts', 'gift_allocation_rules', 'supplier_templates', 'product_aliases', 'product_learning_rules', 'recognition_corrections', 'price_anomalies'];
-const localOnlyTables = ['invoice_images', 'meta'];
+export const syncTables = ['purchase_batches', 'suppliers', 'invoices', 'invoice_items', 'products', 'price_history', 'invoice_discounts', 'gift_allocation_rules', 'supplier_templates', 'product_aliases', 'product_learning_rules', 'recognition_corrections', 'price_anomalies'];
+const localOnlyTables = ['invoice_images', 'invoice_image_resources', 'meta'];
 
 let dbPromise;
 

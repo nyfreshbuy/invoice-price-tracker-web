@@ -1,7 +1,7 @@
 import { api, getAuthSession, getCompanyId } from './api.js';
 import { localDb, syncTables, getDeviceId, nowIso } from './localDb.js';
 
-const SYNC_BATCH_SIZE = 20;
+const SYNC_BATCH_SIZE = 5;
 const PULL_IMPORT_CHUNK_SIZE = 50;
 const AUTO_SYNC_INTERVAL_MS = 30 * 60 * 1000;
 const SYNC_TIMEOUT_MS = 120 * 1000;
@@ -195,6 +195,11 @@ function countResultsByTable(results = []) {
     counts[table] = (counts[table] || 0) + 1;
     return counts;
   }, {});
+}
+
+function hasCoreBusinessData(stats = {}) {
+  return ['invoices', 'invoice_items', 'products', 'price_history']
+    .some((table) => Number(stats?.[table] || 0) > 0);
 }
 
 function resultKey(result = {}) {
@@ -792,10 +797,16 @@ export async function syncNow({ force = false, reason = 'manual' } = {}) {
     const metaKey = `lastPullAt:${companyId}`;
     const meta = await localDb.getMeta(metaKey);
     const stats = await localDb.getStats();
-    const hasLocalData = Object.values(stats).some((count) => Number(count || 0) > 0);
+    const hasLocalData = hasCoreBusinessData(stats);
     console.log('[SYNC] pull start', {
       companyId,
-      since: hasLocalData ? (meta?.value || '') : ''
+      since: hasLocalData ? (meta?.value || '') : '',
+      coreBusinessCounts: {
+        invoices: stats.invoices || 0,
+        invoice_items: stats.invoice_items || 0,
+        products: stats.products || 0,
+        price_history: stats.price_history || 0
+      }
     });
     const pulled = await api.syncPull(hasLocalData ? (meta?.value || '') : '');
     pulledTotal = totalSyncRecords(pulled.data || {});
@@ -834,13 +845,31 @@ export async function syncNow({ force = false, reason = 'manual' } = {}) {
     console.log('[SYNC] import finished', { warnings: importWarnings });
     if (syncProgress.failed === 0) {
       await setLastSyncAt(companyId, pulled.serverTime || nowIso());
-      console.log('[SYNC] lastSyncAt updated', { companyId, lastSyncAt: await lastSyncAt() });
+      const latestLastSyncAt = await lastSyncAt();
+      const localDiagnostics = typeof localDb.getLocalDiagnostics === 'function'
+        ? await localDb.getLocalDiagnostics().catch(() => null)
+        : null;
+      const coreLocalCounts = {
+        invoices: localDiagnostics?.counts?.invoices ?? null,
+        invoice_items: localDiagnostics?.counts?.invoice_items ?? null,
+        products: localDiagnostics?.counts?.products ?? null,
+        price_history: localDiagnostics?.counts?.price_history ?? null
+      };
+      console.log('[SYNC] lastSyncAt updated', { companyId, lastSyncAt: latestLastSyncAt });
+      console.log('[SYNC] local diagnostics after sync', {
+        ...coreLocalCounts,
+        lastSyncAt: latestLastSyncAt,
+        lastSyncError: ''
+      });
       await setSyncDiagnostic(companyId, {
         status: importWarnings.length ? 'success_with_warnings' : 'success',
         finishedAt: nowIso(),
         error: '',
         warnings: importWarnings,
         warningCount: importWarnings.length,
+        localCounts: coreLocalCounts,
+        lastSyncAt: latestLastSyncAt,
+        lastSyncError: '',
         pushCount: pushedTotal,
         pullCount: pulledTotal,
         pendingCount: await localDb.getPendingCount(),
@@ -940,7 +969,9 @@ export async function pullFromCloud({ full = false } = {}) {
       pullCount: 0
     });
     const metaKey = `lastPullAt:${companyId}`;
-    const meta = full ? null : await localDb.getMeta(metaKey);
+    const stats = await localDb.getStats();
+    const shouldFullPull = full || !hasCoreBusinessData(stats);
+    const meta = shouldFullPull ? null : await localDb.getMeta(metaKey);
     const pulled = await api.syncPull(meta?.value || '');
     const restorePullTotal = totalSyncRecords(pulled.data || {});
     if (restorePullTotal > 0) {
@@ -949,8 +980,14 @@ export async function pullFromCloud({ full = false } = {}) {
     }
     console.log('[sync] cloud pull completed:', {
       companyId,
-      full,
+      full: shouldFullPull,
       since: meta?.value || '',
+      coreBusinessCounts: {
+        invoices: stats.invoices || 0,
+        invoice_items: stats.invoice_items || 0,
+        products: stats.products || 0,
+        price_history: stats.price_history || 0
+      },
       backend: pulled.backend || '',
       counts: Object.fromEntries(syncTables.map((table) => [table, (pulled.data?.[table] || []).length]))
     });
@@ -962,15 +999,32 @@ export async function pullFromCloud({ full = false } = {}) {
       const result = await importPulledTable(table, records, importWarnings);
       console.log(`[SYNC] imported ${table}`, result);
     }
+    const productRebuild = typeof localDb.rebuildProductsFromLocalRecords === 'function'
+      ? await localDb.rebuildProductsFromLocalRecords()
+      : null;
+    const localDiagnostics = typeof localDb.getLocalDiagnostics === 'function'
+      ? await localDb.getLocalDiagnostics().catch(() => null)
+      : null;
     window.dispatchEvent(new Event('local-db-change'));
     console.log('[SYNC] import finished', { warnings: importWarnings });
     await setLastSyncAt(companyId, pulled.serverTime || nowIso());
-    console.log('[SYNC] lastSyncAt updated', { companyId, lastSyncAt: await lastSyncAt() });
+    const latestLastSyncAt = await lastSyncAt();
+    console.log('[SYNC] lastSyncAt updated', { companyId, lastSyncAt: latestLastSyncAt });
     await setSyncDiagnostic(companyId, {
-      status: 'success',
+      status: importWarnings.length ? 'success_with_warnings' : 'success',
       finishedAt: nowIso(),
       error: '',
       warnings: importWarnings,
+      warningCount: importWarnings.length,
+      localCounts: {
+        invoices: localDiagnostics?.counts?.invoices ?? null,
+        invoice_items: localDiagnostics?.counts?.invoice_items ?? null,
+        products: localDiagnostics?.counts?.products ?? null,
+        price_history: localDiagnostics?.counts?.price_history ?? null
+      },
+      productRebuild,
+      lastSyncAt: latestLastSyncAt,
+      lastSyncError: '',
       pushCount: 0,
       pullCount: totalSyncRecords(pulled.data || {}),
       pendingCount: await localDb.getPendingCount()
