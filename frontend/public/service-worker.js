@@ -1,4 +1,4 @@
-const CACHE_NAME = 'invoice-price-tracker-utf8-v13';
+const CACHE_NAME = 'invoice-price-tracker-utf8-v14';
 const APP_SHELL = [
   '/',
   '/index.html',

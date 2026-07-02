@@ -504,14 +504,15 @@ async function put(table, record) {
   return nextRecord;
 }
 
-async function putMany(table, records) {
+async function putMany(table, records, options = {}) {
   const { tx, objectStore } = await store(table, 'readwrite');
   for (const record of records) objectStore.put(table === 'invoice_images' ? record : repairRecordEncoding(record));
   await new Promise((resolve, reject) => {
     tx.oncomplete = resolve;
     tx.onerror = () => reject(tx.error);
+    tx.onabort = () => reject(tx.error || new Error(`IndexedDB transaction aborted for ${table}`));
   });
-  window.dispatchEvent(new CustomEvent('local-db-change', { detail: { table } }));
+  if (!options.silent) window.dispatchEvent(new CustomEvent('local-db-change', { detail: { table } }));
 }
 
 async function get(table, id) {
@@ -926,7 +927,7 @@ export const localDb = {
     });
   },
 
-  async mergeRemoteMany(table, remotes = []) {
+  async mergeRemoteMany(table, remotes = [], options = {}) {
     const incoming = Array.isArray(remotes) ? remotes.filter(belongsToCurrentCompany) : [];
     if (!incoming.length) return { table, imported: 0, skipped: 0 };
     const records = await all(table);
@@ -971,7 +972,7 @@ export const localDb = {
       tx.onerror = () => reject(tx.error);
       tx.onabort = () => reject(tx.error || new Error(`IndexedDB transaction aborted for ${table}`));
     });
-    window.dispatchEvent(new CustomEvent('local-db-change', { detail: { table } }));
+    if (!options.silent) window.dispatchEvent(new CustomEvent('local-db-change', { detail: { table } }));
     return { table, imported, skipped };
   },
 
@@ -2419,10 +2420,15 @@ export const localDb = {
       for (const record of records) {
         if (!hasEncodingDamage(record)) continue;
         const next = repairRecordEncoding(record);
+        const currentStatus = record.syncStatus || 'synced';
+        const localDirty = ['pending', 'deleted', 'failed', 'conflict'].includes(currentStatus);
         repaired.push({
           ...next,
-          syncStatus: record.deletedAt ? record.syncStatus : (record.syncStatus === 'synced' ? 'pending' : record.syncStatus),
-          updatedAt: record.deletedAt ? record.updatedAt : nowIso(),
+          syncStatus: currentStatus,
+          pendingSync: ['pending', 'deleted'].includes(currentStatus),
+          dirty: Boolean(record.dirty || currentStatus === 'pending'),
+          syncError: record.syncError || '',
+          updatedAt: localDirty && !record.deletedAt ? nowIso() : record.updatedAt,
           encodingFixedAt: nowIso()
         });
       }

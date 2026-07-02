@@ -2,8 +2,9 @@ import { api, getAuthSession, getCompanyId } from './api.js';
 import { localDb, syncTables, getDeviceId, nowIso } from './localDb.js';
 
 const SYNC_BATCH_SIZE = 20;
+const PULL_IMPORT_CHUNK_SIZE = 100;
 const AUTO_SYNC_INTERVAL_MS = 30 * 60 * 1000;
-const SYNC_TIMEOUT_MS = 30 * 1000;
+const SYNC_TIMEOUT_MS = 120 * 1000;
 const CORE_PULL_TABLES = new Set(['purchase_batches', 'suppliers', 'invoices', 'invoice_items', 'products', 'price_history']);
 
 let syncing = false;
@@ -399,6 +400,46 @@ function errorDetails(error) {
   };
 }
 
+function yieldToBrowser() {
+  return new Promise((resolve) => window.setTimeout(resolve, 0));
+}
+
+async function importPulledTable(table, records = [], importWarnings = []) {
+  if (!records.length) return { table, imported: 0, skipped: 0 };
+  let imported = 0;
+  let skipped = 0;
+  for (let index = 0; index < records.length; index += PULL_IMPORT_CHUNK_SIZE) {
+    const chunk = records.slice(index, index + PULL_IMPORT_CHUNK_SIZE);
+    try {
+      if (typeof localDb.mergeRemoteMany === 'function') {
+        const result = await localDb.mergeRemoteMany(table, chunk, { silent: true });
+        imported += Number(result.imported || 0);
+        skipped += Number(result.skipped || 0);
+      } else {
+        for (const record of chunk) await localDb.mergeRemote(table, record);
+        imported += chunk.length;
+      }
+      console.log('[SYNC] imported chunk', {
+        table,
+        imported,
+        skipped,
+        chunkStart: index,
+        chunkSize: chunk.length
+      });
+    } catch (error) {
+      const details = errorDetails(error);
+      console.error('[SYNC] failed table:', table, details);
+      if (CORE_PULL_TABLES.has(table)) throw error;
+      importWarnings.push({ table, ...details });
+    } finally {
+      syncProgress.done = Math.min(syncProgress.total, syncProgress.done + chunk.length);
+      emitSyncStateChange();
+      await yieldToBrowser();
+    }
+  }
+  return { table, imported, skipped };
+}
+
 function syncLabel({ session, pendingCount, conflictCount, error }) {
   if (!session) return '\u8bf7\u5148\u767b\u5f55';
   if (!navigator.onLine) return '\u2601 \u79bb\u7ebf\u6a21\u5f0f';
@@ -413,6 +454,16 @@ function syncLabel({ session, pendingCount, conflictCount, error }) {
 
 
 export async function getSyncSnapshot() {
+  if (syncing && syncStartedAt && Date.now() - syncStartedAt > SYNC_TIMEOUT_MS + 10000) {
+    console.warn('[SYNC] stale sync state reset from snapshot', {
+      startedAt: syncStartedAt,
+      progress: { ...syncProgress }
+    });
+    syncing = false;
+    lastError = lastError || '\u540c\u6b65\u8d85\u65f6\uff0c\u8bf7\u91cd\u8bd5';
+    clearSyncWatchdog();
+    syncStartedAt = 0;
+  }
   const session = getAuthSession();
   const companyId = getCompanyId();
   const [pendingCount, conflictCount, failedCount, pendingChanges, preferences, lastSync, diagnostic] = await Promise.all([
@@ -686,26 +737,10 @@ export async function syncNow({ force = false, reason = 'manual' } = {}) {
     for (const table of syncTables) {
       const records = pulled.data?.[table] || [];
       console.log(`[SYNC] importing ${table} count`, records.length);
-      try {
-        if (typeof localDb.mergeRemoteMany === 'function') {
-          const result = await localDb.mergeRemoteMany(table, records);
-          console.log(`[SYNC] imported ${table}`, result);
-        } else {
-          for (const record of records) await localDb.mergeRemote(table, record);
-          console.log(`[SYNC] imported ${table}`, { table, imported: records.length, skipped: 0 });
-        }
-      } catch (error) {
-        const details = errorDetails(error);
-        console.error('[SYNC] failed table:', table, details);
-        if (CORE_PULL_TABLES.has(table)) throw error;
-        importWarnings.push({ table, ...details });
-      } finally {
-        if (records.length) {
-          syncProgress.done = Math.min(syncProgress.total, syncProgress.done + records.length);
-          emitSyncStateChange();
-        }
-      }
+      const result = await importPulledTable(table, records, importWarnings);
+      console.log(`[SYNC] imported ${table}`, result);
     }
+    window.dispatchEvent(new Event('local-db-change'));
     console.log('[SYNC] import finished', { warnings: importWarnings });
     if (syncProgress.failed === 0) {
       await setLastSyncAt(companyId, pulled.serverTime || nowIso());
@@ -832,26 +867,10 @@ export async function pullFromCloud({ full = false } = {}) {
     for (const table of syncTables) {
       const records = pulled.data?.[table] || [];
       console.log(`[SYNC] importing ${table} count`, records.length);
-      try {
-        if (typeof localDb.mergeRemoteMany === 'function') {
-          const result = await localDb.mergeRemoteMany(table, records);
-          console.log(`[SYNC] imported ${table}`, result);
-        } else {
-          for (const record of records) await localDb.mergeRemote(table, record);
-          console.log(`[SYNC] imported ${table}`, { table, imported: records.length, skipped: 0 });
-        }
-      } catch (error) {
-        const details = errorDetails(error);
-        console.error('[SYNC] failed table:', table, details);
-        if (CORE_PULL_TABLES.has(table)) throw error;
-        importWarnings.push({ table, ...details });
-      } finally {
-        if (records.length) {
-          syncProgress.done = Math.min(syncProgress.total, syncProgress.done + records.length);
-          emitSyncStateChange();
-        }
-      }
+      const result = await importPulledTable(table, records, importWarnings);
+      console.log(`[SYNC] imported ${table}`, result);
     }
+    window.dispatchEvent(new Event('local-db-change'));
     console.log('[SYNC] import finished', { warnings: importWarnings });
     await setLastSyncAt(companyId, pulled.serverTime || nowIso());
     console.log('[SYNC] lastSyncAt updated', { companyId, lastSyncAt: await lastSyncAt() });
