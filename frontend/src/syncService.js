@@ -4,7 +4,8 @@ import { localDb, syncTables, getDeviceId, nowIso } from './localDb.js';
 const SYNC_BATCH_SIZE = 5;
 const PULL_IMPORT_CHUNK_SIZE = 50;
 const AUTO_SYNC_INTERVAL_MS = 30 * 60 * 1000;
-const SYNC_TIMEOUT_MS = 120 * 1000;
+const SYNC_TIMEOUT_MS = 10 * 60 * 1000;
+const SYNC_STALE_MS = 120 * 1000;
 const CORE_PULL_TABLES = new Set(['purchase_batches', 'suppliers', 'invoices', 'invoice_items', 'products', 'price_history']);
 
 let syncing = false;
@@ -527,7 +528,7 @@ function syncLabel({ session, pendingCount, conflictCount, error }) {
 
 
 export async function getSyncSnapshot() {
-  if (syncing && lastSyncProgressAt && Date.now() - lastSyncProgressAt > 60 * 1000) {
+  if (syncing && lastSyncProgressAt && Date.now() - lastSyncProgressAt > SYNC_STALE_MS) {
     const companyId = getCompanyId();
     lastError = `\u540c\u6b65\u505c\u6ede\uff1a${syncProgress.table || '\u672a\u77e5\u8868'} ${syncProgress.lastRecordId || ''}`;
     syncing = false;
@@ -650,6 +651,8 @@ export async function syncNow({ force = false, reason = 'manual' } = {}) {
   let syncCompanyId = '';
   let pushedTotal = 0;
   let pulledTotal = 0;
+  let pushFailedCount = 0;
+  const pushErrors = [];
   const syncedResultsForDiagnostic = [];
   try {
     const preferences = await getSyncPreferences();
@@ -742,9 +745,11 @@ export async function syncNow({ force = false, reason = 'manual' } = {}) {
           syncedResultsForDiagnostic.push(...lastSyncedResults);
           console.log('[SYNC FRONTEND] markSynced table products success count', appliedByTable.products || 0);
           console.log('[SYNC FRONTEND] markSynced table price_history success count', appliedByTable.price_history || 0);
-          if (missingResultCount > 0) {
-            syncProgress.failed += missingResultCount;
-            lastError = `${missingResultCount} sync records did not receive server results`;
+          const batchFailedCount = notFoundCount + missingResultCount;
+          if (batchFailedCount > 0) {
+            pushFailedCount += batchFailedCount;
+            syncProgress.failed += batchFailedCount;
+            pushErrors.push(`${batchFailedCount} sync records did not apply locally`);
           }
           const remainingAfterBatch = await localDb.getPendingCount();
           console.log('[SYNC FRONTEND] pending after markSynced', remainingAfterBatch);
@@ -772,8 +777,9 @@ export async function syncNow({ force = false, reason = 'manual' } = {}) {
               const applied = await applyPushResults([entry], singleResults);
               syncedResultsForDiagnostic.push(...(applied.lastSyncedResults || []));
               if (applied.failedCount > 0) {
+                pushFailedCount += applied.failedCount;
                 syncProgress.failed += applied.failedCount;
-                lastError = `\u540c\u6b65\u5931\u8d25\uff1a${entry.table} ${entry.record?.id || entry.record?.localId || ''}`;
+                pushErrors.push(`\u540c\u6b65\u5931\u8d25\uff1a${entry.table} ${entry.record?.id || entry.record?.localId || ''}`);
               }
               console.log('[SYNC] single push finish', {
                 table: entry.table,
@@ -783,8 +789,9 @@ export async function syncNow({ force = false, reason = 'manual' } = {}) {
               });
             } catch (singleError) {
               syncProgress.failed += 1;
+              pushFailedCount += 1;
               const message = singleError.message || '\u540c\u6b65\u5931\u8d25';
-              lastError = message;
+              pushErrors.push(`${entry.table} ${entry.record?.id || entry.record?.localId || ''}: ${message}`);
               await localDb.markSyncFailed(entry.table, entry.record.localId || entry.record.id || entry.record.serverId, message);
               console.error('[SYNC] single push failed', {
                 table: entry.table,
@@ -858,7 +865,7 @@ export async function syncNow({ force = false, reason = 'manual' } = {}) {
     });
     window.dispatchEvent(new Event('local-db-change'));
     console.log('[SYNC] import finished', { warnings: importWarnings });
-    if (syncProgress.failed === 0) {
+    if (pulledData && typeof pulledData === 'object') {
       await setLastSyncAt(companyId, pulled.serverTime || nowIso());
       const latestLastSyncAt = await lastSyncAt();
       const localDiagnostics = typeof localDb.getLocalDiagnostics === 'function'
@@ -876,10 +883,15 @@ export async function syncNow({ force = false, reason = 'manual' } = {}) {
         lastSyncAt: latestLastSyncAt,
         lastSyncError: ''
       });
+      const pushErrorMessage = pushFailedCount > 0
+        ? `\u6709 ${pushFailedCount} \u6761\u5f85\u4e0a\u4f20\u6570\u636e\u540c\u6b65\u5931\u8d25\uff0c\u672c\u5730\u67e5\u8be2\u4e0d\u53d7\u5f71\u54cd`
+        : '';
       await setSyncDiagnostic(companyId, {
-        status: importWarnings.length ? 'success_with_warnings' : 'success',
+        status: pushFailedCount > 0 ? 'partial_success' : (importWarnings.length ? 'success_with_warnings' : 'success'),
         finishedAt: nowIso(),
         error: '',
+        pushErrors: pushErrors.slice(-20),
+        pushError: pushErrorMessage,
         warnings: importWarnings,
         warningCount: importWarnings.length,
         localCounts: coreLocalCounts,
@@ -888,7 +900,8 @@ export async function syncNow({ force = false, reason = 'manual' } = {}) {
         pushCount: pushedTotal,
         pullCount: pulledTotal,
         pendingCount: await localDb.getPendingCount(),
-        failedCount: 0,
+        failedCount: pushFailedCount,
+        pendingDetails: (await localDb.getPendingDebugDetails()).slice(0, 50),
         lastPushSyncedResults: syncedResultsForDiagnostic.slice(-500)
       });
       lastError = '';

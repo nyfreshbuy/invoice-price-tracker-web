@@ -2551,7 +2551,7 @@ function ProductSearchPage() {
   const noLocalData = Number(counts.invoice_items || 0) === 0 && Number(counts.price_history || 0) === 0 && Number(counts.products || 0) === 0;
   const emptyText = hasKeyword
     ? '\u6ca1\u6709\u627e\u5230\u76f8\u5173\u5546\u54c1'
-    : (noLocalData ? '\u672c\u5730\u6682\u65e0\u6570\u636e\uff0c\u8bf7\u5148\u540c\u6b65' : '\u6682\u65e0\u5546\u54c1\u8bb0\u5f55');
+    : (noLocalData ? '\u672c\u5730\u6682\u65e0\u6570\u636e\uff0c\u8bf7\u5148\u540c\u6b65' : '\u672c\u5730\u6709\u6570\u636e\uff0c\u4f46\u6ca1\u6709\u53ef\u663e\u793a\u7684\u5546\u54c1\u8bb0\u5f55');
   return (
     <Page title={'\u5546\u54c1\u4ef7\u683c\u67e5\u8be2'} subtitle={'\u4f18\u5148\u67e5\u8be2\u672c\u5730 IndexedDB\uff1b\u5f02\u5e38\u5546\u54c1\u4e0d\u4f1a\u8fdb\u5165\u6b63\u5f0f\u4ef7\u683c\u7edf\u8ba1\u3002'}>
       <Section title={'\u641c\u7d22'}>
@@ -3120,17 +3120,20 @@ function SettingsPage() {
   const [stats, setStats] = useState({});
   const [diagnostics, setDiagnostics] = useState(null);
   const [syncSnapshot, setSyncSnapshot] = useState({ label: '\u2601 \u5df2\u540c\u6b65', pendingCount: 0, pendingByTable: {}, lastSyncAt: '', lastError: '', syncing: false });
+  const [pendingDetails, setPendingDetails] = useState([]);
   const [message, setMessage] = useState('');
   const [syncing, setSyncing] = useState(false);
   const load = async () => {
-    const [nextStats, nextSnapshot, nextDiagnostics] = await Promise.all([
+    const [nextStats, nextSnapshot, nextDiagnostics, nextPendingDetails] = await Promise.all([
       localDb.getStats(),
       getSyncSnapshot(),
-      localDb.getLocalDiagnostics()
+      localDb.getLocalDiagnostics(),
+      localDb.getPendingDebugDetails()
     ]);
     setStats(nextStats);
     setSyncSnapshot(nextSnapshot);
     setDiagnostics(nextDiagnostics);
+    setPendingDetails(nextPendingDetails);
   };
   useLocalReload(load);
   useEffect(() => {
@@ -3145,7 +3148,9 @@ function SettingsPage() {
       const result = await syncNow({ force: true, reason: 'settings' });
       const latest = await getSyncSnapshot();
       setSyncSnapshot(latest);
-      setMessage(latest.lastError ? `\u540c\u6b65\u5931\u8d25\uff1a${latest.lastError}` : '\u540c\u6b65\u5b8c\u6210');
+      setMessage(latest.lastError
+        ? `\u540c\u6b65\u5931\u8d25\uff1a${latest.lastError}`
+        : (latest.diagnostic?.pushError || '\u540c\u6b65\u5b8c\u6210'));
       await load();
       return result;
     } catch (error) {
@@ -3217,14 +3222,14 @@ function SettingsPage() {
         <Info label={'\u5f85\u540c\u6b65\u5546\u54c1'} value={syncSnapshot.pendingByTable?.products || 0} />
         <Info label={'\u5f85\u540c\u6b65\u4ef7\u683c\u5386\u53f2'} value={syncSnapshot.pendingByTable?.price_history || 0} />
         <Info label={'\u6700\u540e\u540c\u6b65\u65f6\u95f4'} value={syncSnapshot.lastSyncAt || '-'} />
-        <Info label={'\u6700\u8fd1\u9519\u8bef'} value={syncSnapshot.lastError || syncDiagnostic.error || '\u65e0'} />
+        <Info label={'\u6700\u8fd1\u9519\u8bef'} value={syncSnapshot.lastError || syncDiagnostic.error || syncDiagnostic.pushError || '\u65e0'} />
         <div className="row-actions">
           <button className="primary-button" disabled={syncing || syncSnapshot.syncing} onClick={handleSettingsSyncNow}><RefreshCw size={16} />{syncing || syncSnapshot.syncing ? '\u540c\u6b65\u4e2d...' : '\u7acb\u5373\u540c\u6b65'}</button>
           <button type="button" disabled={syncing} onClick={restoreCloud}>{'\u4ece\u4e91\u7aef\u6062\u590d'}</button>
           <button type="button" disabled={syncing} onClick={clearLocalAndRestore}>{'\u6e05\u7a7a\u672c\u5730\u7f13\u5b58\u540e\u91cd\u65b0\u62c9\u53d6'}</button>
           <button type="button" disabled={syncing} onClick={clearSyncedPendingStatus}>{'\u6e05\u9664\u5df2\u6210\u529f\u540c\u6b65\u7684 pending \u72b6\u6001'}</button>
         </div>
-        <p className={(message || syncSnapshot.lastError || syncSnapshot.diagnostic?.error || '').includes('\u5931\u8d25') || syncSnapshot.lastError || syncSnapshot.diagnostic?.error ? 'error' : 'success-text'}>{message || syncSnapshot.lastError || syncSnapshot.diagnostic?.error || syncSnapshot.label || '\u2601 \u5df2\u540c\u6b65'}</p>
+        <p className={(message || syncSnapshot.lastError || syncSnapshot.diagnostic?.error || '').includes('\u5931\u8d25') || syncSnapshot.lastError || syncSnapshot.diagnostic?.error ? 'error' : 'success-text'}>{message || syncSnapshot.lastError || syncSnapshot.diagnostic?.error || syncSnapshot.diagnostic?.pushError || syncSnapshot.label || '\u2601 \u5df2\u540c\u6b65'}</p>
       </Section>
       <Section title={'\u540c\u6b65\u8bca\u65ad'}>
         <Info label="userId" value={session?.user?.id || '-'} />
@@ -3243,6 +3248,19 @@ function SettingsPage() {
         <Info label="last push count" value={syncDiagnostic.pushCount ?? '-'} />
         <Info label="last API status" value={apiDebug?.status ?? '-'} />
         <p className="long-text">last API error: {apiDebug?.error || '-'}</p>
+        {pendingDetails.length > 0 && (
+          <details className="debug-box">
+            <summary>{'\u67e5\u770b\u5f85\u540c\u6b65\u9879\u76ee'} ({pendingDetails.length})</summary>
+            {pendingDetails.slice(0, 30).map((item, index) => (
+              <div className="info-row" key={`${item.table}-${item.id || item.localId || index}`}>
+                <span>{item.table}</span>
+                <strong className="long-text">
+                  {item.id || item.localId || item.serverId || '-'} / {item.invoiceId || '-'} / {item.syncStatus || '-'} / {item.error || item.syncError || '-'}
+                </strong>
+              </div>
+            ))}
+          </details>
+        )}
       </Section>
       <MemberManagementPanel />
       <Section title={'\u6570\u636e\u5e93\u7edf\u8ba1'}>
@@ -4269,9 +4287,6 @@ function summarizePromoGroups(items = []) {
       effectiveUnitCost: group.actualQty > 0 ? group.invoiceAmount / group.actualQty : 0
     }));
 }
-
-
-
 
 
 
