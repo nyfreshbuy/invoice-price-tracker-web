@@ -270,6 +270,15 @@ function errorMessage(error) {
   return error?.message || String(error || '');
 }
 
+function productSearchErrorMessage(error) {
+  const message = uiText(errorMessage(error));
+  if (error?.status === 401 || error?.status === 403) return '未登录或 token 已失效，请重新登录';
+  if (/companyId|company id|company/i.test(message)) return `companyId 缺失或不匹配：${message}`;
+  if (error?.isTimeout || error?.name === 'AbortError' || /timeout|超时/i.test(message)) return '服务器启动中，请稍后重试';
+  if (error?.isNetworkError || navigator.onLine === false) return `网络连接失败：${message}`;
+  return `云端查询失败：${message}`;
+}
+
 function safeObject(value) {
   return value && typeof value === 'object' && !Array.isArray(value) ? value : {};
 }
@@ -2522,17 +2531,23 @@ function ProductSearchPage() {
         console.info('[products] cloud search request', { q: keyword });
         let data;
         let nextSearchError = '';
-        try {
-          data = await api.searchProducts(keyword);
-          console.info('[products] cloud search response', {
-            q: keyword,
-            count: apiItems(data).length,
-            counts: data?.counts || null,
-            source: data?.source || 'cloud'
-          });
-        } catch (cloudError) {
-          console.warn('[products] cloud search failed, falling back to IndexedDB', cloudError);
-          nextSearchError = `云端查询失败：${errorMessage(cloudError)}`;
+        const online = navigator.onLine !== false;
+        if (online) {
+          try {
+            data = await api.searchProducts(keyword);
+            console.info('[products] cloud search response', {
+              q: keyword,
+              count: apiItems(data).length,
+              counts: data?.counts || null,
+              source: data?.source || 'cloud'
+            });
+          } catch (cloudError) {
+            console.warn('[products] cloud search failed, falling back to IndexedDB', cloudError);
+            nextSearchError = productSearchErrorMessage(cloudError);
+            data = await localDb.searchProducts(keyword);
+          }
+        } else {
+          nextSearchError = '当前离线，正在显示本地缓存';
           data = await localDb.searchProducts(keyword);
         }
         if (!cancelled && searchSeq.current === seq) {
@@ -2561,7 +2576,7 @@ function ProductSearchPage() {
         recordPageError(error, { componentStack: 'ProductSearchPage' }, 'searchProducts');
         if (!cancelled && searchSeq.current === seq) {
           setResults([]);
-          setSearchError(`商品查询失败：${errorMessage(error)}`);
+          setSearchError(productSearchErrorMessage(error));
           setDiagnostics({
             counts: {
               products: `error: ${errorMessage(error)}`,
@@ -2590,6 +2605,7 @@ function ProductSearchPage() {
   const productResults = safeArray(results);
   const hasKeyword = q.trim().length > 0;
   const counts = diagnostics?.counts || {};
+  const isOnline = navigator.onLine !== false;
   const syncErrorText = syncSnapshot?.lastError
     || syncSnapshot?.diagnostic?.error
     || (syncSnapshot?.diagnostic?.status === 'failed' ? '同步失败但未返回错误，请查看 Console [SYNC]' : '')
@@ -2598,7 +2614,7 @@ function ProductSearchPage() {
   const noLocalData = Number(counts.invoice_items || 0) === 0 && Number(counts.price_history || 0) === 0 && Number(counts.products || 0) === 0;
   const emptyText = hasKeyword
     ? (searchError || '\u6ca1\u6709\u627e\u5230\u76f8\u5173\u5546\u54c1')
-    : (noLocalData ? '\u672c\u5730\u6682\u65e0\u6570\u636e\uff0c\u8bf7\u5148\u540c\u6b65' : '\u672c\u5730\u6709\u6570\u636e\uff0c\u4f46\u6ca1\u6709\u53ef\u663e\u793a\u7684\u5546\u54c1\u8bb0\u5f55');
+    : (searchError || (isOnline ? '\u4e91\u7aef\u6ca1\u6709\u53ef\u663e\u793a\u7684\u5546\u54c1\u8bb0\u5f55' : (noLocalData ? '\u79bb\u7ebf\u4e14\u672c\u5730\u6682\u65e0\u7f13\u5b58\u6570\u636e' : '\u672c\u5730\u6709\u6570\u636e\uff0c\u4f46\u6ca1\u6709\u53ef\u663e\u793a\u7684\u5546\u54c1\u8bb0\u5f55')));
   return (
     <Page title={'\u5546\u54c1\u4ef7\u683c\u67e5\u8be2'} subtitle={'\u8054\u7f51\u65f6\u76f4\u63a5\u67e5\u8be2\u4e91\u7aef\u6570\u636e\uff1b\u79bb\u7ebf\u65f6\u4f7f\u7528\u672c\u5730 IndexedDB \u7f13\u5b58\u3002'}>
       <Section title={'\u641c\u7d22'}>
@@ -2626,8 +2642,9 @@ function ProductSearchPage() {
           <Link className="row-card" to={`/products/${encodeURIComponent(routeName || '')}`} key={routeName || item?.productId || index}>
             <div>
               <h3>{displayName}</h3>
-              <p>{'\u6700\u8fd1\u4ef7\u683c'} {money(item?.recentPrice)} / {'\u6700\u4f4e\u4ef7'} {money(item?.minPrice)} / {'\u6700\u9ad8\u4ef7'} {money(item?.maxPrice)}</p>
-              <p>{'\u5747\u4ef7'} {money(item?.averagePrice)} / {'\u6700\u8fd1\u4f9b\u5e94\u5546'} {item?.recentSupplierName || '-'} / {'\u6700\u8fd1\u91c7\u8d2d'} {item?.recentPurchaseDate || '-'} / {item?.recordCount || 0} {'\u6761'}</p>
+              <p>{'\u6700\u8fd1\u4ef7\u683c'} {money(item?.lastPrice ?? item?.recentPrice)} / {'\u6700\u4f4e\u4ef7'} {money(item?.minPrice)} / {'\u6700\u9ad8\u4ef7'} {money(item?.maxPrice)}</p>
+              <p>{'\u6570\u91cf'} {item?.lastQuantity ?? '-'} / {'\u53d1\u7968\u53f7'} {item?.invoiceNumber || '-'} / {'\u6765\u6e90'} {item?.source || '-'}</p>
+              <p>{'\u5747\u4ef7'} {money(item?.averagePrice)} / {'\u6700\u8fd1\u4f9b\u5e94\u5546'} {uiText(item?.supplierName || item?.recentSupplierName || '-')} / {'\u6700\u8fd1\u91c7\u8d2d'} {item?.lastDate || item?.recentPurchaseDate || '-'} / {item?.recordCount || 0} {'\u6761'}</p>
               {Number(item?.pendingCount || 0) > 0 && <p className="warning-text">{item.pendingCount} {'\u6761\u4ef7\u683c\u6765\u81ea\u5f85\u786e\u8ba4/\u5f02\u5e38\u53d1\u7968'}</p>}
             </div>
             <ChevronRight />

@@ -270,7 +270,7 @@ export const api = {
     return download(`/api/suppliers/${supplierId}/invoices.xls${query ? `?${query}` : ''}`, `supplier-${supplierId}-invoices.xls`);
   },
 
-  searchProducts: (q) => request(`/api/products/search?q=${encodeURIComponent(q)}`),
+  searchProducts: (q) => request(`/api/products/search?q=${encodeURIComponent(q)}`, { timeoutMs: 30000 }),
   getProduct: (name) => request(`/api/products/${encodeURIComponent(name)}`),
   getProductPriceHistory: (id) => request(`/api/products/${encodeURIComponent(id)}/price-history`),
   getDashboardStats: () => request('/api/dashboard/stats'),

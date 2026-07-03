@@ -4600,6 +4600,8 @@ function cloudProductSummaries(data = {}, query = '') {
     const product = productById.get(recent.productId) || {};
     const productName = cloudItemName(recent) || cloudProductName(product) || recent.productNameNormalized || recent.normalizedName || key;
     const recentPrice = cloudPriceForItem(recent);
+    const supplierName = recent.supplierName || invoice.supplierName || cloudSupplierName(supplier);
+    const lastDate = recent.invoiceDate || invoice.invoiceDate || recent.createdAt || '';
     return {
       productId: recent.productId || '',
       productName,
@@ -4608,16 +4610,18 @@ function cloudProductSummaries(data = {}, query = '') {
       normalizedName: recent.productNameNormalized || recent.normalizedName || product.normalizedName || key,
       standardName: recent.productNameNormalized || recent.normalizedName || product.normalizedName || key,
       itemName: recent.itemName || '',
-      supplierName: cloudSupplierName(supplier),
+      supplierName,
       lastPrice: recentPrice,
-      lastDate: recent.invoiceDate || '',
+      lastQuantity: Number(recent.actualQty || recent.totalQty || recent.quantity || 0),
+      lastDate,
+      invoiceNumber: invoice.invoiceNo || recent.invoiceNo || '',
       source: recent.source || '',
       recentPrice,
       minPrice: prices.length ? Math.min(...prices) : 0,
       maxPrice: prices.length ? Math.max(...prices) : 0,
       averagePrice: prices.length ? prices.reduce((sum, price) => sum + price, 0) / prices.length : 0,
-      recentSupplierName: cloudSupplierName(supplier),
-      recentPurchaseDate: recent.invoiceDate || '',
+      recentSupplierName: supplierName,
+      recentPurchaseDate: lastDate,
       recordCount: records.length
     };
   }).sort((a, b) => (b.recentPurchaseDate || '').localeCompare(a.recentPurchaseDate || '')).slice(0, q ? 100 : 20);
