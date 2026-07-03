@@ -4478,6 +4478,12 @@ function trustedCloudItem(item = {}) {
     && String(item.nameQualityStatus || 'trusted') !== 'needs_review';
 }
 
+function searchableCloudItem(item = {}) {
+  return !Number(item.isDiscountLine || 0)
+    && !Number(item.candidateOnly || 0)
+    && !Number(item.isFreeItem || 0);
+}
+
 function cloudSupplierName(supplier = {}) {
   return supplier?.supplierDisplayName || supplier?.displayName || supplier?.name || supplier?.supplierNameEnglish || supplier?.supplierNameChinese || '-';
 }
@@ -4545,7 +4551,7 @@ function cloudProductSummaries(data = {}, query = '') {
   const rows = [];
 
   for (const row of activeCloudRows(data.invoice_items || [])) {
-    if (!trustedCloudItem(row)) continue;
+    if (!searchableCloudItem(row)) continue;
     const product = productById.get(row.productId) || {};
     if (q && !cloudProductSearchText(row, product).includes(q)) continue;
     rows.push({ ...row, source: 'invoice_items' });
@@ -4565,9 +4571,9 @@ function cloudProductSummaries(data = {}, query = '') {
     });
   }
 
-  if (q) {
+  if (q || rows.length === 0) {
     for (const product of products) {
-      if (!cloudProductSearchText(product, product).includes(q)) continue;
+      if (q && !cloudProductSearchText(product, product).includes(q)) continue;
       rows.push({
         ...product,
         productId: product.id || product.serverId || product.localId || '',
@@ -4602,6 +4608,7 @@ function cloudProductSummaries(data = {}, query = '') {
     const recentPrice = cloudPriceForItem(recent);
     const supplierName = recent.supplierName || invoice.supplierName || cloudSupplierName(supplier);
     const lastDate = recent.invoiceDate || invoice.invoiceDate || recent.createdAt || '';
+    const pendingCount = records.filter((record) => String(record.nameQualityStatus || '').toLowerCase() === 'needs_review' || pendingCloudInvoice(invoiceById.get(record.invoiceId) || {})).length;
     return {
       productId: recent.productId || '',
       productName,
@@ -4622,7 +4629,8 @@ function cloudProductSummaries(data = {}, query = '') {
       averagePrice: prices.length ? prices.reduce((sum, price) => sum + price, 0) / prices.length : 0,
       recentSupplierName: supplierName,
       recentPurchaseDate: lastDate,
-      recordCount: records.length
+      recordCount: records.length,
+      pendingCount
     };
   }).sort((a, b) => (b.recentPurchaseDate || '').localeCompare(a.recentPurchaseDate || '')).slice(0, q ? 100 : 20);
 }

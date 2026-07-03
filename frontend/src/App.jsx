@@ -2520,6 +2520,7 @@ function ProductSearchPage() {
   const [diagnostics, setDiagnostics] = useState(null);
   const [syncSnapshot, setSyncSnapshot] = useState(null);
   const [searchError, setSearchError] = useState('');
+  const [cloudCounts, setCloudCounts] = useState(null);
   const searchSeq = useRef(0);
   useEffect(() => {
     let cancelled = false;
@@ -2534,22 +2535,25 @@ function ProductSearchPage() {
         const online = navigator.onLine !== false;
         if (online) {
           try {
-            data = await api.searchProducts(keyword);
-            console.info('[products] cloud search response', {
-              q: keyword,
-              count: apiItems(data).length,
-              counts: data?.counts || null,
-              source: data?.source || 'cloud'
-            });
-          } catch (cloudError) {
-            console.warn('[products] cloud search failed, falling back to IndexedDB', cloudError);
-            nextSearchError = productSearchErrorMessage(cloudError);
-            data = await localDb.searchProducts(keyword);
-          }
-        } else {
-          nextSearchError = '当前离线，正在显示本地缓存';
+          data = await api.searchProducts(keyword);
+          console.info('[products] cloud search response', {
+            q: keyword,
+            count: apiItems(data).length,
+            counts: data?.counts || null,
+            source: data?.source || 'cloud'
+          });
+          if (!cancelled && searchSeq.current === seq) setCloudCounts(data?.counts || null);
+        } catch (cloudError) {
+          console.warn('[products] cloud search failed, falling back to IndexedDB', cloudError);
+          nextSearchError = productSearchErrorMessage(cloudError);
           data = await localDb.searchProducts(keyword);
+          if (!cancelled && searchSeq.current === seq) setCloudCounts(null);
         }
+      } else {
+        nextSearchError = '当前离线，正在显示本地缓存';
+        data = await localDb.searchProducts(keyword);
+        if (!cancelled && searchSeq.current === seq) setCloudCounts(null);
+      }
         if (!cancelled && searchSeq.current === seq) {
           setResults(apiItems(data));
           setSearchError(nextSearchError);
@@ -2577,6 +2581,7 @@ function ProductSearchPage() {
         if (!cancelled && searchSeq.current === seq) {
           setResults([]);
           setSearchError(productSearchErrorMessage(error));
+          setCloudCounts(null);
           setDiagnostics({
             counts: {
               products: `error: ${errorMessage(error)}`,
@@ -2605,13 +2610,14 @@ function ProductSearchPage() {
   const productResults = safeArray(results);
   const hasKeyword = q.trim().length > 0;
   const counts = diagnostics?.counts || {};
+  const visibleCounts = cloudCounts || counts;
   const isOnline = navigator.onLine !== false;
   const syncErrorText = syncSnapshot?.lastError
     || syncSnapshot?.diagnostic?.error
     || (syncSnapshot?.diagnostic?.status === 'failed' ? '同步失败但未返回错误，请查看 Console [SYNC]' : '')
     || (syncSnapshot?.diagnostic?.warningCount ? `同步有 ${syncSnapshot.diagnostic.warningCount} 个警告` : '')
     || '\u65e0';
-  const noLocalData = Number(counts.invoice_items || 0) === 0 && Number(counts.price_history || 0) === 0 && Number(counts.products || 0) === 0;
+  const noLocalData = Number(visibleCounts.invoice_items || 0) === 0 && Number(visibleCounts.price_history || 0) === 0 && Number(visibleCounts.products || 0) === 0;
   const emptyText = hasKeyword
     ? (searchError || '\u6ca1\u6709\u627e\u5230\u76f8\u5173\u5546\u54c1')
     : (searchError || (isOnline ? '\u4e91\u7aef\u6ca1\u6709\u53ef\u663e\u793a\u7684\u5546\u54c1\u8bb0\u5f55' : (noLocalData ? '\u79bb\u7ebf\u4e14\u672c\u5730\u6682\u65e0\u7f13\u5b58\u6570\u636e' : '\u672c\u5730\u6709\u6570\u636e\uff0c\u4f46\u6ca1\u6709\u53ef\u663e\u793a\u7684\u5546\u54c1\u8bb0\u5f55')));
@@ -2627,9 +2633,9 @@ function ProductSearchPage() {
       {productResults.length === 0 && (
         <Section title={'\u672c\u5730\u6570\u636e\u8bca\u65ad'}>
           {searchError && <p className="error">{searchError}</p>}
-          <Info label="products" value={counts.products ?? '-'} />
-          <Info label="invoice_items" value={counts.invoice_items ?? '-'} />
-          <Info label="price_history" value={counts.price_history ?? '-'} />
+          <Info label={cloudCounts ? 'cloud products' : 'products'} value={visibleCounts.products ?? '-'} />
+          <Info label={cloudCounts ? 'cloud invoice_items' : 'invoice_items'} value={visibleCounts.invoice_items ?? '-'} />
+          <Info label={cloudCounts ? 'cloud price_history' : 'price_history'} value={visibleCounts.price_history ?? '-'} />
           <Info label={'\u540c\u6b65\u72b6\u6001'} value={syncSnapshot?.label || '-'} />
           <Info label={'\u540c\u6b65\u9519\u8bef'} value={syncErrorText} />
         </Section>
