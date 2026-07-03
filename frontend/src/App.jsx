@@ -2521,6 +2521,7 @@ function ProductSearchPage() {
   const [syncSnapshot, setSyncSnapshot] = useState(null);
   const [searchError, setSearchError] = useState('');
   const [cloudCounts, setCloudCounts] = useState(null);
+  const [cloudMeta, setCloudMeta] = useState(null);
   const searchSeq = useRef(0);
   useEffect(() => {
     let cancelled = false;
@@ -2543,16 +2544,19 @@ function ProductSearchPage() {
             source: data?.source || 'cloud'
           });
           if (!cancelled && searchSeq.current === seq) setCloudCounts(data?.counts || null);
+          if (!cancelled && searchSeq.current === seq) setCloudMeta({ companyId: data?.companyId || '', source: data?.source || 'cloud' });
         } catch (cloudError) {
           console.warn('[products] cloud search failed, falling back to IndexedDB', cloudError);
           nextSearchError = productSearchErrorMessage(cloudError);
           data = await localDb.searchProducts(keyword);
           if (!cancelled && searchSeq.current === seq) setCloudCounts(null);
+          if (!cancelled && searchSeq.current === seq) setCloudMeta(null);
         }
       } else {
         nextSearchError = '当前离线，正在显示本地缓存';
         data = await localDb.searchProducts(keyword);
         if (!cancelled && searchSeq.current === seq) setCloudCounts(null);
+        if (!cancelled && searchSeq.current === seq) setCloudMeta(null);
       }
         if (!cancelled && searchSeq.current === seq) {
           setResults(apiItems(data));
@@ -2582,6 +2586,7 @@ function ProductSearchPage() {
           setResults([]);
           setSearchError(productSearchErrorMessage(error));
           setCloudCounts(null);
+          setCloudMeta(null);
           setDiagnostics({
             counts: {
               products: `error: ${errorMessage(error)}`,
@@ -2636,6 +2641,8 @@ function ProductSearchPage() {
           <Info label={cloudCounts ? 'cloud products' : 'products'} value={visibleCounts.products ?? '-'} />
           <Info label={cloudCounts ? 'cloud invoice_items' : 'invoice_items'} value={visibleCounts.invoice_items ?? '-'} />
           <Info label={cloudCounts ? 'cloud price_history' : 'price_history'} value={visibleCounts.price_history ?? '-'} />
+          {cloudMeta && <Info label="cloud source" value={cloudMeta.source || '-'} />}
+          {cloudMeta && <Info label="cloud companyId" value={cloudMeta.companyId || '-'} />}
           <Info label={'\u540c\u6b65\u72b6\u6001'} value={syncSnapshot?.label || '-'} />
           <Info label={'\u540c\u6b65\u9519\u8bef'} value={syncErrorText} />
         </Section>

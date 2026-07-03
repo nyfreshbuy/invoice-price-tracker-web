@@ -4725,6 +4725,7 @@ app.get('/api/products/search', requireAuth, asyncHandler(async (req, res) => {
   res.json({
     items,
     counts,
+    companyId: req.user.companyId,
     source: useMongoSync() ? 'mongodb' : (usingPostgres ? 'postgres' : 'sqlite')
   });
 }));
