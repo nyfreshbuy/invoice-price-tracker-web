@@ -110,6 +110,21 @@ function buildPushBatches(records = []) {
   return batches;
 }
 
+const clientPendingOptions = () => ({ excludeTables: [...CLIENT_GENERATED_TABLES] });
+
+async function getClientPendingCount() {
+  return localDb.getPendingCount(clientPendingOptions());
+}
+
+async function getClientPendingChanges() {
+  return localDb.getPendingChanges(clientPendingOptions());
+}
+
+async function getClientPendingDebugDetails() {
+  const details = await localDb.getPendingDebugDetails();
+  return details.filter((item) => CLIENT_PUSH_TABLES.has(item.table));
+}
+
 function buildBatchChanges(records) {
   const changes = Object.fromEntries(syncTables.map((table) => [table, []]));
   for (const entry of records) {
@@ -451,7 +466,7 @@ export async function clearLastSyncedPendingRecords() {
     applied += Number(count || 0);
     appliedByTable[table] = (appliedByTable[table] || 0) + Number(count || 0);
   }
-  const pendingCount = await localDb.getPendingCount();
+  const pendingCount = await getClientPendingCount();
   await setSyncDiagnostic(companyId, {
     manualPendingClearAt: nowIso(),
     manualPendingClearApplied: applied,
@@ -578,7 +593,7 @@ export async function getSyncSnapshot() {
         error: lastError,
         stalledAt: syncProgress.table || '',
         lastRecordId: syncProgress.lastRecordId || '',
-        pendingCount: await localDb.getPendingCount().catch(() => null),
+        pendingCount: await getClientPendingCount().catch(() => null),
         failedCount: syncProgress.failed || 0
       }).catch(() => {});
     }
@@ -596,10 +611,10 @@ export async function getSyncSnapshot() {
   const session = getAuthSession();
   const companyId = getCompanyId();
   const [pendingCount, conflictCount, failedCount, pendingChanges, preferences, lastSync, diagnostic] = await Promise.all([
-    localDb.getPendingCount({ excludeTables: [...CLIENT_GENERATED_TABLES] }),
+    getClientPendingCount(),
     localDb.getConflictCount(),
     localDb.getFailedCount(),
-    localDb.getPendingChanges({ excludeTables: [...CLIENT_GENERATED_TABLES] }),
+    getClientPendingChanges(),
     getSyncPreferences(),
     lastSyncAt(),
     getSyncDiagnostic(companyId)
@@ -731,9 +746,9 @@ export async function syncNow({ force = false, reason = 'manual' } = {}) {
       if (cleared) console.log('[SYNC FRONTEND] cleared local-cache-only pending table', { table, cleared });
     }
 
-    const pending = await localDb.getPendingChanges({ excludeTables: [...CLIENT_GENERATED_TABLES] });
+    const pending = await getClientPendingChanges();
     const pendingRecords = flattenPendingChanges(pending);
-    const pendingDetails = await localDb.getPendingDebugDetails();
+    const pendingDetails = await getClientPendingDebugDetails();
     await setSyncDiagnostic(companyId, {
       status: 'running',
       startedAt: nowIso(),
@@ -801,7 +816,7 @@ export async function syncNow({ force = false, reason = 'manual' } = {}) {
             syncProgress.failed += batchFailedCount;
             pushErrors.push(`${batchFailedCount} sync records did not apply locally`);
           }
-          const remainingAfterBatch = await localDb.getPendingCount();
+          const remainingAfterBatch = await getClientPendingCount();
           console.log('[SYNC FRONTEND] pending after markSynced', remainingAfterBatch);
           console.log('[SYNC] local apply finish', {
             companyId,
@@ -863,8 +878,8 @@ export async function syncNow({ force = false, reason = 'manual' } = {}) {
       companyId,
       uploadedTotal: pendingRecords.length,
       failedTotal: syncProgress.failed,
-      remainingPending: await localDb.getPendingCount(),
-      remainingPendingDetails: await localDb.getPendingDebugDetails()
+      remainingPending: await getClientPendingCount(),
+      remainingPendingDetails: await getClientPendingDebugDetails()
     });
 
     const metaKey = `lastPullAt:${companyId}`;
@@ -952,30 +967,30 @@ export async function syncNow({ force = false, reason = 'manual' } = {}) {
         lastSyncError: '',
         pushCount: pushedTotal,
         pullCount: pulledTotal,
-        pendingCount: await localDb.getPendingCount(),
+        pendingCount: await getClientPendingCount(),
         failedCount: pushFailedCount,
-        pendingDetails: (await localDb.getPendingDebugDetails()).slice(0, 50),
+        pendingDetails: (await getClientPendingDebugDetails()).slice(0, 50),
         lastPushSyncedResults: syncedResultsForDiagnostic.slice(-500)
       });
       lastError = '';
-      console.log('[SYNC] finish', { companyId, serverTime: pulled.serverTime || '', pendingCount: await localDb.getPendingCount() });
+      console.log('[SYNC] finish', { companyId, serverTime: pulled.serverTime || '', pendingCount: await getClientPendingCount() });
     } else {
-      lastError = `同步失败：剩余 ${await localDb.getPendingCount()} 条`;
+      lastError = `同步失败：剩余 ${await getClientPendingCount()} 条`;
       await setSyncDiagnostic(companyId, {
         status: 'failed',
         finishedAt: nowIso(),
         error: lastError,
         pushCount: pushedTotal,
         pullCount: pulledTotal,
-        pendingCount: await localDb.getPendingCount(),
+        pendingCount: await getClientPendingCount(),
         failedCount: syncProgress.failed,
         lastPushSyncedResults: syncedResultsForDiagnostic.slice(-500)
       });
       console.warn('[SYNC] finish with failures', {
         companyId,
         failedTotal: syncProgress.failed,
-        remainingPending: await localDb.getPendingCount(),
-        remainingPendingDetails: await localDb.getPendingDebugDetails()
+        remainingPending: await getClientPendingCount(),
+        remainingPendingDetails: await getClientPendingDebugDetails()
       });
     }
   } catch (error) {
@@ -987,7 +1002,7 @@ export async function syncNow({ force = false, reason = 'manual' } = {}) {
         error: lastError,
         pushCount: pushedTotal,
         pullCount: pulledTotal,
-        pendingCount: await localDb.getPendingCount().catch(() => null),
+        pendingCount: await getClientPendingCount().catch(() => null),
         failedCount: syncProgress.failed,
         lastPushSyncedResults: syncedResultsForDiagnostic.slice(-500)
       }).catch(() => {});
@@ -1003,7 +1018,7 @@ export async function syncNow({ force = false, reason = 'manual' } = {}) {
         syncInProgress: syncing,
         progress: { ...syncProgress },
         lastError,
-        pendingCount: await localDb.getPendingCount().catch(() => null),
+        pendingCount: await getClientPendingCount().catch(() => null),
         lastSyncTime: await lastSyncAt().catch(() => '')
       });
       syncStartedAt = 0;
@@ -1110,7 +1125,7 @@ export async function pullFromCloud({ full = false } = {}) {
       lastSyncError: '',
       pushCount: 0,
       pullCount: totalSyncRecords(pulledData),
-      pendingCount: await localDb.getPendingCount()
+      pendingCount: await getClientPendingCount()
     });
     lastError = '';
     console.log('[SYNC] pull finish', { full, serverTime: pulled.serverTime || '' });
@@ -1123,7 +1138,7 @@ export async function pullFromCloud({ full = false } = {}) {
         error: lastError,
         pushCount: 0,
         pullCount: 0,
-        pendingCount: await localDb.getPendingCount().catch(() => null)
+        pendingCount: await getClientPendingCount().catch(() => null)
       }).catch(() => {});
     }
     console.error('[SYNC] pull error', error);

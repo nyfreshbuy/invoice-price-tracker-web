@@ -348,6 +348,17 @@ export async function mongoSyncPush({ companyId, deviceId = 'unknown', changes =
   const syncContext = { changes, rejectedInvoiceIds: new Set() };
   for (const table of syncTables) {
     const records = Array.isArray(changes[table]) ? changes[table] : [];
+    if (table === 'price_history' && records.length) {
+      results.push(...records.map((record) => ({
+        table,
+        localId: record.localId || record.id || record.serverId || '',
+        serverId: record.serverId || record.id || record.localId || '',
+        status: 'synced_server_generated',
+        reason: 'price_history is generated on the server from invoice_items',
+        record: null
+      })));
+      continue;
+    }
     if (table === 'price_history' && records.length > 1) {
       const skipped = [];
       const allowed = records.filter((record) => {

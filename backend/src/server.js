@@ -4485,7 +4485,7 @@ function searchableCloudItem(item = {}) {
 }
 
 function cloudSupplierName(supplier = {}) {
-  return supplier?.supplierDisplayName || supplier?.displayName || supplier?.name || supplier?.supplierNameEnglish || supplier?.supplierNameChinese || '-';
+  return decodeEscapedText(supplier?.supplierDisplayName || supplier?.displayName || supplier?.name || supplier?.supplierNameEnglish || supplier?.supplierNameChinese || '-');
 }
 
 function cloudPriceForItem(item = {}) {
@@ -4493,7 +4493,7 @@ function cloudPriceForItem(item = {}) {
 }
 
 function cloudItemName(item = {}) {
-  return item.productName
+  return decodeEscapedText(item.productName
     || item.productNameOriginal
     || item.originalName
     || item.itemName
@@ -4503,18 +4503,18 @@ function cloudItemName(item = {}) {
     || item.nameEn
     || item.productNameNormalized
     || item.normalizedName
-    || '';
+    || '');
 }
 
 function cloudProductName(product = {}) {
-  return product.productName
+  return decodeEscapedText(product.productName
     || product.name
     || product.originalName
     || product.itemName
     || product.rawName
     || product.standardName
     || product.normalizedName
-    || '';
+    || '');
 }
 
 function cloudProductSearchText(record = {}, product = {}) {
@@ -4537,7 +4537,102 @@ function cloudProductSearchText(record = {}, product = {}) {
     product.rawName,
     product.standardName,
     product.normalizedName
-  ].map((value) => normalizeProductNameAdvanced(value || '')).join(' ');
+  ].map((value) => normalizeProductNameAdvanced(decodeEscapedText(value || ''))).join(' ');
+}
+
+function escapeRegex(value = '') {
+  return String(value || '').replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+}
+
+function decodeEscapedText(value = '') {
+  const text = String(value || '');
+  if (!/\\u[0-9a-f]{4}/i.test(text)) return text;
+  return text.replace(/\\u([0-9a-f]{4})/gi, (_, hex) => String.fromCharCode(parseInt(hex, 16)));
+}
+
+function unicodeEscapeText(value = '') {
+  return String(value || '').replace(/[^\x00-\x7F]/g, (char) => `\\u${char.charCodeAt(0).toString(16).padStart(4, '0')}`);
+}
+
+function mongoTextSearchFilter(query, fields) {
+  const raw = String(query || '').trim();
+  if (!raw) return {};
+  const normalized = normalizeProductNameAdvanced(raw);
+  const patterns = [...new Set([raw, normalized, unicodeEscapeText(raw), unicodeEscapeText(normalized)]
+    .filter(Boolean)
+    .map((value) => new RegExp(escapeRegex(value), 'i')))];
+  return {
+    $or: fields.flatMap((field) => patterns.map((pattern) => ({ [field]: pattern })))
+  };
+}
+
+async function mongoProductSearchData(companyId, query = '', limit = 20) {
+  const db = await getMongoDb();
+  const safeLimit = Math.min(Math.max(Number(limit || 20), 1), 100);
+  const activeQuery = { companyId, deletedAt: { $in: [null, ''] } };
+  const itemSearch = mongoTextSearchFilter(query, ['productName', 'productNameOriginal', 'rawName', 'name', 'nameCn', 'nameEn', 'productNameNormalized', 'normalizedName']);
+  const priceSearch = mongoTextSearchFilter(query, ['productName', 'productNameOriginal', 'originalName', 'itemName', 'name', 'nameCn', 'nameEn', 'productNameNormalized', 'normalizedName']);
+  const productSearch = mongoTextSearchFilter(query, ['name', 'normalizedName', 'productName', 'standardName']);
+  const [counts, invoiceItems, priceHistory, products] = await Promise.all([
+    Promise.all([
+      db.collection('products').countDocuments(activeQuery),
+      db.collection('invoice_items').countDocuments(activeQuery),
+      db.collection('price_history').countDocuments(activeQuery)
+    ]),
+    db.collection('invoice_items')
+      .find({
+        ...activeQuery,
+        ...itemSearch,
+        isDiscountLine: { $nin: [1, true, '1', 'true'] },
+        candidateOnly: { $nin: [1, true, '1', 'true'] }
+      })
+      .sort({ invoiceDate: -1, createdAt: -1, updatedAt: -1 })
+      .limit(query ? 500 : Math.max(500, safeLimit * 20))
+      .toArray(),
+    db.collection('price_history')
+      .find({
+        ...activeQuery,
+        ...priceSearch,
+        status: { $nin: ['deleted', 'inactive'] }
+      })
+      .sort({ invoiceDate: -1, createdAt: -1, updatedAt: -1 })
+      .limit(query ? 500 : Math.max(500, safeLimit * 20))
+      .toArray(),
+    db.collection('products')
+      .find({ ...activeQuery, ...productSearch })
+      .sort({ updatedAt: -1, createdAt: -1 })
+      .limit(query ? 500 : safeLimit)
+      .toArray()
+  ]);
+  const clean = (record) => {
+    if (!record) return record;
+    const { _id, ...rest } = record;
+    return rest;
+  };
+  const invoiceIds = [...new Set([...invoiceItems, ...priceHistory].flatMap((row) => [row.invoiceId].filter(Boolean)))];
+  const supplierIds = [...new Set([...invoiceItems, ...priceHistory].flatMap((row) => [row.supplierId].filter(Boolean)))];
+  const [invoices, suppliers] = await Promise.all([
+    invoiceIds.length
+      ? db.collection('invoices').find({ companyId, $or: [{ id: { $in: invoiceIds } }, { serverId: { $in: invoiceIds } }, { localId: { $in: invoiceIds } }] }).toArray()
+      : [],
+    supplierIds.length
+      ? db.collection('suppliers').find({ companyId, $or: [{ id: { $in: supplierIds } }, { serverId: { $in: supplierIds } }, { localId: { $in: supplierIds } }] }).toArray()
+      : []
+  ]);
+  return {
+    data: {
+      products: products.map(clean),
+      invoice_items: invoiceItems.map(clean),
+      price_history: priceHistory.map(clean),
+      invoices: invoices.map(clean),
+      suppliers: suppliers.map(clean)
+    },
+    counts: {
+      products: counts[0],
+      invoice_items: counts[1],
+      price_history: counts[2]
+    }
+  };
 }
 
 function cloudProductSummaries(data = {}, query = '') {
@@ -4708,22 +4803,27 @@ app.get('/api/purchase/analytics', requireAuth, asyncHandler(async (req, res) =>
 
 app.get('/api/products/search', requireAuth, asyncHandler(async (req, res) => {
   const rawQuery = String(req.query.q || '').trim();
-  const cloudData = await cloudSyncData(req.user.companyId);
-  const items = cloudProductSummaries(cloudData, rawQuery);
-  const counts = {
-    products: activeCloudRows(cloudData.products || []).length,
-    invoice_items: activeCloudRows(cloudData.invoice_items || []).length,
-    price_history: activeCloudRows(cloudData.price_history || []).length
+  const limit = Math.min(Math.max(Number(req.query.limit || 20), 1), 100);
+  const search = useMongoSync()
+    ? await mongoProductSearchData(req.user.companyId, rawQuery, limit)
+    : { data: await cloudSyncData(req.user.companyId), counts: null };
+  const items = cloudProductSummaries(search.data, rawQuery).slice(0, limit);
+  const counts = search.counts || {
+    products: activeCloudRows(search.data.products || []).length,
+    invoice_items: activeCloudRows(search.data.invoice_items || []).length,
+    price_history: activeCloudRows(search.data.price_history || []).length
   };
   console.log('[products/search] cloud query', {
     companyId: req.user.companyId,
     q: rawQuery,
+    limit,
     counts,
     resultCount: items.length,
     source: useMongoSync() ? 'mongodb' : (usingPostgres ? 'postgres' : 'sqlite')
   });
   res.json({
     items,
+    total: items.length,
     counts,
     companyId: req.user.companyId,
     source: useMongoSync() ? 'mongodb' : (usingPostgres ? 'postgres' : 'sqlite')

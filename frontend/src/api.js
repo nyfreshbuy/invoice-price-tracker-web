@@ -120,6 +120,10 @@ export function getCompanyId() {
   return getAuthSession()?.company?.id || getAuthSession()?.user?.companyId || '';
 }
 
+export function apiUrl(path) {
+  return `${API_BASE}${path.startsWith('/') ? path : `/${path}`}`;
+}
+
 export function fileUrl(path) {
   if (!path) return '';
   if (/^https?:\/\//.test(path)) return path;
@@ -144,7 +148,7 @@ async function request(path, options = {}) {
     options.signal.addEventListener('abort', () => controller.abort(), { once: true });
   }
   let response;
-  const url = `${API_BASE}${path}`;
+  const url = apiUrl(path);
   const isSyncPull = path.startsWith('/api/sync/pull');
   if (isSyncPull) {
     console.log('[SYNC API] pull request', { url, method: options.method || 'GET' });
@@ -270,7 +274,8 @@ export const api = {
     return download(`/api/suppliers/${supplierId}/invoices.xls${query ? `?${query}` : ''}`, `supplier-${supplierId}-invoices.xls`);
   },
 
-  searchProducts: (q) => request(`/api/products/search?q=${encodeURIComponent(q)}`, { timeoutMs: 30000 }),
+  productSearchUrl: (q = '', limit = 20) => apiUrl(`/api/products/search?q=${encodeURIComponent(q)}&limit=${encodeURIComponent(limit)}`),
+  searchProducts: (q, limit = 20) => request(`/api/products/search?q=${encodeURIComponent(q)}&limit=${encodeURIComponent(limit)}`, { timeoutMs: 30000 }),
   getProduct: (name) => request(`/api/products/${encodeURIComponent(name)}`),
   getProductPriceHistory: (id) => request(`/api/products/${encodeURIComponent(id)}/price-history`),
   getDashboardStats: () => request('/api/dashboard/stats'),

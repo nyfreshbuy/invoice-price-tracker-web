@@ -2536,7 +2536,7 @@ function ProductSearchPage() {
         const online = navigator.onLine !== false;
         if (online) {
           try {
-          data = await api.searchProducts(keyword);
+          data = await api.searchProducts(keyword, keyword.trim() ? 100 : 20);
           console.info('[products] cloud search response', {
             q: keyword,
             count: apiItems(data).length,
@@ -2617,6 +2617,9 @@ function ProductSearchPage() {
   const counts = diagnostics?.counts || {};
   const visibleCounts = cloudCounts || counts;
   const isOnline = navigator.onLine !== false;
+  const lastApiDebug = getLastApiDebug();
+  const session = getAuthSession();
+  const productSearchUrl = api.productSearchUrl?.(q, q.trim() ? 100 : 20) || '';
   const syncErrorText = syncSnapshot?.lastError
     || syncSnapshot?.diagnostic?.error
     || (syncSnapshot?.diagnostic?.status === 'failed' ? '同步失败但未返回错误，请查看 Console [SYNC]' : '')
@@ -2643,6 +2646,13 @@ function ProductSearchPage() {
           <Info label={cloudCounts ? 'cloud price_history' : 'price_history'} value={visibleCounts.price_history ?? '-'} />
           {cloudMeta && <Info label="cloud source" value={cloudMeta.source || '-'} />}
           {cloudMeta && <Info label="cloud companyId" value={cloudMeta.companyId || '-'} />}
+          <Info label="当前模式" value={isOnline ? '云端' : '离线缓存'} />
+          <Info label="API URL" value={productSearchUrl || '-'} />
+          <Info label="token" value={session?.token ? '存在' : '无'} />
+          <Info label="companyId" value={cloudMeta?.companyId || session?.company?.id || session?.user?.companyId || '-'} />
+          <Info label="请求状态" value={lastApiDebug?.status ?? '-'} />
+          <Info label="返回数量" value={productResults.length} />
+          <Info label="错误 message" value={searchError || lastApiDebug?.error || '无'} />
           <Info label={'\u540c\u6b65\u72b6\u6001'} value={syncSnapshot?.label || '-'} />
           <Info label={'\u540c\u6b65\u9519\u8bef'} value={syncErrorText} />
         </Section>
