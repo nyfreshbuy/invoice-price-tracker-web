@@ -6,7 +6,8 @@ import './styles.css';
 import { sanitizeAuthStorage } from './api.js';
 
 sanitizeAuthStorage();
-const ACTIVE_CACHE_NAME = 'invoice-price-tracker-utf8-v11';
+const ACTIVE_CACHE_NAME = 'invoice-price-tracker-utf8-v17';
+const ACTIVE_CACHE_VERSION_KEY = 'invoice-price-tracker-cache-version';
 if ('caches' in window) {
   caches.keys()
     .then((keys) => Promise.all(keys
@@ -34,6 +35,14 @@ if ('serviceWorker' in navigator) {
               .filter((key) => key.startsWith('invoice-price-tracker-') && key !== ACTIVE_CACHE_NAME)
               .map((key) => caches.delete(key))))
             .catch(() => {});
+        }
+        try {
+          if (localStorage.getItem(ACTIVE_CACHE_VERSION_KEY) !== ACTIVE_CACHE_NAME) {
+            localStorage.setItem(ACTIVE_CACHE_VERSION_KEY, ACTIVE_CACHE_NAME);
+            window.location.reload();
+          }
+        } catch {
+          window.location.reload();
         }
       }
     });
