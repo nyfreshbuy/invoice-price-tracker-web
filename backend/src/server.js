@@ -4566,40 +4566,65 @@ function mongoTextSearchFilter(query, fields) {
   };
 }
 
-async function mongoProductSearchData(companyId, query = '', limit = 20) {
-  const db = await getMongoDb();
-  const safeLimit = Math.min(Math.max(Number(limit || 20), 1), 100);
+function redactTokenForLog(header = '') {
+  const token = String(header || '').startsWith('Bearer ') ? String(header).slice(7) : '';
+  if (!token) return { present: false, preview: '' };
+  return { present: true, preview: `${token.slice(0, 8)}...${token.slice(-6)}` };
+}
+
+function serializeMongoQueryForLog(value) {
+  if (value instanceof RegExp) return value.toString();
+  if (Array.isArray(value)) return value.map((item) => serializeMongoQueryForLog(item));
+  if (value && typeof value === 'object') {
+    return Object.fromEntries(Object.entries(value).map(([key, item]) => [key, serializeMongoQueryForLog(item)]));
+  }
+  return value;
+}
+
+function mongoProductSearchQueries(companyId, query = '') {
   const activeQuery = { companyId, deletedAt: { $in: [null, ''] } };
   const itemSearch = mongoTextSearchFilter(query, ['productName', 'productNameOriginal', 'rawName', 'name', 'nameCn', 'nameEn', 'productNameNormalized', 'normalizedName']);
   const priceSearch = mongoTextSearchFilter(query, ['productName', 'productNameOriginal', 'originalName', 'itemName', 'name', 'nameCn', 'nameEn', 'productNameNormalized', 'normalizedName']);
   const productSearch = mongoTextSearchFilter(query, ['name', 'normalizedName', 'productName', 'standardName']);
+  return {
+    products: { ...activeQuery, ...productSearch },
+    invoice_items: {
+      ...activeQuery,
+      ...itemSearch,
+      isDiscountLine: { $nin: [1, true, '1', 'true'] },
+      candidateOnly: { $nin: [1, true, '1', 'true'] }
+    },
+    price_history: {
+      ...activeQuery,
+      ...priceSearch,
+      status: { $nin: ['deleted', 'inactive'] }
+    },
+    activeQuery
+  };
+}
+
+async function mongoProductSearchData(companyId, query = '', limit = 20) {
+  const db = await getMongoDb();
+  const safeLimit = Math.min(Math.max(Number(limit || 20), 1), 100);
+  const queries = mongoProductSearchQueries(companyId, query);
   const [counts, invoiceItems, priceHistory, products] = await Promise.all([
     Promise.all([
-      db.collection('products').countDocuments(activeQuery),
-      db.collection('invoice_items').countDocuments(activeQuery),
-      db.collection('price_history').countDocuments(activeQuery)
+      db.collection('products').countDocuments(queries.activeQuery),
+      db.collection('invoice_items').countDocuments(queries.activeQuery),
+      db.collection('price_history').countDocuments(queries.activeQuery)
     ]),
     db.collection('invoice_items')
-      .find({
-        ...activeQuery,
-        ...itemSearch,
-        isDiscountLine: { $nin: [1, true, '1', 'true'] },
-        candidateOnly: { $nin: [1, true, '1', 'true'] }
-      })
+      .find(queries.invoice_items)
       .sort({ invoiceDate: -1, createdAt: -1, updatedAt: -1 })
       .limit(query ? 500 : Math.max(500, safeLimit * 20))
       .toArray(),
     db.collection('price_history')
-      .find({
-        ...activeQuery,
-        ...priceSearch,
-        status: { $nin: ['deleted', 'inactive'] }
-      })
+      .find(queries.price_history)
       .sort({ invoiceDate: -1, createdAt: -1, updatedAt: -1 })
       .limit(query ? 500 : Math.max(500, safeLimit * 20))
       .toArray(),
     db.collection('products')
-      .find({ ...activeQuery, ...productSearch })
+      .find(queries.products)
       .sort({ updatedAt: -1, createdAt: -1 })
       .limit(query ? 500 : safeLimit)
       .toArray()
@@ -4804,6 +4829,7 @@ app.get('/api/purchase/analytics', requireAuth, asyncHandler(async (req, res) =>
 app.get('/api/products/search', requireAuth, asyncHandler(async (req, res) => {
   const rawQuery = String(req.query.q || '').trim();
   const limit = Math.min(Math.max(Number(req.query.limit || 20), 1), 100);
+  const mongoQueries = useMongoSync() ? mongoProductSearchQueries(req.user.companyId, rawQuery) : null;
   const search = useMongoSync()
     ? await mongoProductSearchData(req.user.companyId, rawQuery, limit)
     : { data: await cloudSyncData(req.user.companyId), counts: null };
@@ -4819,7 +4845,9 @@ app.get('/api/products/search', requireAuth, asyncHandler(async (req, res) => {
     limit,
     counts,
     resultCount: items.length,
-    source: useMongoSync() ? 'mongodb' : (usingPostgres ? 'postgres' : 'sqlite')
+    source: useMongoSync() ? 'mongodb' : (usingPostgres ? 'postgres' : 'sqlite'),
+    token: redactTokenForLog(req.headers.authorization || ''),
+    queries: mongoQueries ? serializeMongoQueryForLog(mongoQueries) : null
   });
   res.json({
     items,
@@ -4828,6 +4856,63 @@ app.get('/api/products/search', requireAuth, asyncHandler(async (req, res) => {
     companyId: req.user.companyId,
     source: useMongoSync() ? 'mongodb' : (usingPostgres ? 'postgres' : 'sqlite')
   });
+}));
+
+app.get('/api/debug/product-search', requireAuth, requireAdmin, asyncHandler(async (req, res) => {
+  if (!useMongoSync()) {
+    res.status(400).json({ error: 'MongoDB sync is not enabled for this backend.' });
+    return;
+  }
+  const companyId = req.user.companyId;
+  const q = String(req.query.q || '').trim();
+  const db = await getMongoDb();
+  const queries = mongoProductSearchQueries(companyId, q);
+  const [productsCount, invoiceItemsCount, priceHistoryCount, productsOne, invoiceItemsOne, priceHistoryOne, productsMatchCount, invoiceItemsMatchCount, priceHistoryMatchCount] = await Promise.all([
+    db.collection('products').countDocuments(queries.activeQuery),
+    db.collection('invoice_items').countDocuments(queries.activeQuery),
+    db.collection('price_history').countDocuments(queries.activeQuery),
+    db.collection('products').findOne(queries.activeQuery),
+    db.collection('invoice_items').findOne(queries.activeQuery),
+    db.collection('price_history').findOne(queries.activeQuery),
+    db.collection('products').countDocuments(queries.products),
+    db.collection('invoice_items').countDocuments(queries.invoice_items),
+    db.collection('price_history').countDocuments(queries.price_history)
+  ]);
+  const fieldNames = (record) => record ? Object.keys(record).sort() : [];
+  const sample = (record) => {
+    if (!record) return null;
+    const { _id, ...rest } = record;
+    return rest;
+  };
+  const payload = {
+    companyId,
+    token: redactTokenForLog(req.headers.authorization || ''),
+    q,
+    source: 'mongodb',
+    counts: {
+      products: productsCount,
+      invoice_items: invoiceItemsCount,
+      price_history: priceHistoryCount
+    },
+    matchCounts: {
+      products: productsMatchCount,
+      invoice_items: invoiceItemsMatchCount,
+      price_history: priceHistoryMatchCount
+    },
+    fields: {
+      products: fieldNames(productsOne),
+      invoice_items: fieldNames(invoiceItemsOne),
+      price_history: fieldNames(priceHistoryOne)
+    },
+    findOne: {
+      products: sample(productsOne),
+      invoice_items: sample(invoiceItemsOne),
+      price_history: sample(priceHistoryOne)
+    },
+    queries: serializeMongoQueryForLog(queries)
+  };
+  console.log('[debug/product-search]', payload);
+  res.json(payload);
 }));
 
 app.get('/api/products/:id/price-history', requireAuth, asyncHandler(async (req, res) => {
