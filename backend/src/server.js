@@ -102,12 +102,14 @@ const OCR_LANGUAGE = process.env.OCR_LANG || 'eng+chi_sim';
 const OCR_TIMEOUT_MS = Number(process.env.OCR_TIMEOUT_MS || 120000);
 const AUTH_SECRET = process.env.AUTH_SECRET || 'dev-only-change-me';
 const AUTH_STORE = String(process.env.AUTH_STORE || process.env.AUTH_DB || '').trim().toLowerCase();
+const ENABLE_SQL_MONGO_MIRROR = process.env.ENABLE_SQL_MONGO_MIRROR === 'true';
 
 const hasMongoUri = Boolean(process.env.MONGODB_URI || process.env.MONGO_URL);
 const syncBackend = hasMongoUri ? 'MongoDB' : (usingPostgres ? 'PostgreSQL' : 'SQLite');
 console.log('Mongo URI configured:', !!process.env.MONGODB_URI);
 console.log(`[database] mode: ${syncBackend}`);
 console.log(`[sync] enabled (${syncBackend})`);
+console.log(`[sync/mirror] ${ENABLE_SQL_MONGO_MIRROR ? 'enabled' : 'disabled'}`);
 console.log('[mongo] startup status:', getMongoConnectionSnapshot());
 
 function useMongoAuth() {
@@ -123,6 +125,9 @@ function useMongoAuth() {
 function useMongoSync() {
   return hasMongoUri && process.env.USE_MONGO_SYNC !== 'false';
 }
+
+const syncPullRunningCompanies = new Set();
+const mirrorRunningCompanies = new Set();
 
 const localDevOrigins = [
   'http://localhost:5173',
@@ -1868,6 +1873,16 @@ function countSyncResultTables(results = []) {
 
 async function mirrorSqlSyncDataToMongo(companyId, reason = 'server-save', since = '') {
   if (!useMongoSync()) return null;
+  if (!ENABLE_SQL_MONGO_MIRROR) {
+    console.log('[sync/mirror] skipped:', { reason, companyId, since, disabled: true });
+    return { ok: true, skipped: true, disabled: true };
+  }
+  const mirrorKey = `${companyId}:${reason}:${since || 'full'}`;
+  if (mirrorRunningCompanies.has(mirrorKey)) {
+    console.warn('[sync/mirror] skipped duplicate run:', { reason, companyId, since });
+    return { ok: true, skipped: true, duplicate: true };
+  }
+  mirrorRunningCompanies.add(mirrorKey);
   try {
     const changes = await allSyncData(companyId, since);
     const counts = countSyncRecords(changes);
@@ -1884,6 +1899,8 @@ async function mirrorSqlSyncDataToMongo(companyId, reason = 'server-save', since
   } catch (error) {
     console.error('[sync/mirror] failed:', { reason, companyId, since, error: error?.stack || error?.message || String(error) });
     return null;
+  } finally {
+    mirrorRunningCompanies.delete(mirrorKey);
   }
 }
 
@@ -3625,9 +3642,15 @@ app.get('/api/sync/pull', requireAuth, asyncHandler(async (req, res) => {
   const companyId = req.user.companyId;
   const since = req.query.since || '';
   console.log('[SYNC PULL] start:', { companyId, since, backend: syncBackend });
+  const lockKey = `${companyId}:${since || 'full'}`;
+  if (syncPullRunningCompanies.has(lockKey)) {
+    console.warn('[SYNC PULL] duplicate request skipped:', { companyId, since });
+    res.status(429).json({ ok: false, error: 'sync pull already running, retry shortly', companyId, since, data: {}, serverTime: nowIso() });
+    return;
+  }
+  syncPullRunningCompanies.add(lockKey);
   if (useMongoSync()) {
     try {
-      await mirrorSqlSyncDataToMongo(companyId, 'sync-pull', since);
       const result = await mongoSyncPull({ companyId, since });
       console.log('[SYNC PULL] finish:', { companyId, backend: 'mongodb', since, counts: countSyncRecords(result.data || {}) });
       res.json(result);
@@ -3635,6 +3658,8 @@ app.get('/api/sync/pull', requireAuth, asyncHandler(async (req, res) => {
     } catch (error) {
       console.error('[SYNC PULL] error:', { companyId, backend: 'mongodb', since, message: error.message, stack: error.stack });
       throw error;
+    } finally {
+      syncPullRunningCompanies.delete(lockKey);
     }
   }
   try {
@@ -3644,6 +3669,8 @@ app.get('/api/sync/pull', requireAuth, asyncHandler(async (req, res) => {
   } catch (error) {
     console.error('[SYNC PULL] error:', { companyId, backend: usingPostgres ? 'postgres' : 'sqlite', since, message: error.message, stack: error.stack });
     throw error;
+  } finally {
+    syncPullRunningCompanies.delete(lockKey);
   }
 }));
 
