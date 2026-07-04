@@ -2520,47 +2520,70 @@ function ProductSearchPage() {
   const [diagnostics, setDiagnostics] = useState(null);
   const [syncSnapshot, setSyncSnapshot] = useState(null);
   const [searchError, setSearchError] = useState('');
+  const [searchLoading, setSearchLoading] = useState(false);
+  const [searchElapsedMs, setSearchElapsedMs] = useState(null);
+  const [searchReturnedCount, setSearchReturnedCount] = useState(0);
   const [cloudCounts, setCloudCounts] = useState(null);
   const [cloudMeta, setCloudMeta] = useState(null);
   const searchSeq = useRef(0);
   useEffect(() => {
     let cancelled = false;
+    const controller = new AbortController();
     const run = async () => {
       const seq = searchSeq.current + 1;
       searchSeq.current = seq;
-      const keyword = q;
+      const keyword = q.trim();
+      const online = navigator.onLine !== false;
+      const chineseQuery = /[\u3400-\u9fff]/.test(keyword);
+      if (keyword && keyword.length < 2 && !chineseQuery) {
+        setResults([]);
+        setSearchError('请输入至少 2 个字符再搜索');
+        setSearchLoading(false);
+        setSearchElapsedMs(0);
+        setSearchReturnedCount(0);
+        return;
+      }
+      const startedAt = performance.now();
+      if (!cancelled) {
+        setSearchLoading(true);
+        setSearchError('');
+      }
       try {
-        console.info('[products] cloud search request', { q: keyword });
+        console.info('[products] cloud search request', { q: keyword, limit: 20 });
         let data;
         let nextSearchError = '';
-        const online = navigator.onLine !== false;
         if (online) {
           try {
-          data = await api.searchProducts(keyword, keyword.trim() ? 100 : 20);
-          console.info('[products] cloud search response', {
-            q: keyword,
-            count: apiItems(data).length,
-            counts: data?.counts || null,
-            source: data?.source || 'cloud'
-          });
-          if (!cancelled && searchSeq.current === seq) setCloudCounts(data?.counts || null);
-          if (!cancelled && searchSeq.current === seq) setCloudMeta({ companyId: data?.companyId || '', source: data?.source || 'cloud' });
-        } catch (cloudError) {
-          console.warn('[products] cloud search failed, falling back to IndexedDB', cloudError);
-          nextSearchError = productSearchErrorMessage(cloudError);
+            data = await api.searchProducts(keyword, 20, { signal: controller.signal });
+            console.info('[products] cloud search response', {
+              q: keyword,
+              count: apiItems(data).length,
+              counts: data?.counts || null,
+              source: data?.source || 'cloud',
+              elapsedMs: Math.round(performance.now() - startedAt)
+            });
+            if (!cancelled && searchSeq.current === seq) setCloudCounts(data?.counts || null);
+            if (!cancelled && searchSeq.current === seq) setCloudMeta({ companyId: data?.companyId || '', source: data?.source || 'cloud' });
+          } catch (cloudError) {
+            if (cloudError?.name === 'AbortError') return;
+            console.warn('[products] cloud search failed', cloudError);
+            nextSearchError = productSearchErrorMessage(cloudError);
+            data = { items: [] };
+            if (!cancelled && searchSeq.current === seq) setCloudCounts(null);
+            if (!cancelled && searchSeq.current === seq) setCloudMeta(null);
+          }
+        } else {
+          nextSearchError = '当前离线，正在显示本地缓存';
           data = await localDb.searchProducts(keyword);
           if (!cancelled && searchSeq.current === seq) setCloudCounts(null);
           if (!cancelled && searchSeq.current === seq) setCloudMeta(null);
         }
-      } else {
-        nextSearchError = '当前离线，正在显示本地缓存';
-        data = await localDb.searchProducts(keyword);
-        if (!cancelled && searchSeq.current === seq) setCloudCounts(null);
-        if (!cancelled && searchSeq.current === seq) setCloudMeta(null);
-      }
+        const items = apiItems(data);
         if (!cancelled && searchSeq.current === seq) {
-          setResults(apiItems(data));
+          setResults(items);
           setSearchError(nextSearchError);
+          setSearchReturnedCount(items.length);
+          setSearchElapsedMs(Math.round(performance.now() - startedAt));
         }
         const [localDiagnostics, snapshot] = await Promise.all([
           localDb.getLocalDiagnostics().catch((error) => ({
@@ -2581,10 +2604,13 @@ function ProductSearchPage() {
           setSyncSnapshot(snapshot);
         }
       } catch (error) {
+        if (error?.name === 'AbortError') return;
         recordPageError(error, { componentStack: 'ProductSearchPage' }, 'searchProducts');
         if (!cancelled && searchSeq.current === seq) {
           setResults([]);
           setSearchError(productSearchErrorMessage(error));
+          setSearchReturnedCount(0);
+          setSearchElapsedMs(Math.round(performance.now() - startedAt));
           setCloudCounts(null);
           setCloudMeta(null);
           setDiagnostics({
@@ -2600,16 +2626,15 @@ function ProductSearchPage() {
             lastError: errorMessage(error)
           });
         }
+      } finally {
+        if (!cancelled && searchSeq.current === seq) setSearchLoading(false);
       }
     };
-    const handler = () => run();
-    run();
-    window.addEventListener('local-db-change', handler);
-    window.addEventListener('sync-state-change', handler);
+    const timer = window.setTimeout(run, 500);
     return () => {
       cancelled = true;
-      window.removeEventListener('local-db-change', handler);
-      window.removeEventListener('sync-state-change', handler);
+      controller.abort();
+      window.clearTimeout(timer);
     };
   }, [q]);
   const productResults = safeArray(results);
@@ -2619,7 +2644,7 @@ function ProductSearchPage() {
   const isOnline = navigator.onLine !== false;
   const lastApiDebug = getLastApiDebug();
   const session = getAuthSession();
-  const productSearchUrl = api.productSearchUrl?.(q, q.trim() ? 100 : 20) || '';
+  const productSearchUrl = api.productSearchUrl?.(q.trim(), 20) || '';
   const syncErrorText = syncSnapshot?.lastError
     || syncSnapshot?.diagnostic?.error
     || (syncSnapshot?.diagnostic?.status === 'failed' ? '同步失败但未返回错误，请查看 Console [SYNC]' : '')
@@ -2638,6 +2663,7 @@ function ProductSearchPage() {
       {productResults.length === 0 && (
         <EmptyState text={emptyText} />
       )}
+      {searchLoading && <p className="hint">搜索中...</p>}
       {productResults.length === 0 && (
         <Section title={'\u672c\u5730\u6570\u636e\u8bca\u65ad'}>
           {searchError && <p className="error">{searchError}</p>}
@@ -2652,6 +2678,8 @@ function ProductSearchPage() {
           <Info label="companyId" value={cloudMeta?.companyId || session?.company?.id || session?.user?.companyId || '-'} />
           <Info label="请求状态" value={lastApiDebug?.status ?? '-'} />
           <Info label="返回数量" value={productResults.length} />
+          <Info label="搜索用时 ms" value={searchElapsedMs ?? '-'} />
+          <Info label="本次返回数量" value={searchReturnedCount} />
           <Info label="错误 message" value={searchError || lastApiDebug?.error || '无'} />
           <Info label={'\u540c\u6b65\u72b6\u6001'} value={syncSnapshot?.label || '-'} />
           <Info label={'\u540c\u6b65\u9519\u8bef'} value={syncErrorText} />

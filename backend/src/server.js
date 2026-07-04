@@ -4603,10 +4603,91 @@ function mongoProductSearchQueries(companyId, query = '') {
   };
 }
 
+const productSearchProjections = {
+  products: {
+    _id: 0,
+    id: 1,
+    serverId: 1,
+    localId: 1,
+    productName: 1,
+    name: 1,
+    normalizedName: 1,
+    standardName: 1,
+    originalName: 1,
+    updatedAt: 1,
+    createdAt: 1
+  },
+  invoice_items: {
+    _id: 0,
+    id: 1,
+    serverId: 1,
+    localId: 1,
+    productId: 1,
+    invoiceId: 1,
+    supplierId: 1,
+    supplierName: 1,
+    productName: 1,
+    productNameOriginal: 1,
+    originalName: 1,
+    itemName: 1,
+    rawName: 1,
+    name: 1,
+    nameCn: 1,
+    nameEn: 1,
+    productNameNormalized: 1,
+    normalizedName: 1,
+    quantity: 1,
+    actualQty: 1,
+    totalQty: 1,
+    unitPrice: 1,
+    effectiveUnitCost: 1,
+    discountedEffectiveUnitCost: 1,
+    totalPrice: 1,
+    invoiceDate: 1,
+    invoiceNo: 1,
+    createdAt: 1,
+    updatedAt: 1,
+    nameQualityStatus: 1
+  },
+  price_history: {
+    _id: 0,
+    id: 1,
+    serverId: 1,
+    localId: 1,
+    productId: 1,
+    invoiceId: 1,
+    invoiceItemId: 1,
+    supplierId: 1,
+    supplierName: 1,
+    productName: 1,
+    productNameOriginal: 1,
+    originalName: 1,
+    itemName: 1,
+    name: 1,
+    nameCn: 1,
+    nameEn: 1,
+    productNameNormalized: 1,
+    normalizedName: 1,
+    price: 1,
+    unitPrice: 1,
+    effectiveUnitCost: 1,
+    quantity: 1,
+    totalPrice: 1,
+    amount: 1,
+    invoiceDate: 1,
+    invoiceNo: 1,
+    status: 1,
+    createdAt: 1,
+    updatedAt: 1,
+    nameQualityStatus: 1
+  }
+};
+
 async function mongoProductSearchData(companyId, query = '', limit = 20) {
   const db = await getMongoDb();
   const safeLimit = Math.min(Math.max(Number(limit || 20), 1), 100);
   const queries = mongoProductSearchQueries(companyId, query);
+  const queryLimit = query ? Math.min(safeLimit * 3, 60) : Math.max(safeLimit * 4, 80);
   const [counts, invoiceItems, priceHistory, products] = await Promise.all([
     Promise.all([
       db.collection('products').countDocuments(queries.activeQuery),
@@ -4615,18 +4696,21 @@ async function mongoProductSearchData(companyId, query = '', limit = 20) {
     ]),
     db.collection('invoice_items')
       .find(queries.invoice_items)
+      .project(productSearchProjections.invoice_items)
       .sort({ invoiceDate: -1, createdAt: -1, updatedAt: -1 })
-      .limit(query ? 500 : Math.max(500, safeLimit * 20))
+      .limit(queryLimit)
       .toArray(),
     db.collection('price_history')
       .find(queries.price_history)
+      .project(productSearchProjections.price_history)
       .sort({ invoiceDate: -1, createdAt: -1, updatedAt: -1 })
-      .limit(query ? 500 : Math.max(500, safeLimit * 20))
+      .limit(queryLimit)
       .toArray(),
     db.collection('products')
       .find(queries.products)
+      .project(productSearchProjections.products)
       .sort({ updatedAt: -1, createdAt: -1 })
-      .limit(query ? 500 : safeLimit)
+      .limit(query ? queryLimit : safeLimit)
       .toArray()
   ]);
   const clean = (record) => {

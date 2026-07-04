@@ -275,7 +275,7 @@ export const api = {
   },
 
   productSearchUrl: (q = '', limit = 20) => apiUrl(`/api/products/search?q=${encodeURIComponent(q)}&limit=${encodeURIComponent(limit)}`),
-  searchProducts: (q, limit = 20) => request(`/api/products/search?q=${encodeURIComponent(q)}&limit=${encodeURIComponent(limit)}`, { timeoutMs: 30000 }),
+  searchProducts: (q, limit = 20, options = {}) => request(`/api/products/search?q=${encodeURIComponent(q)}&limit=${encodeURIComponent(limit)}`, { timeoutMs: 30000, ...options }),
   getProduct: (name) => request(`/api/products/${encodeURIComponent(name)}`),
   getProductPriceHistory: (id) => request(`/api/products/${encodeURIComponent(id)}/price-history`),
   getDashboardStats: () => request('/api/dashboard/stats'),

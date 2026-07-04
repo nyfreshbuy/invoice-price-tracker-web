@@ -142,7 +142,17 @@ export async function getMongoDb() {
       db.collection('companies').createIndex({ id: 1 }, { unique: true }),
       db.collection('company_invitations').createIndex({ token: 1 }, { unique: true }),
       db.collection('company_invitations').createIndex({ company_id: 1, created_at: -1 }),
-      db.collection('company_invitations').createIndex({ email: 1, status: 1 })
+      db.collection('company_invitations').createIndex({ email: 1, status: 1 }),
+      db.collection('products').createIndex({ companyId: 1, name: 1 }),
+      db.collection('products').createIndex({ companyId: 1, normalizedName: 1 }),
+      db.collection('products').createIndex({ companyId: 1, productName: 1 }),
+      db.collection('invoice_items').createIndex({ companyId: 1, productName: 1 }),
+      db.collection('invoice_items').createIndex({ companyId: 1, productNameOriginal: 1 }),
+      db.collection('invoice_items').createIndex({ companyId: 1, normalizedName: 1 }),
+      db.collection('invoice_items').createIndex({ companyId: 1, invoiceDate: -1 }),
+      db.collection('price_history').createIndex({ companyId: 1, productName: 1 }),
+      db.collection('price_history').createIndex({ companyId: 1, normalizedName: 1 }),
+      db.collection('price_history').createIndex({ companyId: 1, invoiceDate: -1 })
     ]);
     indexesReady = true;
     console.info('[mongo] indexes ready');
